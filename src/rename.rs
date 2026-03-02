@@ -321,16 +321,17 @@ pub fn rename_symbol(
     let cursor_byte = goto::pos_to_bytes(source_bytes, position);
     if let Some(alias_name) = ts_alias_local_name_at_cursor(source_bytes, cursor_byte) {
         if alias_name == original_identifier {
-            let mut locations =
-                ts_collect_identifier_locations(source_bytes, file_uri, &alias_name);
-            // Also collect from other files open in text_buffers
-            for (uri_str, buf) in text_buffers.iter() {
-                if let Ok(uri) = Url::parse(uri_str) {
-                    if uri != *file_uri {
-                        locations.extend(ts_collect_identifier_locations(buf, &uri, &alias_name));
-                    }
-                }
-            }
+            // Import alias local names (`MyTest` in `import {Test as MyTest}`,
+            // `AFile` in `import "./A.sol" as AFile`) are scoped to the file
+            // that declares them.  Scan only the current file — either from the
+            // in-memory buffer (unsaved edits) or from disk — not every open
+            // document, which would produce false positives for identifiers that
+            // happen to share the same spelling in unrelated files.
+            let file_bytes = text_buffers
+                .get(file_uri.as_str())
+                .cloned()
+                .unwrap_or_else(|| source_bytes.to_vec());
+            let locations = ts_collect_identifier_locations(&file_bytes, file_uri, &alias_name);
             return build_workspace_edit(
                 locations,
                 &alias_name,
@@ -367,25 +368,6 @@ pub fn rename_symbol(
             locations.extend(other_locations);
         }
     }
-
-    // Filter to locations whose text matches the original identifier.
-    // This prevents aliased imports from bleeding into unrelated references:
-    // e.g. `MyTest` (alias for `Test`) has the same referencedDeclaration as
-    // `Test`, so without filtering, renaming `MyTest` would also rename `Test`
-    // usages and vice-versa.
-    locations.retain(|loc| {
-        let file_source_bytes = if let Some(buf) = text_buffers.get(loc.uri.as_str()) {
-            buf.clone()
-        } else {
-            loc.uri
-                .to_file_path()
-                .ok()
-                .and_then(|p| std::fs::read(&p).ok())
-                .unwrap_or_default()
-        };
-        let text = get_text_at_range(&file_source_bytes, &loc.range);
-        text.as_deref() == Some(&original_identifier)
-    });
 
     build_workspace_edit(
         locations,
@@ -441,11 +423,20 @@ fn build_workspace_edit(
         };
         let text_at_range = get_text_at_range(&file_source_bytes, &location.range);
         let actual_range = if text_at_range.as_deref() == Some(original_identifier) {
-            // Range matches the buffer — use it directly
+            // Range matches the buffer — use it directly.
             location.range
+        } else if text_at_range.is_some_and(|t| !t.is_empty()) {
+            // The range resolves to a non-empty, different identifier.  This
+            // happens when the AST returned an alias's referent (e.g. `Test`
+            // when we are renaming `MyTest`) — the range is not stale, it just
+            // points to the wrong symbol.  Skip without attempting a line scan,
+            // which would incorrectly find `original_identifier` elsewhere on
+            // the same line.
+            continue;
         } else {
-            // Range is stale (e.g. buffer was edited but not saved).
-            // Search the same line for the identifier and correct the range.
+            // Range is out-of-bounds or empty — the AST range is stale (buffer
+            // was edited but not saved since the last build).  Search the same
+            // line for the identifier and correct the range.
             match find_identifier_on_line(
                 &file_source_bytes,
                 location.range.start.line,
