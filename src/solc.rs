@@ -1366,9 +1366,17 @@ async fn solc_project_index_from_files(
     let project_version: Option<SemVer> =
         config.solc_version.as_ref().and_then(|v| SemVer::parse(v));
 
-    let constraint: Option<PragmaConstraint> = project_version
-        .as_ref()
-        .map(|v| PragmaConstraint::Exact(v.clone()));
+    // When no version is pinned in foundry.toml, derive a constraint from the
+    // source files' pragmas so that svm can auto-install a matching binary.
+    let constraint: Option<PragmaConstraint> = if let Some(ref v) = project_version {
+        Some(PragmaConstraint::Exact(v.clone()))
+    } else {
+        source_files.iter().find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|src| parse_pragma(&src))
+        })
+    };
     let solc_binary = resolve_solc_binary(config, constraint.as_ref(), client).await;
 
     // -- Pre-scan pragmas to separate compatible vs incompatible files. --
