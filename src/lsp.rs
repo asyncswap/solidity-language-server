@@ -70,6 +70,10 @@ pub struct ForgeLsp {
     /// URIs recently scaffolded in willCreateFiles (used to avoid re-applying
     /// edits again in didCreateFiles for the same create operation).
     pending_create_scaffold: Arc<RwLock<HashSet<String>>>,
+    /// Whether settings were loaded from `initializationOptions`.  When false,
+    /// the server will pull settings via `workspace/configuration` during
+    /// `initialized()`.
+    settings_from_init: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ForgeLsp {
@@ -109,6 +113,7 @@ impl ForgeLsp {
             project_cache_changed_files: Arc::new(RwLock::new(HashSet::new())),
             project_cache_upsert_files: Arc::new(RwLock::new(HashSet::new())),
             pending_create_scaffold: Arc::new(RwLock::new(HashSet::new())),
+            settings_from_init: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -303,7 +308,10 @@ impl ForgeLsp {
                 self.client
                     .log_message(
                         MessageType::WARNING,
-                        format!("references warm-load reconcile: scoped reindex failed: {}", e),
+                        format!(
+                            "references warm-load reconcile: scoped reindex failed: {}",
+                            e
+                        ),
                     )
                     .await;
                 Some(arc)
@@ -728,14 +736,14 @@ impl ForgeLsp {
                                 client
                                     .send_notification::<notification::Progress>(ProgressParams {
                                         token: token.clone(),
-                                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                                            WorkDoneProgressEnd {
+                                        value: ProgressParamsValue::WorkDone(
+                                            WorkDoneProgress::End(WorkDoneProgressEnd {
                                                 message: Some(format!(
                                                     "Loaded {} source files from cache",
                                                     source_count
                                                 )),
-                                            },
-                                        )),
+                                            }),
+                                        ),
                                     })
                                     .await;
                                 return;
@@ -809,9 +817,7 @@ impl ForgeLsp {
                                     client_for_save
                                         .log_message(
                                             MessageType::WARNING,
-                                            format!(
-                                                "project index: failed to persist cache: {e}"
-                                            ),
+                                            format!("project index: failed to persist cache: {e}"),
                                         )
                                         .await;
                                 }
@@ -819,9 +825,7 @@ impl ForgeLsp {
                                     client_for_save
                                         .log_message(
                                             MessageType::WARNING,
-                                            format!(
-                                                "project index: cache save task failed: {e}"
-                                            ),
+                                            format!("project index: cache save task failed: {e}"),
                                         )
                                         .await;
                                 }
@@ -1054,7 +1058,9 @@ fn resolve_import_spec_to_abs(
         }
         if import_path.starts_with(prefix) {
             let suffix = import_path.strip_prefix(prefix).unwrap_or_default();
-            return Some(lexical_normalize(&project_root.join(format!("{target}{suffix}"))));
+            return Some(lexical_normalize(
+                &project_root.join(format!("{target}{suffix}")),
+            ));
         }
     }
 
@@ -1235,8 +1241,12 @@ fn merge_scoped_cached_build(
             .map(|path| !affected_paths.contains(path))
             .unwrap_or(true)
     });
-    existing.nodes.retain(|path, _| !affected_paths.contains(path));
-    existing.path_to_abs.retain(|path, _| !affected_paths.contains(path));
+    existing
+        .nodes
+        .retain(|path, _| !affected_paths.contains(path));
+    existing
+        .path_to_abs
+        .retain(|path, _| !affected_paths.contains(path));
     existing
         .id_to_path_map
         .retain(|_, path| !affected_paths.contains(path));
@@ -1258,9 +1268,11 @@ fn merge_scoped_cached_build(
             .map(|(path, _)| !affected_paths.contains(path))
             .unwrap_or(true)
     });
-    existing
-        .doc_index
-        .retain(|k, _| doc_key_path(k).map(|p| !affected_paths.contains(p)).unwrap_or(true));
+    existing.doc_index.retain(|k, _| {
+        doc_key_path(k)
+            .map(|p| !affected_paths.contains(p))
+            .unwrap_or(true)
+    });
 
     existing.nodes.extend(scoped.nodes);
     existing.path_to_abs.extend(scoped.path_to_abs);
@@ -1306,6 +1318,8 @@ impl LanguageServer for ForgeLsp {
                 .await;
             let mut settings = self.settings.write().await;
             *settings = s;
+            self.settings_from_init
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Store root URI for project-wide file discovery.
@@ -1607,6 +1621,62 @@ impl LanguageServer for ForgeLsp {
             }
         }
 
+        // Pull settings from the client via workspace/configuration.
+        // Neovim (and other editors) expose user settings through this
+        // request rather than initializationOptions, so we need to pull
+        // them explicitly if initializationOptions was absent.
+        if !self
+            .settings_from_init
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let supports_config = self
+                .client_capabilities
+                .read()
+                .await
+                .as_ref()
+                .and_then(|caps| caps.workspace.as_ref())
+                .and_then(|ws| ws.configuration)
+                .unwrap_or(false);
+
+            if supports_config {
+                match self
+                    .client
+                    .configuration(vec![ConfigurationItem {
+                        scope_uri: None,
+                        section: Some("solidity-language-server".to_string()),
+                    }])
+                    .await
+                {
+                    Ok(values) => {
+                        if let Some(val) = values.into_iter().next() {
+                            if !val.is_null() {
+                                let s = config::parse_settings(&val);
+                                self.client
+                                    .log_message(
+                                        MessageType::INFO,
+                                        format!(
+                                            "settings (workspace/configuration): lint.enabled={}, lint.exclude={:?}, projectIndex.fullProjectScan={}, projectIndex.cacheMode={:?}",
+                                            s.lint.enabled, s.lint.exclude, s.project_index.full_project_scan, s.project_index.cache_mode,
+                                        ),
+                                    )
+                                    .await;
+                                let mut settings = self.settings.write().await;
+                                *settings = s;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("workspace/configuration request failed: {e}"),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
         // Eagerly build the project index on startup so cross-file features
         // (willRenameFiles, references, goto) work immediately — even before
         // the user opens any .sol file.
@@ -1692,14 +1762,14 @@ impl LanguageServer for ForgeLsp {
                                 client
                                     .send_notification::<notification::Progress>(ProgressParams {
                                         token: token.clone(),
-                                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                                            WorkDoneProgressEnd {
+                                        value: ProgressParamsValue::WorkDone(
+                                            WorkDoneProgress::End(WorkDoneProgressEnd {
                                                 message: Some(format!(
                                                     "Loaded {} source files from cache",
                                                     source_count
                                                 )),
-                                            },
-                                        )),
+                                            }),
+                                        ),
                                     })
                                     .await;
                                 return;
@@ -2099,7 +2169,8 @@ impl LanguageServer for ForgeLsp {
             && settings_snapshot.project_index.full_project_scan
             && matches!(
                 settings_snapshot.project_index.cache_mode,
-                crate::config::ProjectIndexCacheMode::V2 | crate::config::ProjectIndexCacheMode::Auto
+                crate::config::ProjectIndexCacheMode::V2
+                    | crate::config::ProjectIndexCacheMode::Auto
             )
             && let Ok(saved_file_path) = saved_uri.to_file_path()
         {
@@ -2137,10 +2208,7 @@ impl LanguageServer for ForgeLsp {
                             self.client
                                 .log_message(
                                     MessageType::WARNING,
-                                    format!(
-                                        "project cache v2 upsert (immediate) failed: {}",
-                                        e
-                                    ),
+                                    format!("project cache v2 upsert (immediate) failed: {}", e),
                                 )
                                 .await;
                         }
@@ -2167,7 +2235,8 @@ impl LanguageServer for ForgeLsp {
             && settings_snapshot.project_index.full_project_scan
             && matches!(
                 settings_snapshot.project_index.cache_mode,
-                crate::config::ProjectIndexCacheMode::V2 | crate::config::ProjectIndexCacheMode::Auto
+                crate::config::ProjectIndexCacheMode::V2
+                    | crate::config::ProjectIndexCacheMode::Auto
             )
         {
             if start_or_mark_project_cache_upsert_pending(
@@ -2202,8 +2271,10 @@ impl LanguageServer for ForgeLsp {
                             continue;
                         }
 
-                        let mut work_items: Vec<(crate::config::FoundryConfig, crate::goto::CachedBuild)> =
-                            Vec::new();
+                        let mut work_items: Vec<(
+                            crate::config::FoundryConfig,
+                            crate::goto::CachedBuild,
+                        )> = Vec::new();
                         {
                             let cache = ast_cache.read().await;
                             for abs_str in changed_paths {
@@ -2352,14 +2423,13 @@ impl LanguageServer for ForgeLsp {
                         if aggressive_scoped {
                             let changed_abs: Vec<PathBuf> = {
                                 let mut changed = changed_files.write().await;
-                                let drained = changed
-                                    .drain()
-                                    .map(PathBuf::from)
-                                    .collect::<Vec<PathBuf>>();
+                                let drained =
+                                    changed.drain().map(PathBuf::from).collect::<Vec<PathBuf>>();
                                 drained
                             };
                             if !changed_abs.is_empty() {
-                                let remappings = crate::solc::resolve_remappings(&foundry_config).await;
+                                let remappings =
+                                    crate::solc::resolve_remappings(&foundry_config).await;
                                 let cfg_for_plan = foundry_config.clone();
                                 let changed_for_plan = changed_abs.clone();
                                 let remappings_for_plan = remappings.clone();
@@ -2397,8 +2467,9 @@ impl LanguageServer for ForgeLsp {
                                     .await
                                     {
                                         Ok(ast_data) => {
-                                            let scoped_build =
-                                                Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
+                                            let scoped_build = Arc::new(
+                                                crate::goto::CachedBuild::new(ast_data, 0),
+                                            );
                                             let source_count = scoped_build.nodes.len();
                                             enum ScopedApply {
                                                 Merged { affected_count: usize },
@@ -2407,7 +2478,9 @@ impl LanguageServer for ForgeLsp {
                                             }
                                             let apply_outcome = {
                                                 let mut cache = ast_cache.write().await;
-                                                if let Some(existing) = cache.get(cache_key).cloned() {
+                                                if let Some(existing) =
+                                                    cache.get(cache_key).cloned()
+                                                {
                                                     let mut merged = (*existing).clone();
                                                     match merge_scoped_cached_build(
                                                         &mut merged,
@@ -2454,7 +2527,7 @@ impl LanguageServer for ForgeLsp {
                                                     scoped_ok = true;
                                                 }
                                                 ScopedApply::Failed(e) => {
-                                                client
+                                                    client
                                                     .log_message(
                                                         MessageType::WARNING,
                                                         format!(
@@ -2462,7 +2535,7 @@ impl LanguageServer for ForgeLsp {
                                                         ),
                                                     )
                                                     .await;
-                                                dirty_flag.store(true, Ordering::Release);
+                                                    dirty_flag.store(true, Ordering::Release);
                                                 }
                                             }
                                         }
@@ -2511,7 +2584,10 @@ impl LanguageServer for ForgeLsp {
                                     Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
                                 let source_count = cached_build.nodes.len();
                                 let build_for_save = (*cached_build).clone();
-                                ast_cache.write().await.insert(cache_key.clone(), cached_build);
+                                ast_cache
+                                    .write()
+                                    .await
+                                    .insert(cache_key.clone(), cached_build);
 
                                 let cfg_for_save = foundry_config.clone();
                                 let save_res = tokio::task::spawn_blocking(move || {
@@ -3188,8 +3264,10 @@ impl LanguageServer for ForgeLsp {
                             let mut cache = self.ast_cache.write().await;
                             let merged = if let Some(existing) = cache.get(&root_key).cloned() {
                                 let mut merged = (*existing).clone();
-                                match merge_scoped_cached_build(&mut merged, (*scoped_build).clone())
-                                {
+                                match merge_scoped_cached_build(
+                                    &mut merged,
+                                    (*scoped_build).clone(),
+                                ) {
                                     Ok(_) => Arc::new(merged),
                                     Err(_) => scoped_build.clone(),
                                 }
@@ -5029,7 +5107,9 @@ mod tests {
         assert!(running.load(Ordering::Acquire));
 
         // Subsequent save while running should only mark pending, not spawn.
-        assert!(!start_or_mark_project_cache_sync_pending(&pending, &running));
+        assert!(!start_or_mark_project_cache_sync_pending(
+            &pending, &running
+        ));
         assert!(pending.load(Ordering::Acquire));
         assert!(running.load(Ordering::Acquire));
     }
