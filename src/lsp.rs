@@ -172,7 +172,7 @@ impl ForgeLsp {
         let cache_mode = settings.project_index.cache_mode.clone();
         let cfg_for_load = foundry_config.clone();
         let load_res = tokio::task::spawn_blocking(move || {
-            crate::project_cache::load_reference_cache_with_report(&cfg_for_load, cache_mode)
+            crate::project_cache::load_reference_cache_with_report(&cfg_for_load, cache_mode, true)
         })
         .await;
 
@@ -213,7 +213,7 @@ impl ForgeLsp {
         // and persist back to disk so subsequent opens are fast and complete.
         let cfg_for_diff = foundry_config.clone();
         let changed = tokio::task::spawn_blocking(move || {
-            crate::project_cache::changed_files_since_v2_cache(&cfg_for_diff)
+            crate::project_cache::changed_files_since_v2_cache(&cfg_for_diff, true)
         })
         .await
         .ok()
@@ -286,6 +286,7 @@ impl ForgeLsp {
                     crate::project_cache::save_reference_cache_with_report(
                         &cfg_for_save,
                         &build_for_save,
+                        None,
                     )
                 })
                 .await;
@@ -340,7 +341,11 @@ impl ForgeLsp {
         let foundry_config = self.foundry_config.read().await.clone();
         let build_for_save = (*build).clone();
         let res = tokio::task::spawn_blocking(move || {
-            crate::project_cache::save_reference_cache_with_report(&foundry_config, &build_for_save)
+            crate::project_cache::save_reference_cache_with_report(
+                &foundry_config,
+                &build_for_save,
+                None,
+            )
         })
         .await;
 
@@ -708,6 +713,7 @@ impl ForgeLsp {
                     crate::project_cache::load_reference_cache_with_report(
                         &cfg_for_load,
                         cache_mode_for_load,
+                        true,
                     )
                 })
                 .await;
@@ -777,8 +783,14 @@ impl ForgeLsp {
 
                 match crate::solc::solc_project_index(&foundry_config, Some(&client), None).await {
                     Ok(ast_data) => {
-                        let cached_build = Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
-                        let source_count = cached_build.nodes.len();
+                        let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
+                        // Merge any files from the previous cache that the
+                        // new build doesn't cover (preserves warm-loaded data).
+                        if let Some(prev) = ast_cache.read().await.get(&cache_key) {
+                            new_build.merge_missing_from(prev);
+                        }
+                        let source_count = new_build.nodes.len();
+                        let cached_build = Arc::new(new_build);
                         let build_for_save = (*cached_build).clone();
                         ast_cache
                             .write()
@@ -798,6 +810,7 @@ impl ForgeLsp {
                                 crate::project_cache::save_reference_cache_with_report(
                                     &cfg_for_save,
                                     &build_for_save,
+                                    None,
                                 )
                             })
                             .await;
@@ -1734,6 +1747,7 @@ impl LanguageServer for ForgeLsp {
                     crate::project_cache::load_reference_cache_with_report(
                         &cfg_for_load,
                         cache_mode_for_load,
+                        true,
                     )
                 })
                 .await;
@@ -1803,8 +1817,12 @@ impl LanguageServer for ForgeLsp {
 
                 match crate::solc::solc_project_index(&foundry_config, Some(&client), None).await {
                     Ok(ast_data) => {
-                        let cached_build = Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
-                        let source_count = cached_build.nodes.len();
+                        let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
+                        if let Some(prev) = ast_cache.read().await.get(&cache_key) {
+                            new_build.merge_missing_from(prev);
+                        }
+                        let source_count = new_build.nodes.len();
+                        let cached_build = Arc::new(new_build);
                         let build_for_save = (*cached_build).clone();
                         ast_cache
                             .write()
@@ -1827,6 +1845,7 @@ impl LanguageServer for ForgeLsp {
                                 crate::project_cache::save_reference_cache_with_report(
                                     &cfg_for_save,
                                     &build_for_save,
+                                    None,
                                 )
                             })
                             .await;
@@ -2580,9 +2599,12 @@ impl LanguageServer for ForgeLsp {
                             .await
                         {
                             Ok(ast_data) => {
-                                let cached_build =
-                                    Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
-                                let source_count = cached_build.nodes.len();
+                                let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
+                                if let Some(prev) = ast_cache.read().await.get(cache_key) {
+                                    new_build.merge_missing_from(prev);
+                                }
+                                let source_count = new_build.nodes.len();
+                                let cached_build = Arc::new(new_build);
                                 let build_for_save = (*cached_build).clone();
                                 ast_cache
                                     .write()
@@ -2594,6 +2616,7 @@ impl LanguageServer for ForgeLsp {
                                     crate::project_cache::save_reference_cache_with_report(
                                         &cfg_for_save,
                                         &build_for_save,
+                                        None,
                                     )
                                 })
                                 .await;
