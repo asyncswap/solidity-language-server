@@ -329,6 +329,16 @@ pub fn upsert_reference_cache_v2_with_report(
         .collect();
     meta.external_refs.retain(|r| live_ids.contains(&r.decl_id));
 
+    // Append replacement external_refs from the partial build so that
+    // reference resolution still works for touched files without waiting
+    // for a full cache save.
+    for (src, decl_id) in &build.external_refs {
+        meta.external_refs.push(PersistedExternalRef {
+            src: src.clone(),
+            decl_id: decl_id.0,
+        });
+    }
+
     let payload_v2 = serde_json::to_vec(&meta).map_err(|e| format!("serialize v2 cache: {e}"))?;
     write_atomic_json(&meta_path, &payload_v2)?;
 
