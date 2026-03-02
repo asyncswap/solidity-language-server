@@ -3,7 +3,7 @@ use crate::goto::CachedBuild;
 use crate::references;
 use crate::types::SourceLoc;
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
+use tower_lsp::lsp_types::{Location, Position, Range, TextEdit, Url, WorkspaceEdit};
 
 /// Search a specific line for an identifier and return its exact range.
 /// Used to correct stale AST ranges when the buffer has been edited but
@@ -172,6 +172,129 @@ pub fn get_identifier_range(source_bytes: &[u8], position: Position) -> Option<R
     Some(Range { start, end })
 }
 
+/// Check whether `cursor_byte` falls on an alias local name inside an
+/// `import_directive` in the tree-sitter parse tree, e.g. `MyTest` in
+/// `import {Test as MyTest} from "./A.sol"` or `AFile` in
+/// `import "./A.sol" as AFile`.
+///
+/// These names have `nameLocation: "-1:-1:-1"` in the solc AST, so
+/// `byte_to_id` lands on the enclosing `ImportDirective` node and
+/// `goto_references_cached` cannot find them.  Tree-sitter gives us their
+/// exact byte range.
+///
+/// Returns `Some(identifier_text)` if the cursor is on such a name.
+fn ts_alias_local_name_at_cursor(source_bytes: &[u8], cursor_byte: usize) -> Option<String> {
+    let source_str = std::str::from_utf8(source_bytes).ok()?;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_solidity::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source_str, None)?;
+
+    fn find_alias(node: tree_sitter::Node, source: &str, cursor_byte: usize) -> Option<String> {
+        if node.kind() == "import_directive" {
+            // Walk children looking for:
+            //   identifier AS identifier  (symbol alias: `{Test as MyTest}`)
+            //   AS identifier             (unit alias:   `"./A.sol" as AFile`)
+            let count = node.child_count();
+            let mut i = 0;
+            while i < count {
+                let child = node.child(i as u32)?;
+                if child.kind() == "as" {
+                    // The identifier immediately after `as` is the local alias name
+                    if let Some(next) = node.child((i + 1) as u32) {
+                        if next.kind() == "identifier"
+                            && next.start_byte() <= cursor_byte
+                            && cursor_byte < next.end_byte()
+                        {
+                            return Some(source[next.start_byte()..next.end_byte()].to_string());
+                        }
+                    }
+                }
+                i += 1;
+            }
+            return None;
+        }
+        // Recurse
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                if let Some(result) = find_alias(child, source, cursor_byte) {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    find_alias(tree.root_node(), source_str, cursor_byte)
+}
+
+/// Collect all tree-sitter `identifier` node ranges in `source_bytes` whose
+/// text exactly matches `name` (whole-word), returning them as LSP `Location`s
+/// for `file_uri`.
+///
+/// Used as a fallback for alias local names that have no solc AST node.
+fn ts_collect_identifier_locations(
+    source_bytes: &[u8],
+    file_uri: &Url,
+    name: &str,
+) -> Vec<Location> {
+    let Some(source_str) = std::str::from_utf8(source_bytes).ok() else {
+        return vec![];
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_solidity::LANGUAGE.into())
+        .is_err()
+    {
+        return vec![];
+    }
+    let Some(tree) = parser.parse(source_str, None) else {
+        return vec![];
+    };
+
+    let mut locations = Vec::new();
+
+    fn collect(
+        node: tree_sitter::Node,
+        source: &str,
+        source_bytes: &[u8],
+        name: &str,
+        file_uri: &Url,
+        out: &mut Vec<Location>,
+    ) {
+        if node.kind() == "identifier" {
+            let text = &source[node.start_byte()..node.end_byte()];
+            if text == name {
+                if let (Some(start), Some(end)) = (
+                    goto::bytes_to_pos(source_bytes, node.start_byte()),
+                    goto::bytes_to_pos(source_bytes, node.end_byte()),
+                ) {
+                    out.push(Location {
+                        uri: file_uri.clone(),
+                        range: Range { start, end },
+                    });
+                }
+            }
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                collect(child, source, source_bytes, name, file_uri, out);
+            }
+        }
+    }
+
+    collect(
+        tree.root_node(),
+        source_str,
+        source_bytes,
+        name,
+        file_uri,
+        &mut locations,
+    );
+    locations
+}
+
 /// Deduplication map: URI → (start_line, start_col, end_line, end_col) → TextEdit.
 type RenameEdits = HashMap<Url, HashMap<(u32, u32, u32, u32), TextEdit>>;
 
@@ -185,6 +308,41 @@ pub fn rename_symbol(
     text_buffers: &HashMap<String, Vec<u8>>,
 ) -> Option<WorkspaceEdit> {
     let original_identifier = get_identifier_at_position(source_bytes, position)?;
+
+    // Check early whether the cursor is on an import alias local name, e.g.
+    //   `MyTest` in `import {Test as MyTest} from "./A.sol"`
+    //   `AFile`  in `import "./A.sol" as AFile`
+    //
+    // These names have `nameLocation: "-1:-1:-1"` in the solc AST (symbol
+    // aliases) or their usages carry no back-reference to the import
+    // declaration node (unit aliases).  The AST-based reference engine cannot
+    // collect their occurrences correctly, so we handle them here with a pure
+    // tree-sitter text-match pass and skip the AST path entirely.
+    let cursor_byte = goto::pos_to_bytes(source_bytes, position);
+    if let Some(alias_name) = ts_alias_local_name_at_cursor(source_bytes, cursor_byte) {
+        if alias_name == original_identifier {
+            // Import alias local names (`MyTest` in `import {Test as MyTest}`,
+            // `AFile` in `import "./A.sol" as AFile`) are scoped to the file
+            // that declares them.  Scan only the current file — either from the
+            // in-memory buffer (unsaved edits) or from disk — not every open
+            // document, which would produce false positives for identifiers that
+            // happen to share the same spelling in unrelated files.
+            let file_bytes = text_buffers
+                .get(file_uri.as_str())
+                .cloned()
+                .unwrap_or_else(|| source_bytes.to_vec());
+            let locations = ts_collect_identifier_locations(&file_bytes, file_uri, &alias_name);
+            return build_workspace_edit(
+                locations,
+                &alias_name,
+                new_name,
+                text_buffers,
+                source_bytes,
+                file_uri,
+            );
+        }
+    }
+
     let name_location_index = get_name_location_index(build, file_uri, position, source_bytes);
     let mut locations = references::goto_references_cached(
         build,
@@ -211,6 +369,27 @@ pub fn rename_symbol(
         }
     }
 
+    build_workspace_edit(
+        locations,
+        &original_identifier,
+        new_name,
+        text_buffers,
+        source_bytes,
+        file_uri,
+    )
+}
+
+/// Deduplicate `locations`, build `TextEdit`s replacing `original_identifier`
+/// with `new_name`, and return a `WorkspaceEdit`.  Returns `None` if no edits
+/// can be produced.
+fn build_workspace_edit(
+    mut locations: Vec<Location>,
+    original_identifier: &str,
+    new_name: String,
+    text_buffers: &HashMap<String, Vec<u8>>,
+    _source_bytes: &[u8],
+    _file_uri: &Url,
+) -> Option<WorkspaceEdit> {
     // Deduplicate
     let mut seen = std::collections::HashSet::new();
     locations.retain(|loc| {
@@ -243,16 +422,25 @@ pub fn rename_symbol(
             }
         };
         let text_at_range = get_text_at_range(&file_source_bytes, &location.range);
-        let actual_range = if text_at_range.as_deref() == Some(&original_identifier) {
-            // AST range matches the buffer — use it directly
+        let actual_range = if text_at_range.as_deref() == Some(original_identifier) {
+            // Range matches the buffer — use it directly.
             location.range
+        } else if text_at_range.is_some_and(|t| !t.is_empty()) {
+            // The range resolves to a non-empty, different identifier.  This
+            // happens when the AST returned an alias's referent (e.g. `Test`
+            // when we are renaming `MyTest`) — the range is not stale, it just
+            // points to the wrong symbol.  Skip without attempting a line scan,
+            // which would incorrectly find `original_identifier` elsewhere on
+            // the same line.
+            continue;
         } else {
-            // AST range is stale (e.g. buffer was edited but not saved).
-            // Search the same line for the identifier and correct the range.
+            // Range is out-of-bounds or empty — the AST range is stale (buffer
+            // was edited but not saved since the last build).  Search the same
+            // line for the identifier and correct the range.
             match find_identifier_on_line(
                 &file_source_bytes,
                 location.range.start.line,
-                &original_identifier,
+                original_identifier,
             ) {
                 Some(corrected) => corrected,
                 None => continue,

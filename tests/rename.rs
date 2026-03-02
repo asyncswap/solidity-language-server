@@ -267,6 +267,138 @@ async fn test_rename_returns_workspace_edit_for_all_files() {
 }
 
 // =============================================================================
+// Regression: issue #166 — aliased import rename bleeds into unrelated references
+//
+// `import {Test as MyTest} from "./A.sol"` — renaming the alias `MyTest` must
+// NOT touch `Test` references (even though both carry the same
+// referencedDeclaration pointing to the original struct), and vice-versa.
+// =============================================================================
+
+#[tokio::test]
+async fn test_rename_alias_does_not_touch_original_name() {
+    // Alias.sol:
+    //   line 3: import {Test as MyTest} from "./A.sol";
+    //   line 4: import "./A.sol" as AFile;
+    //   line 7:     MyTest public myTest;
+    //   line 8:     AFile.Test public afileTest;
+    //
+    // Renaming `MyTest` → `Renamed` should produce edits ONLY on the two
+    // `MyTest` occurrences (import alias on line 3, usage on line 7).
+    // It must NOT emit edits for `Test` (same referencedDeclaration).
+    let (build, _) = build_example("Alias.sol").await;
+    let example_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+
+    let alias_path = example_dir.join("Alias.sol");
+    let alias_source = std::fs::read(&alias_path).expect("read Alias.sol");
+    let alias_uri = Url::from_file_path(&alias_path).unwrap();
+
+    let mut text_buffers: HashMap<String, Vec<u8>> = HashMap::new();
+    text_buffers.insert(alias_uri.to_string(), alias_source.clone());
+
+    // Cursor on "MyTest" in the import alias (line 3, col 16)
+    let pos = Position::new(3, 18); // middle of "MyTest"
+    let result = rename_symbol(
+        &build,
+        &alias_uri,
+        pos,
+        &alias_source,
+        "Renamed".to_string(),
+        &[],
+        &text_buffers,
+    );
+
+    assert!(result.is_some(), "rename of alias MyTest should succeed");
+    let workspace_edit = result.unwrap();
+    let changes = workspace_edit.changes.expect("should have changes");
+
+    assert!(
+        changes.contains_key(&alias_uri),
+        "Alias.sol should have edits"
+    );
+    let edits = &changes[&alias_uri];
+
+    // All edits must replace "MyTest", never "Test"
+    for edit in edits {
+        assert_eq!(edit.new_text, "Renamed", "edit new_text should be Renamed");
+        // The range must span exactly "MyTest" (length 6), not "Test" (length 4)
+        let col_start = edit.range.start.character;
+        let col_end = edit.range.end.character;
+        assert_eq!(
+            col_end - col_start,
+            6,
+            "edit range should cover 'MyTest' (6 chars), not 'Test' (4 chars): range {:?}",
+            edit.range
+        );
+    }
+
+    // Must have at least 2 edits (import alias + usage in contract body)
+    assert!(
+        edits.len() >= 2,
+        "expected >= 2 edits for MyTest, got {}: {:?}",
+        edits.len(),
+        edits
+    );
+}
+
+#[tokio::test]
+async fn test_rename_original_does_not_touch_alias() {
+    // Renaming `Test` (cursor on the `Test` in `import {Test as MyTest}`)
+    // should NOT rename the alias `MyTest`. It should rename:
+    //   - `Test` in the import clause (line 3, col 8)
+    //   - `Test` in `AFile.Test` on line 8
+    // But NOT `MyTest` on lines 3 or 7.
+    let (build, _) = build_example("Alias.sol").await;
+    let example_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+
+    let alias_path = example_dir.join("Alias.sol");
+    let alias_source = std::fs::read(&alias_path).expect("read Alias.sol");
+    let alias_uri = Url::from_file_path(&alias_path).unwrap();
+
+    let a_path = example_dir.join("A.sol");
+    let a_source = std::fs::read(&a_path).expect("read A.sol");
+    let a_uri = Url::from_file_path(&a_path).unwrap();
+
+    let mut text_buffers: HashMap<String, Vec<u8>> = HashMap::new();
+    text_buffers.insert(alias_uri.to_string(), alias_source.clone());
+    text_buffers.insert(a_uri.to_string(), a_source.clone());
+
+    // Cursor on "Test" in `import {Test as MyTest}` (line 3, col 8..12)
+    let pos = Position::new(3, 9); // middle of "Test"
+    let result = rename_symbol(
+        &build,
+        &alias_uri,
+        pos,
+        &alias_source,
+        "Struct2".to_string(),
+        &[],
+        &text_buffers,
+    );
+
+    assert!(result.is_some(), "rename of Test should succeed");
+    let workspace_edit = result.unwrap();
+    let changes = workspace_edit.changes.expect("should have changes");
+
+    assert!(
+        changes.contains_key(&alias_uri),
+        "Alias.sol should have edits"
+    );
+    let edits = &changes[&alias_uri];
+
+    // No edit should touch "MyTest" — all edits must cover exactly 4 chars
+    for edit in edits {
+        assert_eq!(edit.new_text, "Struct2", "edit new_text should be Struct2");
+        let col_start = edit.range.start.character;
+        let col_end = edit.range.end.character;
+        assert_eq!(
+            col_end - col_start,
+            4,
+            "edit range should cover 'Test' (4 chars), not 'MyTest' (6 chars): range {:?}",
+            edit.range
+        );
+    }
+}
+
+// =============================================================================
 // Regression: PR #50 bug 4 — find_identifier_on_line corrects stale AST ranges
 //
 // After a rename, the AST ranges are stale (based on the pre-rename source).
@@ -352,4 +484,67 @@ async fn test_rename_corrects_stale_ast_ranges_via_line_scan() {
         result.is_some() || result.is_none(),
         "rename should not panic with stale AST and modified buffers"
     );
+}
+
+// =============================================================================
+// Regression: issue #166 — unit alias rename (`import "./A.sol" as AFile`)
+//
+// `AFile` in `import "./A.sol" as AFile` is used as `AFile.Test` in the body.
+// Renaming `AFile` must produce edits for BOTH the import declaration AND the
+// usage in the contract body.
+// =============================================================================
+
+#[tokio::test]
+async fn test_rename_unit_alias_renames_all_occurrences() {
+    // Alias.sol:
+    //   line 4: import "./A.sol" as AFile;
+    //                               ^---- col 20, "AFile" [124-129]
+    //   line 8:     AFile.Test public afileTest;
+    //               ^---- col 4, "AFile" [183-188]
+    let (build, _) = build_example("Alias.sol").await;
+    let example_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+
+    let alias_path = example_dir.join("Alias.sol");
+    let alias_source = std::fs::read(&alias_path).expect("read Alias.sol");
+    let alias_uri = Url::from_file_path(&alias_path).unwrap();
+
+    let mut text_buffers: HashMap<String, Vec<u8>> = HashMap::new();
+    text_buffers.insert(alias_uri.to_string(), alias_source.clone());
+
+    // Cursor on "AFile" in `import "./A.sol" as AFile` (line 4, col 22)
+    let pos = Position::new(4, 22); // middle of "AFile"
+    let result = rename_symbol(
+        &build,
+        &alias_uri,
+        pos,
+        &alias_source,
+        "Lib".to_string(),
+        &[],
+        &text_buffers,
+    );
+
+    assert!(
+        result.is_some(),
+        "rename of unit alias AFile should succeed"
+    );
+    let workspace_edit = result.unwrap();
+    let changes = workspace_edit.changes.expect("should have changes");
+
+    assert!(
+        changes.contains_key(&alias_uri),
+        "Alias.sol should have edits"
+    );
+    let edits = &changes[&alias_uri];
+
+    // Must have at least 2 edits: the import declaration + the usage in AFile.Test
+    assert!(
+        edits.len() >= 2,
+        "expected >= 2 edits for AFile (import + body usage), got {}: {:?}",
+        edits.len(),
+        edits
+    );
+
+    for edit in edits {
+        assert_eq!(edit.new_text, "Lib");
+    }
 }
