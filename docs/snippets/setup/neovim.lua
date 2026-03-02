@@ -53,7 +53,6 @@ return {
 
     -- autoformat
     vim.api.nvim_create_autocmd("BufWritePost", {
-      pattern = { "*.sol" },
       callback = function()
         vim.lsp.buf.format()
       end,
