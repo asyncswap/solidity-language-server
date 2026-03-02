@@ -205,6 +205,33 @@ impl CachedBuild {
         }
     }
 
+    /// Absorb data from a previous build for files this build doesn't cover.
+    ///
+    /// For each file in `other.nodes` that is **not** already present in
+    /// `self.nodes`, copies the node map, path mapping, and any related
+    /// entries.  This ensures a freshly compiled project index never loses
+    /// coverage compared to the warm-loaded cache it replaces.
+    pub fn merge_missing_from(&mut self, other: &CachedBuild) {
+        for (abs_path, file_nodes) in &other.nodes {
+            if !self.nodes.contains_key(abs_path) {
+                self.nodes.insert(abs_path.clone(), file_nodes.clone());
+            }
+        }
+        for (k, v) in &other.path_to_abs {
+            self.path_to_abs
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.external_refs {
+            self.external_refs.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &other.id_to_path_map {
+            self.id_to_path_map
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+    }
+
     /// Construct a minimal cached build from persisted reference/goto indexes.
     ///
     /// This is used for fast startup warm-cache restores where we only need

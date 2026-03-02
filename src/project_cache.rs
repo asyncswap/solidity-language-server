@@ -148,16 +148,30 @@ fn relative_to_root(root: &Path, file: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn current_file_hashes(config: &FoundryConfig) -> Result<BTreeMap<String, String>, String> {
-    let source_files = crate::solc::discover_source_files(config);
+fn current_file_hashes(
+    config: &FoundryConfig,
+    include_libs: bool,
+) -> Result<BTreeMap<String, String>, String> {
+    let source_files = if include_libs {
+        crate::solc::discover_source_files_with_libs(config)
+    } else {
+        crate::solc::discover_source_files(config)
+    };
+    hash_file_list(config, &source_files)
+}
+
+/// Hash an explicit list of absolute paths (relative to config.root).
+fn hash_file_list(
+    config: &FoundryConfig,
+    source_files: &[PathBuf],
+) -> Result<BTreeMap<String, String>, String> {
     if source_files.is_empty() {
         return Ok(BTreeMap::new());
     }
-
     let mut hashes = BTreeMap::new();
     for path in source_files {
-        let rel = relative_to_root(&config.root, &path);
-        let hash = file_hash(&path)
+        let rel = relative_to_root(&config.root, path);
+        let hash = file_hash(path)
             .ok_or_else(|| format!("failed to hash source file {}", path.display()))?;
         hashes.insert(rel, hash);
     }
@@ -192,7 +206,7 @@ fn push_hash_history(meta: &mut PersistedReferenceCacheV2, rel: &str, hash: &str
 }
 
 pub fn save_reference_cache(config: &FoundryConfig, build: &CachedBuild) -> Result<(), String> {
-    save_reference_cache_with_report(config, build).map(|_| ())
+    save_reference_cache_with_report(config, build, None).map(|_| ())
 }
 
 /// Incrementally upsert v2 cache shards from a partial build (typically a
@@ -213,17 +227,19 @@ pub fn upsert_reference_cache_v2_with_report(
 
     let meta_path = cache_file_path_v2(&config.root);
     let mut meta = if let Ok(bytes) = fs::read(&meta_path) {
-        serde_json::from_slice::<PersistedReferenceCacheV2>(&bytes).unwrap_or(PersistedReferenceCacheV2 {
-            schema_version: CACHE_SCHEMA_VERSION_V2,
-            project_root: config.root.to_string_lossy().to_string(),
-            config_fingerprint: config_fingerprint(config),
-            file_hashes: BTreeMap::new(),
-            file_hash_history: BTreeMap::new(),
-            path_to_abs: HashMap::new(),
-            id_to_path_map: HashMap::new(),
-            external_refs: Vec::new(),
-            node_shards: BTreeMap::new(),
-        })
+        serde_json::from_slice::<PersistedReferenceCacheV2>(&bytes).unwrap_or(
+            PersistedReferenceCacheV2 {
+                schema_version: CACHE_SCHEMA_VERSION_V2,
+                project_root: config.root.to_string_lossy().to_string(),
+                config_fingerprint: config_fingerprint(config),
+                file_hashes: BTreeMap::new(),
+                file_hash_history: BTreeMap::new(),
+                path_to_abs: HashMap::new(),
+                id_to_path_map: HashMap::new(),
+                external_refs: Vec::new(),
+                node_shards: BTreeMap::new(),
+            },
+        )
     } else {
         PersistedReferenceCacheV2 {
             schema_version: CACHE_SCHEMA_VERSION_V2,
@@ -255,6 +271,18 @@ pub fn upsert_reference_cache_v2_with_report(
         };
     }
 
+    // Collect the set of abs_paths being upserted so we can purge stale IDs.
+    let upsert_abs: std::collections::HashSet<&str> =
+        build.nodes.keys().map(|s| s.as_str()).collect();
+
+    // Remove stale NodeIds for files being overwritten: old IDs are invalid
+    // after recompile (solc assigns new integers), so keep id_to_path_map and
+    // external_refs clean to avoid phantom cross-file reference hits.
+    meta.id_to_path_map
+        .retain(|_id, path| !upsert_abs.contains(path.as_str()));
+    meta.external_refs
+        .retain(|r| !upsert_abs.contains(r.src.as_str()));
+
     let mut touched = 0usize;
     for (abs_path, file_nodes) in &build.nodes {
         let abs = Path::new(abs_path);
@@ -278,10 +306,8 @@ pub fn upsert_reference_cache_v2_with_report(
         write_atomic_json(&shard_path, &shard_payload)?;
 
         if let Some(hash) = file_hash(abs) {
+            push_hash_history(&mut meta, &rel, &hash);
             meta.file_hashes.insert(rel.clone(), hash);
-            if let Some(current) = meta.file_hashes.get(&rel).cloned() {
-                push_hash_history(&mut meta, &rel, &current);
-            }
             meta.node_shards.insert(rel, shard_name);
             touched += 1;
         }
@@ -292,6 +318,16 @@ pub fn upsert_reference_cache_v2_with_report(
     for (k, v) in &build.id_to_path_map {
         meta.id_to_path_map.insert(k.clone(), v.clone());
     }
+
+    // Also prune external_refs whose target decl_id no longer exists in
+    // id_to_path_map (i.e. old IDs from the recompiled files that were just
+    // removed above).  This prevents stale cross-file reference hits.
+    let live_ids: std::collections::HashSet<u64> = meta
+        .id_to_path_map
+        .keys()
+        .filter_map(|k| k.parse().ok())
+        .collect();
+    meta.external_refs.retain(|r| live_ids.contains(&r.decl_id));
 
     let payload_v2 = serde_json::to_vec(&meta).map_err(|e| format!("serialize v2 cache: {e}"))?;
     write_atomic_json(&meta_path, &payload_v2)?;
@@ -305,13 +341,26 @@ pub fn upsert_reference_cache_v2_with_report(
 pub fn save_reference_cache_with_report(
     config: &FoundryConfig,
     build: &CachedBuild,
+    source_files: Option<&[PathBuf]>,
 ) -> Result<CacheSaveReport, String> {
     let started = Instant::now();
     if !config.root.is_dir() {
         return Err(format!("invalid project root: {}", config.root.display()));
     }
 
-    let file_hashes = current_file_hashes(config)?;
+    // When an explicit file list is given, hash only those.
+    // Otherwise derive the list from the build's node keys (the files that
+    // were actually compiled) — this avoids walking unrelated lib files.
+    let file_hashes = if let Some(files) = source_files {
+        hash_file_list(config, files)?
+    } else {
+        let build_paths: Vec<PathBuf> = build.nodes.keys().map(PathBuf::from).collect();
+        if build_paths.is_empty() {
+            current_file_hashes(config, true)?
+        } else {
+            hash_file_list(config, &build_paths)?
+        }
+    };
     let file_count_hashed = file_hashes.len();
     let external_refs = build
         .external_refs
@@ -388,19 +437,21 @@ pub fn save_reference_cache_with_report(
 }
 
 pub fn load_reference_cache(config: &FoundryConfig) -> Option<CachedBuild> {
-    load_reference_cache_with_report(config, ProjectIndexCacheMode::Auto).build
+    load_reference_cache_with_report(config, ProjectIndexCacheMode::Auto, false).build
 }
 
 /// Return absolute paths of source files whose current hash differs from v2
 /// cache metadata (including newly-added files missing from metadata).
-pub fn changed_files_since_v2_cache(config: &FoundryConfig) -> Result<Vec<PathBuf>, String> {
+pub fn changed_files_since_v2_cache(
+    config: &FoundryConfig,
+    _include_libs: bool,
+) -> Result<Vec<PathBuf>, String> {
     if !config.root.is_dir() {
         return Err(format!("invalid project root: {}", config.root.display()));
     }
 
     let cache_path_v2 = cache_file_path_v2(&config.root);
-    let bytes =
-        fs::read(&cache_path_v2).map_err(|e| format!("cache file read failed: {e}"))?;
+    let bytes = fs::read(&cache_path_v2).map_err(|e| format!("cache file read failed: {e}"))?;
     let persisted: PersistedReferenceCacheV2 =
         serde_json::from_slice(&bytes).map_err(|e| format!("cache decode failed: {e}"))?;
 
@@ -417,7 +468,14 @@ pub fn changed_files_since_v2_cache(config: &FoundryConfig) -> Result<Vec<PathBu
         return Err("config fingerprint mismatch".to_string());
     }
 
-    let current_hashes = current_file_hashes(config)?;
+    // Hash only the files listed in the saved cache (the compiled closure),
+    // not every file discovered by walking lib dirs.
+    let saved_paths: Vec<PathBuf> = persisted
+        .file_hashes
+        .keys()
+        .map(|rel| config.root.join(rel))
+        .collect();
+    let current_hashes = hash_file_list(config, &saved_paths)?;
     let mut changed = Vec::new();
     for (rel, current_hash) in current_hashes {
         match persisted.file_hashes.get(&rel) {
@@ -431,6 +489,7 @@ pub fn changed_files_since_v2_cache(config: &FoundryConfig) -> Result<Vec<PathBu
 pub fn load_reference_cache_with_report(
     config: &FoundryConfig,
     cache_mode: ProjectIndexCacheMode,
+    _include_libs: bool,
 ) -> CacheLoadReport {
     let started = Instant::now();
     let miss = |reason: String, file_count_hashed: usize, duration_ms: u128| CacheLoadReport {
@@ -450,15 +509,11 @@ pub fn load_reference_cache_with_report(
             started.elapsed().as_millis(),
         );
     }
-    let current_hashes = match current_file_hashes(config) {
-        Ok(h) => h,
-        Err(e) => {
-            return miss(e, 0, started.elapsed().as_millis());
-        }
-    };
-    let file_count_hashed = current_hashes.len();
 
-    let should_try_v2 = matches!(cache_mode, ProjectIndexCacheMode::Auto | ProjectIndexCacheMode::V2);
+    let should_try_v2 = matches!(
+        cache_mode,
+        ProjectIndexCacheMode::Auto | ProjectIndexCacheMode::V2
+    );
 
     // Try v2 first (partial warm-start capable).
     let cache_path_v2 = cache_file_path_v2(&config.root);
@@ -472,24 +527,37 @@ pub fn load_reference_cache_with_report(
                     "schema mismatch: cache={}, expected={}",
                     persisted.schema_version, CACHE_SCHEMA_VERSION_V2
                 ),
-                file_count_hashed,
+                0,
                 started.elapsed().as_millis(),
             );
         }
         if persisted.project_root != config.root.to_string_lossy() {
             return miss(
                 "project root mismatch".to_string(),
-                file_count_hashed,
+                0,
                 started.elapsed().as_millis(),
             );
         }
         if persisted.config_fingerprint != config_fingerprint(config) {
             return miss(
                 "config fingerprint mismatch".to_string(),
-                file_count_hashed,
+                0,
                 started.elapsed().as_millis(),
             );
         }
+
+        // Hash only the files that were saved — no rediscovery needed.
+        // This means we compare exactly the closure that was compiled last time.
+        let saved_paths: Vec<PathBuf> = persisted
+            .file_hashes
+            .keys()
+            .map(|rel| config.root.join(rel))
+            .collect();
+        let current_hashes = match hash_file_list(config, &saved_paths) {
+            Ok(h) => h,
+            Err(e) => return miss(e, 0, started.elapsed().as_millis()),
+        };
+        let file_count_hashed = current_hashes.len();
 
         let shards_dir = cache_shards_dir_v2(&config.root);
         let mut nodes: HashMap<String, HashMap<NodeId, NodeInfo>> = HashMap::new();
@@ -539,9 +607,9 @@ pub fn load_reference_cache_with_report(
             }
         }
 
-        let complete = file_count_reused == file_count_hashed
-            && file_count_hashed == persisted.file_hashes.len()
-            && current_hashes == persisted.file_hashes;
+        // Complete = every saved file was reused with a matching hash.
+        let complete =
+            file_count_reused == file_count_hashed && current_hashes == persisted.file_hashes;
 
         return CacheLoadReport {
             build: Some(CachedBuild::from_reference_index(
@@ -566,7 +634,7 @@ pub fn load_reference_cache_with_report(
 
     miss(
         "cache mode v2: no usable v2 cache".to_string(),
-        file_count_hashed,
+        0,
         started.elapsed().as_millis(),
     )
 }

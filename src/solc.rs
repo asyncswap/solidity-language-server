@@ -913,32 +913,93 @@ pub async fn solc_build(
 
 // ── Project-wide indexing ──────────────────────────────────────────────────
 
-/// Directories that always contain build artifacts or third-party code.
-/// These are skipped regardless of foundry.toml configuration.
-const ALWAYS_SKIP_DIRS: &[&str] = &["node_modules", "out", "artifacts", "cache"];
-
 /// Discover all Solidity source files under the project root.
 ///
 /// Walks the entire project directory, including `test/`, `script/`, and
 /// any other user-authored directories. Only skips:
 /// - Directories listed in `config.libs` (default: `["lib"]`)
-/// - Directories in `ALWAYS_SKIP_DIRS` (build artifacts, node_modules)
+/// - Directories in `DISCOVER_SKIP_DIRS` (build artifacts)
 /// - Hidden directories (starting with `.`)
 ///
 /// Includes `.t.sol` (test) and `.s.sol` (script) files so that
 /// find-references and rename work across the full project.
 pub fn discover_source_files(config: &FoundryConfig) -> Vec<PathBuf> {
+    discover_source_files_inner(config, false)
+}
+
+/// Discover source files including library directories.
+///
+/// When `fullProjectScan` is enabled, this includes files from the configured
+/// `libs` directories (e.g. `dependencies/`, `node_modules/`).  Files with
+/// incompatible pragma versions are handled by the error-driven retry loop
+/// in [`solc_project_index_from_files`].
+pub fn discover_source_files_with_libs(config: &FoundryConfig) -> Vec<PathBuf> {
+    discover_source_files_inner(config, true)
+}
+
+fn discover_source_files_inner(config: &FoundryConfig, include_libs: bool) -> Vec<PathBuf> {
     let root = &config.root;
     if !root.is_dir() {
         return Vec::new();
     }
+    let skip_libs = if include_libs { &[][..] } else { &config.libs };
     let mut files = Vec::new();
-    discover_recursive(root, &config.libs, &mut files);
+    discover_recursive(root, skip_libs, &mut files);
     files.sort();
     files
 }
 
-fn discover_recursive(dir: &Path, libs: &[String], files: &mut Vec<PathBuf>) {
+/// Discover the true compilation closure by tracing imports from the
+/// project's own source files (`src/`, `test/`, `script/`, and any other
+/// non-lib top-level directories).
+///
+/// Starting from every `.sol` file returned by [`discover_source_files`]
+/// (project files only, no lib dirs), this BFS-walks the import graph using
+/// the provided remappings to resolve each `import` statement to an absolute
+/// path.  It adds every reachable file — including lib files that are actually
+/// imported — to the result set.
+///
+/// Files whose imports cannot be resolved (missing external deps that aren't
+/// in this project) are silently skipped at that edge; the importer is still
+/// included.
+///
+/// This produces a much smaller, self-consistent set than scanning all files
+/// in lib directories, and avoids pulling in lib files that have broken
+/// transitive deps (e.g. chainlink automation files that need `@eth-optimism`
+/// which is not vendored here).
+pub fn discover_compilation_closure(config: &FoundryConfig, remappings: &[String]) -> Vec<PathBuf> {
+    // Seed: all project source files (no lib dirs).
+    let seeds = discover_source_files(config);
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut queue: std::collections::VecDeque<PathBuf> = seeds.into_iter().collect();
+
+    while let Some(file) = queue.pop_front() {
+        if !visited.insert(file.clone()) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(&file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for imp in links::ts_find_imports(source.as_bytes()) {
+            if let Some(abs) = resolve_import_to_abs(&config.root, &file, &imp.path, remappings) {
+                if abs.exists() && !visited.contains(&abs) {
+                    queue.push_back(abs);
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<PathBuf> = visited.into_iter().collect();
+    result.sort();
+    result
+}
+
+/// Directories that are always skipped during source file discovery,
+/// regardless of the `include_libs` setting.
+const DISCOVER_SKIP_DIRS: &[&str] = &["out", "artifacts", "cache", "target", "broadcast"];
+
+fn discover_recursive(dir: &Path, skip_libs: &[String], files: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -952,15 +1013,15 @@ fn discover_recursive(dir: &Path, libs: &[String], files: &mut Vec<PathBuf>) {
                     continue;
                 }
                 // Skip build artifact directories
-                if ALWAYS_SKIP_DIRS.contains(&name) {
+                if DISCOVER_SKIP_DIRS.contains(&name) {
                     continue;
                 }
-                // Skip user-configured library directories
-                if libs.iter().any(|lib| lib == name) {
+                // Skip user-configured library directories (unless include_libs)
+                if skip_libs.iter().any(|lib| lib == name) {
                     continue;
                 }
             }
-            discover_recursive(&path, libs, files);
+            discover_recursive(&path, skip_libs, files);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && name.ends_with(".sol")
         {
@@ -1047,6 +1108,53 @@ pub fn build_batch_standard_json_input_with_cache(
     })
 }
 
+/// Build a parse-only standard-json input (``stopAfter: "parsing"``).
+///
+/// Unlike the full batch input this mode stops before import resolution and
+/// type-checking.  That means:
+///
+/// * No version 5333 errors cascade from imported incompatible files — the
+///   compatible files are NOT fetched from disk as imports.
+/// * The resulting ASTs contain all declaration nodes and local
+///   ``referencedDeclaration`` IDs but **not** cross-file resolved IDs.
+/// * Only ``ast`` output is requested; contract outputs (abi, gas …) are
+///   omitted because they require type-checking.
+///
+/// This is used for the compatible-file batch in the mixed-version project
+/// index so we can get parse-time ASTs for all project/lib files that satisfy
+/// the project pragma, without being blocked by imports into incompatible lib
+/// files.
+pub fn build_parse_only_json_input(
+    source_files: &[PathBuf],
+    remappings: &[String],
+    config: &FoundryConfig,
+) -> Value {
+    let settings = json!({
+        "stopAfter": "parsing",
+        "remappings": remappings,
+        "outputSelection": {
+            "*": {
+                "": ["ast"]
+            }
+        }
+    });
+
+    let mut sources = serde_json::Map::new();
+    for file in source_files {
+        let rel_path = file
+            .strip_prefix(&config.root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+        sources.insert(rel_path.clone(), json!({ "urls": [rel_path] }));
+    }
+
+    json!({
+        "language": "Solidity",
+        "sources": sources,
+        "settings": settings
+    })
+}
+
 /// Run a project-wide solc compilation and return normalized output.
 ///
 /// Discovers all source files, compiles them in a single `solc --standard-json`
@@ -1061,7 +1169,14 @@ pub async fn solc_project_index(
     client: Option<&tower_lsp::Client>,
     text_cache: Option<&HashMap<String, (i32, String)>>,
 ) -> Result<Value, RunnerError> {
-    let source_files = discover_source_files(config);
+    // Resolve remappings first — needed for import tracing.
+    let remappings = resolve_remappings(config).await;
+
+    // Trace imports from project source files to find the true compilation
+    // closure.  This avoids pulling in lib files that are never imported by
+    // the project (e.g. chainlink automation files that need @eth-optimism,
+    // which isn't vendored here).
+    let source_files = discover_compilation_closure(config, &remappings);
     if source_files.is_empty() {
         return Err(RunnerError::CommandError(std::io::Error::other(
             "no source files found for project index",
@@ -1093,6 +1208,7 @@ pub async fn solc_project_index_scoped(
 /// Extract source file paths from solc error code 5333 ("Source file requires
 /// different compiler version") errors.  Returns the relative paths exactly
 /// as they appear in `sourceLocation.file`.
+#[cfg(test)]
 fn extract_version_error_files(solc_output: &Value) -> HashSet<String> {
     let mut files = HashSet::new();
     if let Some(errors) = solc_output.get("errors").and_then(|e| e.as_array()) {
@@ -1116,6 +1232,7 @@ fn extract_version_error_files(solc_output: &Value) -> HashSet<String> {
 /// excluded because solc will still resolve their imports from disk and fail.
 ///
 /// Returns the full exclusion set (seed files + their transitive importers).
+#[cfg(test)]
 fn reverse_import_closure(
     source_files: &[PathBuf],
     exclude_abs: &HashSet<PathBuf>,
@@ -1219,10 +1336,6 @@ fn merge_normalized_outputs(base: &mut Value, other: Value) {
     // The base already has the clean errors from the successful compilation.
 }
 
-/// Maximum number of retry rounds to avoid infinite loops if solc keeps
-/// producing new 5333 errors (e.g. cascading transitive failures).
-const MAX_VERSION_RETRY_ROUNDS: usize = 5;
-
 async fn solc_project_index_from_files(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
@@ -1249,163 +1362,187 @@ async fn solc_project_index_from_files(
 
     let remappings = resolve_remappings(config).await;
 
-    // Collect pragma constraints from all source files so we pick a solc
-    // version that satisfies the entire project.
-    let pragmas: Vec<PragmaConstraint> = source_files
-        .iter()
-        .filter_map(|f| {
-            let source = text_cache
-                .and_then(|tc| {
-                    let uri = Url::from_file_path(f).ok()?;
-                    tc.get(&uri.to_string()).map(|(_, c)| c.clone())
-                })
-                .or_else(|| std::fs::read_to_string(f).ok())?;
-            parse_pragma(&source)
-        })
-        .collect();
-    let constraint = tightest_constraint(&pragmas);
+    // Resolve the project's solc version from foundry.toml.
+    let project_version: Option<SemVer> =
+        config.solc_version.as_ref().and_then(|v| SemVer::parse(v));
+
+    let constraint: Option<PragmaConstraint> = project_version
+        .as_ref()
+        .map(|v| PragmaConstraint::Exact(v.clone()));
     let solc_binary = resolve_solc_binary(config, constraint.as_ref(), client).await;
 
-    // -- Compile with error-driven retry for mixed-version projects. --
+    // -- Pre-scan pragmas to separate compatible vs incompatible files. --
     //
-    // 1. Compile all files in one batch.
-    // 2. If solc reports error 5333 (version mismatch), extract the failing
-    //    files, compute their reverse-import closure (all files that
-    //    transitively import them), exclude that set, and retry.
-    // 3. Repeat until no more 5333 errors or we hit the retry cap.
-    let mut current_files: Vec<PathBuf> = source_files.to_vec();
-    let mut all_excluded: HashSet<PathBuf> = HashSet::new();
-    let mut result: Option<Value> = None;
+    // Solc emits ZERO ASTs when any file in the batch has a version error
+    // (5333).  We must exclude incompatible files before compiling so the
+    // batch produces full AST output for all compatible files.
+    let (compatible_files, incompatible_files) = if let Some(ref ver) = project_version {
+        let mut compat = Vec::with_capacity(source_files.len());
+        let mut incompat = Vec::new();
+        for file in source_files {
+            let is_compatible = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|src| parse_pragma(&src))
+                .map(|pragma| version_satisfies(ver, &pragma))
+                // Files without a pragma are assumed compatible.
+                .unwrap_or(true);
+            if is_compatible {
+                compat.push(file.clone());
+            } else {
+                incompat.push(file.clone());
+            }
+        }
+        (compat, incompat)
+    } else {
+        // No project version configured — compile everything in one batch.
+        (source_files.to_vec(), Vec::new())
+    };
 
-    for round in 0..=MAX_VERSION_RETRY_ROUNDS {
+    if !incompatible_files.is_empty() {
+        if let Some(c) = client {
+            c.log_message(
+                tower_lsp::lsp_types::MessageType::INFO,
+                format!(
+                    "project index: {} compatible, {} incompatible with solc {}",
+                    compatible_files.len(),
+                    incompatible_files.len(),
+                    project_version
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                ),
+            )
+            .await;
+        }
+    }
+
+    // -- Full batch compile of compatible files. --
+    //
+    // The source file list comes from discover_compilation_closure which only
+    // includes files reachable via imports from src/test/script — so all files
+    // in the batch are version-compatible and their transitive imports resolve.
+    // A full (non-parse-only) compile is required so that cross-file
+    // referencedDeclaration IDs are populated for goto-references to work.
+    let mut result = if compatible_files.is_empty() {
+        json!({"sources": {}, "contracts": {}, "errors": [], "source_id_to_path": {}})
+    } else {
         let input = build_batch_standard_json_input_with_cache(
-            &current_files,
+            &compatible_files,
             &remappings,
             config,
             text_cache,
         );
         let raw = run_solc(&solc_binary, &input, &config.root).await?;
+        normalize_solc_output(raw, Some(&config.root))
+    };
 
-        // Check for version errors before normalizing (paths are relative).
-        let error_files = extract_version_error_files(&raw);
-        result = Some(normalize_solc_output(raw, Some(&config.root)));
+    let batch_source_count = result
+        .get("sources")
+        .and_then(|s| s.as_object())
+        .map_or(0, |obj| obj.len());
 
-        if error_files.is_empty() || round == MAX_VERSION_RETRY_ROUNDS {
-            break;
-        }
-
-        // Resolve error file paths (relative) to absolute paths.
-        let error_abs: HashSet<PathBuf> = error_files
-            .iter()
-            .map(|rel| lexical_normalize(&config.root.join(rel)))
-            .collect();
-
-        // Find the full exclusion set: error files + everything that imports them.
-        let closure = reverse_import_closure(&current_files, &error_abs, &config.root, &remappings);
-
+    if incompatible_files.is_empty() {
         if let Some(c) = client {
             c.log_message(
                 tower_lsp::lsp_types::MessageType::INFO,
                 format!(
-                    "project index: retry round {} — excluding {} files ({} version errors + {} transitive importers)",
-                    round + 1,
-                    closure.len(),
-                    error_abs.len(),
-                    closure.len().saturating_sub(error_abs.len()),
+                    "project index: compiled {} files with no version mismatches",
+                    source_files.len(),
                 ),
             )
             .await;
         }
+        return Ok(result);
+    }
 
-        all_excluded.extend(closure.iter().cloned());
+    if let Some(c) = client {
+        // Log first few errors from the batch to understand why sources=0.
+        let batch_errors: Vec<String> = result
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| e.get("severity").and_then(|s| s.as_str()) == Some("error"))
+                    .take(3)
+                    .filter_map(|e| {
+                        let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("?");
+                        let file = e
+                            .get("sourceLocation")
+                            .and_then(|sl| sl.get("file"))
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("?");
+                        Some(format!("{file}: {msg}"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Remove excluded files and retry.
-        current_files.retain(|f| !closure.contains(f));
-        if current_files.is_empty() {
-            if let Some(c) = client {
-                c.log_message(
-                    tower_lsp::lsp_types::MessageType::WARNING,
-                    "project index: all files excluded after version retries",
-                )
-                .await;
+        c.log_message(
+            tower_lsp::lsp_types::MessageType::INFO,
+            format!(
+                "project index: batch produced {} sources, now compiling {} incompatible files individually{}",
+                batch_source_count,
+                incompatible_files.len(),
+                if batch_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [first errors: {}]", batch_errors.join("; "))
+                },
+            ),
+        )
+        .await;
+    }
+
+    // -- Individually compile incompatible files with their matching solc. --
+    let mut compiled = 0usize;
+    let mut skipped = 0usize;
+    for file in &incompatible_files {
+        let pragma = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|src| parse_pragma(&src));
+
+        let Some(file_constraint) = pragma else {
+            skipped += 1;
+            continue;
+        };
+
+        let file_binary = resolve_solc_binary(config, Some(&file_constraint), client).await;
+        let input = build_batch_standard_json_input_with_cache(
+            &[file.clone()],
+            &remappings,
+            config,
+            text_cache,
+        );
+        match run_solc(&file_binary, &input, &config.root).await {
+            Ok(raw) => {
+                let normalized = normalize_solc_output(raw, Some(&config.root));
+                merge_normalized_outputs(&mut result, normalized);
+                compiled += 1;
             }
-            break;
+            Err(e) => {
+                if let Some(c) = client {
+                    c.log_message(
+                        tower_lsp::lsp_types::MessageType::WARNING,
+                        format!(
+                            "project index: incompatible file {} failed: {e}",
+                            file.display(),
+                        ),
+                    )
+                    .await;
+                }
+                skipped += 1;
+            }
         }
     }
 
-    let mut result = result.unwrap_or_else(
-        || json!({"sources": {}, "contracts": {}, "errors": [], "source_id_to_path": {}}),
-    );
-
-    // -- Compile excluded files in separate pragma-compatible batches. --
-    if !all_excluded.is_empty() {
-        // Group excluded files by pragma constraint so each group can be
-        // compiled with a compatible solc version.
-        let mut groups: Vec<(PragmaConstraint, Vec<PathBuf>)> = Vec::new();
-
-        for file in &all_excluded {
-            let pragma = std::fs::read_to_string(file)
-                .ok()
-                .and_then(|src| parse_pragma(&src));
-
-            if let Some(p) = pragma {
-                // Try to add to an existing compatible group.
-                let mut placed = false;
-                for (group_constraint, group_files) in &mut groups {
-                    let combined = tightest_constraint(&[group_constraint.clone(), p.clone()]);
-                    if let Some(tight) = combined {
-                        *group_constraint = tight;
-                        group_files.push(file.clone());
-                        placed = true;
-                        break;
-                    }
-                }
-                if !placed {
-                    groups.push((p, vec![file.clone()]));
-                }
-            }
-            // Files without a pragma are skipped — can't determine their version.
-        }
-
-        if let Some(c) = client {
-            c.log_message(
-                tower_lsp::lsp_types::MessageType::INFO,
-                format!(
-                    "project index: compiling {} excluded files in {} separate batch(es)",
-                    all_excluded.len(),
-                    groups.len(),
-                ),
-            )
-            .await;
-        }
-
-        for (group_constraint, group_files) in &groups {
-            let group_binary = resolve_solc_binary(config, Some(group_constraint), client).await;
-            let input = build_batch_standard_json_input_with_cache(
-                group_files,
-                &remappings,
-                config,
-                text_cache,
-            );
-            match run_solc(&group_binary, &input, &config.root).await {
-                Ok(raw) => {
-                    let normalized = normalize_solc_output(raw, Some(&config.root));
-                    merge_normalized_outputs(&mut result, normalized);
-                }
-                Err(e) => {
-                    if let Some(c) = client {
-                        c.log_message(
-                            tower_lsp::lsp_types::MessageType::WARNING,
-                            format!(
-                                "project index: excluded batch ({} files) failed: {e}",
-                                group_files.len(),
-                            ),
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
+    if let Some(c) = client {
+        c.log_message(
+            tower_lsp::lsp_types::MessageType::INFO,
+            format!(
+                "project index: incompatible files done — {compiled} compiled, {skipped} skipped",
+            ),
+        )
+        .await;
     }
 
     Ok(result)
