@@ -59,6 +59,11 @@ pub struct ForgeLsp {
     project_cache_sync_running: Arc<std::sync::atomic::AtomicBool>,
     /// Whether a didSave cache-sync pass is pending (set by save bursts).
     project_cache_sync_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// When true the next cache-sync worker iteration must run a full project
+    /// rebuild, bypassing the incremental scoped path.  Set by
+    /// `solidity.reindex` to guarantee a complete reindex even when a worker
+    /// spawned by didSave is already running with `aggressive_scoped=true`.
+    project_cache_force_full_rebuild: Arc<std::sync::atomic::AtomicBool>,
     /// Whether a didSave v2-upsert worker is currently running.
     project_cache_upsert_running: Arc<std::sync::atomic::AtomicBool>,
     /// Whether a didSave v2-upsert pass is pending (set by save bursts).
@@ -116,6 +121,7 @@ impl ForgeLsp {
             project_cache_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             project_cache_sync_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             project_cache_sync_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            project_cache_force_full_rebuild: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             project_cache_upsert_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             project_cache_upsert_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             project_cache_changed_files: Arc::new(RwLock::new(HashSet::new())),
@@ -1594,6 +1600,7 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
             let pending_flag = this.project_cache_sync_pending.clone();
             let changed_files = this.project_cache_changed_files.clone();
             let aggressive_scoped = settings_snapshot.project_index.incremental_edit_reindex;
+            let force_full_rebuild_flag = this.project_cache_force_full_rebuild.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -1631,7 +1638,12 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
 
                     let mut scoped_ok = false;
 
-                    if aggressive_scoped {
+                    // If solidity.reindex was called while this worker was
+                    // already running, bypass the incremental scoped path and
+                    // do a full rebuild instead.
+                    let force_full = force_full_rebuild_flag.swap(false, Ordering::AcqRel);
+
+                    if aggressive_scoped && !force_full {
                         let changed_abs: Vec<PathBuf> = {
                             let mut changed = changed_files.write().await;
                             let drained =
@@ -2569,6 +2581,11 @@ impl LanguageServer for ForgeLsp {
                 }
                 self.project_cache_dirty
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Signal any already-running cache-sync worker (spawned from
+                // didSave) that it must skip the incremental scoped path and
+                // perform a full rebuild on its next iteration.
+                self.project_cache_force_full_rebuild
+                    .store(true, std::sync::atomic::Ordering::Release);
 
                 // Wake the background cache-sync worker directly. Setting the
                 // dirty flag alone is not enough — the worker is only started
@@ -2586,6 +2603,7 @@ impl LanguageServer for ForgeLsp {
                     let running_flag = self.project_cache_sync_running.clone();
                     let pending_flag = self.project_cache_sync_pending.clone();
                     let changed_files = self.project_cache_changed_files.clone();
+                    let force_full_rebuild_flag = self.project_cache_force_full_rebuild.clone();
 
                     tokio::spawn(async move {
                         loop {
@@ -2663,6 +2681,9 @@ impl LanguageServer for ForgeLsp {
                                     match save_res {
                                         Ok(Ok(report)) => {
                                             changed_files.write().await.clear();
+                                            // Clear any pending force-full flag: this worker
+                                            // already did a full rebuild on behalf of reindex.
+                                            force_full_rebuild_flag.store(false, Ordering::Release);
                                             client
                                                 .log_message(
                                                     MessageType::INFO,
