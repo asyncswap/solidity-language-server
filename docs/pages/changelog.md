@@ -1,4 +1,27 @@
+{/* This file mirrors the root CHANGELOG.md — keep both in sync when releasing. */}
+
 # Changelog
+
+## v0.1.27
+
+### Features
+
+- `projectIndex.fullProjectScan` setting to enable full project source indexing at startup (#152)
+- Persistent reference cache with atomic writes and single-flight sync (#153)
+- Auto-create `.gitignore` in cache directory (#154)
+- Incremental reindex safety with threshold gating and scoped cache merge (#156)
+- Drop v1 cache path; v2 cache is now the only supported mode
+
+### Fixes
+
+- Pull settings via `workspace/configuration` when `initializationOptions` is absent (#164)
+- Resolve solc version from transitive import pragmas (#162)
+- Use import-closure for project index with full cross-file references (#165)
+- Correct `textDocument/rename` for aliased imports (`import {A as B}` and `import './X.sol' as Y`) (#167)
+
+### Tests
+
+- 600 total tests, 0 warnings
 
 ## v0.1.26
 
