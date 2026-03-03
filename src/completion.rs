@@ -2145,7 +2145,7 @@ fn collect_sol_files(
             } else {
                 format!("./{s}")
             };
-            out.push(make_import_item(label, filename.clone()));
+            out.push(make_import_item(label));
         }
 
         // 2. Remapped paths — for every remapping whose target is a prefix of
@@ -2156,17 +2156,18 @@ fn collect_sol_files(
         for (prefix, target_abs) in remappings {
             if let Ok(suffix) = path.strip_prefix(target_abs) {
                 let label = format!("{}{}", prefix, suffix.to_string_lossy());
-                out.push(make_import_item(label, filename.clone()));
+                out.push(make_import_item(label));
             }
         }
     }
 }
 
-fn make_import_item(label: String, filename: String) -> CompletionItem {
+fn make_import_item(label: String) -> CompletionItem {
+    // No filter_text — fall back to label so the editor matches on the full
+    // path. Typing "forge-std" narrows to forge-std/... paths, typing "Pool"
+    // narrows to anything containing "Pool", typing "./lib" narrows relative
+    // paths, etc.
     CompletionItem {
-        // filter_text = just the filename so typing "Pool" matches
-        // both "./libraries/Pool.sol" and "forge-std/Pool.sol"
-        filter_text: Some(filename),
         insert_text: Some(label.clone()),
         kind: Some(CompletionItemKind::FILE),
         label,
