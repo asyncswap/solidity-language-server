@@ -2,8 +2,8 @@
 # Usage: cargo build --release && lsp-bench
 project: example
 file: Shop.sol
-line: 137
-col: 32
+line: 68
+col: 14
 
 iterations: 10
 warmup: 2
@@ -24,19 +24,20 @@ exclude:
 
 methods:
   textDocument/completion:
-    line: 160
-    col: 18
+    line: 72
+    col: 34
     trigger: "."
+    # Transaction. — member access on library type, returns Order/addTax/getRefund
 
   textDocument/signatureHelp:
-    line: 137
-    col: 47
+    line: 136
+    col: 45
     # Inside PRICE.addTax(TAX, TAX_BASE) — parameter info on first arg
 
   textDocument/documentHighlight:
-    line: 137
-    col: 32
-    # PRICE — immutable used across constructor and buy()
+    line: 68
+    col: 14
+    # PRICE immutable — used across constructor and buy()
 
   textDocument/inlayHint:
     line: 135
@@ -51,6 +52,12 @@ methods:
     line: 100
     col: 0
     # First 100 lines — library through contract declarations
+
+  textDocument/codeAction:
+    line: 264
+    col: 8
+    expect:
+      titleContains: "Remove unused import"
 
   textDocument/formatting:
     didChange:

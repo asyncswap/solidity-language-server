@@ -4509,6 +4509,36 @@ impl LanguageServer for ForgeLsp {
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
         for diag in &params.context.diagnostics {
+            // ── forge-lint string codes ───────────────────────────────────────
+            if let Some(NumberOrString::String(s)) = &diag.code {
+                if s == "unused-import" {
+                    if let Some(edit) = source.as_deref().and_then(|src| {
+                        goto::code_action_edit(
+                            src,
+                            diag.range,
+                            goto::CodeActionKind::DeleteNodeByKind {
+                                node_kind: "import_directive",
+                            },
+                        )
+                    }) {
+                        let mut changes = HashMap::new();
+                        changes.insert(uri.clone(), vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: "Remove unused import".to_string(),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            is_preferred: Some(true),
+                            ..Default::default()
+                        }));
+                    }
+                    continue;
+                }
+            }
+
             // Diagnostics from solc carry the error code as a string.
             let code: u32 = match &diag.code {
                 Some(NumberOrString::String(s)) => match s.parse() {

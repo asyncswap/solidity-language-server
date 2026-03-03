@@ -1694,6 +1694,11 @@ pub(crate) enum CodeActionKind<'a> {
     /// identifier at `diag_range.start`, including leading whitespace/newline.
     DeleteLocalVar,
 
+    /// Walk up the TS tree to the first ancestor whose kind matches `node_kind`,
+    /// then delete that whole node including its preceding newline+indentation.
+    /// Used for any "delete this whole statement/declaration" fix (e.g. unused import).
+    DeleteNodeByKind { node_kind: &'a str },
+
     /// Walk the TS tree up to `walk_to`, then delete the first child whose
     /// kind matches any entry in `child_kinds` (tried in order).
     DeleteChildNode {
@@ -1828,6 +1833,43 @@ pub(crate) fn code_action_edit(
                 stmt_start
             };
 
+            let start_pos = bytes_to_pos(source_bytes, delete_from)?;
+            let end_pos = bytes_to_pos(source_bytes, node.end_byte())?;
+            Some(TextEdit {
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+                new_text: String::new(),
+            })
+        }
+
+        // ── Walk up to `node_kind`, delete that whole node (+ preceding newline) ─
+        CodeActionKind::DeleteNodeByKind { node_kind } => {
+            let tree = ts_parse(source)?;
+            let byte = pos_to_bytes(source_bytes, diag_range.start);
+            let mut node = ts_node_at_byte(tree.root_node(), byte)?;
+            loop {
+                if node.kind() == node_kind {
+                    break;
+                }
+                node = node.parent()?;
+            }
+            // Consume the preceding newline + indentation so no blank line remains.
+            let node_start = node.start_byte();
+            let delete_from = if node_start > 0 {
+                let mut i = node_start - 1;
+                while i > 0 && (source_bytes[i] == b' ' || source_bytes[i] == b'\t') {
+                    i -= 1;
+                }
+                if source_bytes[i] == b'\n' {
+                    i
+                } else {
+                    node_start
+                }
+            } else {
+                node_start
+            };
             let start_pos = bytes_to_pos(source_bytes, delete_from)?;
             let end_pos = bytes_to_pos(source_bytes, node.end_byte())?;
             Some(TextEdit {
