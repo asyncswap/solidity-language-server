@@ -55,6 +55,7 @@ export default defineConfig({
       text: "Blog",
       items: [
         { text: "All Posts", link: "/blog" },
+        { text: "v0.1.28 Release", link: "/blog/v0-1-28-release" },
         { text: "v0.1.27 Release", link: "/blog/v0-1-27-release" },
         { text: "v0.1.26 Release", link: "/blog/v0-1-26-release" },
         { text: "v0.1.25 Release", link: "/blog/v0-1-25-release" },

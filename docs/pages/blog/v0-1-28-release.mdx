@@ -1,0 +1,75 @@
+# v0.1.28
+
+The v2 Cache — Persistent, Sharded, and Atomic
+
+This release makes the reference cache a first-class persistent store. Cold starts now warm up from disk in milliseconds, edits persist immediately, and the cache stays consistent even when the server is killed mid-write.
+
+## The v2 cache
+
+The reference index is what powers goto-definition, find-all-references, hover, and completions across files. Building it requires compiling the full project through `solc`, which for large codebases (e.g. Uniswap v4-core) takes several seconds.
+
+In v0.1.28 that index is persisted to `.solidity-language-server/` in your project root on every successful build. On the next startup, the server loads it from disk instead of recompiling from scratch.
+
+### Sharded layout
+
+The cache is split into two parts:
+
+- **`solidity-lsp-schema-v2.json`** — the manifest: project root, config fingerprint, per-file Keccak-256 hashes, hash history (up to 8 entries per file), cross-file `external_refs`, `id_to_path_map`, and a `node_shards` map of relative path → shard filename.
+- **`reference-index-v2/<hash>.json`** — one shard file per source file, named by the Keccak-256 of the relative path. Each shard holds the `NodeId → NodeInfo` entries for that file.
+
+Splitting nodes into per-file shards means a single save only rewrites the shards for touched files. The rest stay on disk untouched.
+
+### Hash-gated reuse
+
+On load, the server hashes only the files that were in the last compiled closure — not every file under `src/` or `lib/`. Each file's hash is compared against the manifest. Files whose hash matches have their shard loaded directly into memory. Files whose hash changed are skipped and queued for recompilation.
+
+This gives partial warm-start: if 490 of 510 files are unchanged, 490 shards load from cache and only 20 are recompiled. The `complete` flag on `CacheLoadReport` signals whether every file was a hit so the server knows whether a follow-up full compile is needed.
+
+### Atomic writes
+
+Every write — both shard files and the manifest — goes through `write_atomic_json`: write to a `.tmp` sibling, `fsync`, then `rename` into place. A kill mid-write leaves the previous version intact.
+
+### Config fingerprint
+
+The manifest includes a fingerprint of the Foundry config:
+
+```
+keccak256(json({ solc_version, remappings, via_ir, optimizer, optimizer_runs, evm_version, sources_dir, libs }))
+```
+
+If any of these change (e.g. a `foundry.toml` edit), the load is rejected as a miss and a full recompile runs.
+
+### Incremental upsert on save
+
+On every `textDocument/didSave`, the server runs a debounced single-flight upsert worker:
+
+1. Recompile only the saved file (scoped build).
+2. Purge stale `NodeId`s and `external_refs` for that file from the manifest — old IDs are invalid after recompile since solc reassigns integers.
+3. Write the new shard atomically.
+4. Append replacement `external_refs` from the partial build immediately, so cross-file reference resolution works without waiting for a full sync.
+
+A separate full-sync worker runs when the dirty flag is set, handling save bursts with debouncing so the disk isn't hammered on rapid edits.
+
+### Auto-gitignore
+
+On first write the server creates `.solidity-language-server/.gitignore` with `*` so cache artifacts are never accidentally committed.
+
+## Import-closure indexing
+
+The project index now uses a BFS from `src/`, `test/`, and `script/` roots through forge remappings to find only the files the project actually imports. For v4-core this is ~510 files instead of 1788 when walking all of `lib/`. Cross-file `referencedDeclaration` IDs are now populated because the closure compile runs full (not `stopAfter:parsing`), and the cache hashes only the closure files — so a warm load on second open triggers zero recompilation.
+
+## Solc version resolution from transitive pragmas
+
+The server now intersects pragma constraints across the full import graph. If a top-level file has `^0.8.0` but a transitive import requires `=0.8.23`, the tightest constraint wins and the correct solc binary is selected. Previously the latest installed version was used, which could reject imported files with error 5333 and produce an empty AST.
+
+## Fixes
+
+- Pull settings via `workspace/configuration` when `initializationOptions` is absent — fixes Neovim where settings are only delivered via pull requests.
+- Use tree-sitter for import parsing in pragma graph walk, handling multi-line import directives.
+- Correct `textDocument/rename` for aliased imports (`import {A as B}` and `import './X.sol' as Y`).
+
+## Upgrade
+
+```sh
+cargo install solidity-language-server
+```
