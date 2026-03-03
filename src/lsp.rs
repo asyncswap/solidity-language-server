@@ -3204,8 +3204,17 @@ impl LanguageServer for ForgeLsp {
                 let foundry_cfg = self.foundry_config.read().await.clone();
                 let project_root = foundry_cfg.root.clone();
                 let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
-                let items =
-                    completion::all_sol_import_paths(&current_file, &project_root, &remappings);
+                // Extract the text already typed inside the import string so
+                // we can build a text_edit that replaces it, and set filter_text
+                // so clients filter on the full path label.
+                let typed_range = completion::import_string_prefix(&source_text, position)
+                    .map(|(_prefix, start_col)| (position.line, start_col, position.character));
+                let items = completion::all_sol_import_paths(
+                    &current_file,
+                    &project_root,
+                    &remappings,
+                    typed_range,
+                );
                 return Ok(Some(CompletionResponse::List(CompletionList {
                     is_incomplete: true,
                     items,

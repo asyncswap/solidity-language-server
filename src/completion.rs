@@ -2059,15 +2059,52 @@ pub fn cursor_is_on_import_line(source: &str, position: Position) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the text already typed inside the import string on the cursor line,
+/// i.e. everything after the opening `"` or `'` up to `position.character`.
+/// Returns `None` if the cursor is not inside an import string.
+pub fn import_string_prefix(source: &str, position: Position) -> Option<(String, u32)> {
+    let line = source.lines().nth(position.line as usize)?;
+    if !line.trim_start().starts_with("import") {
+        return None;
+    }
+    // Find the last unmatched opening quote before the cursor.
+    let before_cursor = line.get(..position.character as usize)?;
+    let mut quote_char = None;
+    let mut quote_col = None;
+    for (i, ch) in before_cursor.char_indices() {
+        if ch == '"' || ch == '\'' {
+            if quote_char == Some(ch) {
+                // closing quote — we're outside again
+                quote_char = None;
+                quote_col = None;
+            } else if quote_char.is_none() {
+                // opening quote
+                quote_char = Some(ch);
+                quote_col = Some(i as u32 + 1); // col after the quote char
+            }
+        }
+    }
+    let col = quote_col?;
+    let prefix = before_cursor.get(col as usize..)?.to_string();
+    Some((prefix, col))
+}
+
 /// Walk `project_root` recursively and return every `.sol` file as:
 ///   1. A relative path from the current file's directory (e.g. `./libraries/Pool.sol`)
 ///   2. A remapped path for each matching remapping (e.g. `forge-std/Test.sol`)
 ///
 /// Skips `out/`, `cache/`, `node_modules/`, `.git/`.
+///
+/// `typed_range` is `Some((line, start_col, end_col))` where `start_col` is the
+/// character column right after the opening quote and `end_col` is the cursor
+/// column. When provided, each item gets a `text_edit` that replaces the
+/// already-typed text so the insert doesn't double-up, plus `filter_text = label`
+/// so clients filter on the full path rather than the word at cursor.
 pub fn all_sol_import_paths(
     current_file: &Path,
     project_root: &Path,
     remappings: &[String],
+    typed_range: Option<(u32, u32, u32)>,
 ) -> Vec<CompletionItem> {
     let current_dir = match current_file.parent() {
         Some(d) => d,
@@ -2076,6 +2113,8 @@ pub fn all_sol_import_paths(
 
     // Pre-parse remappings into (prefix, abs_target_path) pairs.
     // e.g. "forge-std/=lib/forge-std/src/" → ("forge-std/", "/project/lib/forge-std/src/")
+    // Canonicalize the target so strip_prefix works even when the path contains
+    // `..` segments (e.g. lib/forge-std/../src/ would otherwise produce bad labels).
     let parsed_remappings: Vec<(String, std::path::PathBuf)> = remappings
         .iter()
         .filter_map(|r| {
@@ -2085,7 +2124,9 @@ pub fn all_sol_import_paths(
             if prefix.is_empty() || target.is_empty() {
                 return None;
             }
-            Some((prefix, project_root.join(target)))
+            let raw = project_root.join(target);
+            let canonical = raw.canonicalize().unwrap_or(raw);
+            Some((prefix, canonical))
         })
         .collect();
 
@@ -2097,6 +2138,7 @@ pub fn all_sol_import_paths(
         current_dir,
         &parsed_remappings,
         skip_dirs,
+        typed_range,
         &mut items,
     );
     items.sort_by(|a, b| a.label.cmp(&b.label));
@@ -2108,6 +2150,7 @@ fn collect_sol_files(
     current_dir: &Path,
     remappings: &[(String, std::path::PathBuf)],
     skip_dirs: &[&str],
+    typed_range: Option<(u32, u32, u32)>,
     out: &mut Vec<CompletionItem>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -2127,15 +2170,13 @@ fn collect_sol_files(
             if skip_dirs.contains(&name_str.as_ref()) {
                 continue;
             }
-            collect_sol_files(&path, current_dir, remappings, skip_dirs, out);
+            collect_sol_files(&path, current_dir, remappings, skip_dirs, typed_range, out);
             continue;
         }
 
         if !path.is_file() || !name_str.ends_with(".sol") {
             continue;
         }
-
-        let filename = name_str.to_string();
 
         // 1. Relative path (always emitted)
         if let Some(rel) = pathdiff::diff_paths(&path, current_dir) {
@@ -2145,7 +2186,7 @@ fn collect_sol_files(
             } else {
                 format!("./{s}")
             };
-            out.push(make_import_item(label));
+            out.push(make_import_item(label, typed_range));
         }
 
         // 2. Remapped paths — for every remapping whose target is a prefix of
@@ -2155,22 +2196,44 @@ fn collect_sol_files(
         //         → label = "forge-std/Test.sol"
         for (prefix, target_abs) in remappings {
             if let Ok(suffix) = path.strip_prefix(target_abs) {
-                let label = format!("{}{}", prefix, suffix.to_string_lossy());
-                out.push(make_import_item(label));
+                let suffix_str = suffix
+                    .to_string_lossy()
+                    .trim_start_matches(['/', '\\'])
+                    .to_string();
+                let label = format!("{}{}", prefix, suffix_str);
+                out.push(make_import_item(label, typed_range));
             }
         }
     }
 }
 
-fn make_import_item(label: String) -> CompletionItem {
-    // No filter_text — fall back to label so the editor matches on the full
-    // path. Typing "forge-std" narrows to forge-std/... paths, typing "Pool"
-    // narrows to anything containing "Pool", typing "./lib" narrows relative
-    // paths, etc.
+fn make_import_item(label: String, typed_range: Option<(u32, u32, u32)>) -> CompletionItem {
+    // filter_text = label so that clients whose word-at-cursor is shorter than
+    // the full path (e.g. just "Pool" when the label is "./src/Pool.sol") still
+    // match correctly via substring/fuzzy matching against the full path.
+    //
+    // text_edit replaces the already-typed text inside the quotes so the insert
+    // doesn't append after what was already typed.
+    let text_edit = typed_range.map(|(line, start_col, end_col)| {
+        tower_lsp::lsp_types::CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start_col,
+                },
+                end: Position {
+                    line,
+                    character: end_col,
+                },
+            },
+            new_text: label.clone(),
+        })
+    });
     CompletionItem {
-        insert_text: Some(label.clone()),
+        label: label.clone(),
+        filter_text: Some(label.clone()),
+        text_edit,
         kind: Some(CompletionItemKind::FILE),
-        label,
         ..Default::default()
     }
 }
@@ -2524,10 +2587,68 @@ mod tests {
     }
 
     #[test]
+    fn import_string_prefix_mid_path() {
+        // cursor inside import "  ./Fo  |  .sol"
+        let src = "import \"./Foo.sol\";";
+        let (prefix, col) = super::import_string_prefix(
+            src,
+            Position {
+                line: 0,
+                character: 12,
+            },
+        )
+        .expect("should find prefix");
+        assert_eq!(col, 8); // right after the opening `"`
+        assert_eq!(prefix, "./Fo");
+    }
+
+    #[test]
+    fn import_string_prefix_none_outside_quotes() {
+        let src = "import \"./Foo.sol\";";
+        // position 19 is past the closing quote (after the `;`)
+        assert!(
+            super::import_string_prefix(
+                src,
+                Position {
+                    line: 0,
+                    character: 19
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn import_string_prefix_none_non_import_line() {
+        let src = "string memory s = \"hello\";";
+        assert!(
+            super::import_string_prefix(
+                src,
+                Position {
+                    line: 0,
+                    character: 20
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn make_import_item_has_filter_text_and_text_edit() {
+        let item = super::make_import_item("./src/Pool.sol".to_string(), Some((0, 8, 12)));
+        assert_eq!(item.filter_text.as_deref(), Some("./src/Pool.sol"));
+        assert!(item.text_edit.is_some(), "text_edit should be set");
+        assert!(
+            item.insert_text.is_none(),
+            "insert_text should be absent when text_edit is set"
+        );
+    }
+
+    #[test]
     fn all_sol_import_paths_no_panic_missing_dir() {
         let current = std::path::Path::new("/nonexistent/src/Foo.sol");
         let root = std::path::Path::new("/nonexistent");
-        let items = super::all_sol_import_paths(current, root, &[]);
+        let items = super::all_sol_import_paths(current, root, &[], None);
         assert!(items.is_empty());
     }
 
@@ -2536,7 +2657,7 @@ mod tests {
         // Use real paths from the repo fixture
         let root = std::path::Path::new("example");
         let current = root.join("A.sol");
-        let items = super::all_sol_import_paths(&current, root, &[]);
+        let items = super::all_sol_import_paths(&current, root, &[], None);
         // All labels should start with ./ or ../
         for item in &items {
             assert!(
