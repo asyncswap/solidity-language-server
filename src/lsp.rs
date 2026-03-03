@@ -87,6 +87,8 @@ pub struct ForgeLsp {
     /// compile cycle and picks up the newest params via `borrow_and_update`.
     did_save_workers:
         Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>>,
+    /// JSON-driven code-action database loaded once at startup.
+    code_action_db: Arc<HashMap<u32, crate::code_actions::CodeActionDef>>,
 }
 
 impl ForgeLsp {
@@ -129,6 +131,7 @@ impl ForgeLsp {
             pending_create_scaffold: Arc::new(RwLock::new(HashSet::new())),
             settings_from_init: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             did_save_workers: Arc::new(RwLock::new(HashMap::new())),
+            code_action_db: Arc::new(crate::code_actions::load()),
         }
     }
 
@@ -2010,6 +2013,15 @@ impl LanguageServer for ForgeLsp {
                     },
                 }),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        resolve_provider: Some(false),
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
+                    },
+                )),
                 code_lens_provider: None,
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
@@ -4473,6 +4485,143 @@ impl LanguageServer for ForgeLsp {
                 )
                 .await;
             Ok(Some(hints))
+        }
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+        use crate::code_actions::FixKind;
+
+        let uri = &params.text_document.uri;
+
+        // Resolve source text once — needed by all tree-sitter backed actions.
+        let source: Option<String> = if let Ok(path) = uri.to_file_path() {
+            self.get_source_bytes(uri, &path)
+                .await
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        } else {
+            None
+        };
+
+        let db = &self.code_action_db;
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+        for diag in &params.context.diagnostics {
+            // Diagnostics from solc carry the error code as a string.
+            let code: u32 = match &diag.code {
+                Some(NumberOrString::String(s)) => match s.parse() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+
+            // ── JSON-driven path ──────────────────────────────────────────────
+            if let Some(def) = db.get(&code) {
+                // Build the TextEdit from the fix kind.
+                let edit_opt: Option<TextEdit> = match &def.fix {
+                    FixKind::Insert { text, anchor: _ } => {
+                        // InsertAtFileStart is the only anchor for now.
+                        goto::code_action_edit(
+                            source.as_deref().unwrap_or(""),
+                            diag.range,
+                            goto::CodeActionKind::InsertAtFileStart { text },
+                        )
+                    }
+
+                    FixKind::ReplaceToken { replacement } => source.as_deref().and_then(|src| {
+                        goto::code_action_edit(
+                            src,
+                            diag.range,
+                            goto::CodeActionKind::ReplaceToken { replacement },
+                        )
+                    }),
+
+                    FixKind::DeleteToken => source.as_deref().and_then(|src| {
+                        goto::code_action_edit(src, diag.range, goto::CodeActionKind::DeleteToken)
+                    }),
+
+                    FixKind::DeleteNode { node_kind } => {
+                        // Only variable_declaration_statement supported so far.
+                        if node_kind == "variable_declaration_statement" {
+                            source.as_deref().and_then(|src| {
+                                goto::code_action_edit(
+                                    src,
+                                    diag.range,
+                                    goto::CodeActionKind::DeleteLocalVar,
+                                )
+                            })
+                        } else {
+                            None
+                        }
+                    }
+
+                    FixKind::InsertBeforeNode {
+                        walk_to,
+                        before_child,
+                        text,
+                    } => {
+                        let bc: Vec<&str> = before_child.iter().map(|s| s.as_str()).collect();
+                        source.as_deref().and_then(|src| {
+                            goto::code_action_edit(
+                                src,
+                                diag.range,
+                                goto::CodeActionKind::InsertBeforeNode {
+                                    walk_to,
+                                    before_child: &bc,
+                                    text,
+                                },
+                            )
+                        })
+                    }
+
+                    // Custom fixes are handled below.
+                    FixKind::Custom => None,
+                };
+
+                if let Some(edit) = edit_opt {
+                    let mut changes = HashMap::new();
+                    changes.insert(uri.clone(), vec![edit]);
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: def.title.clone(),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![diag.clone()]),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(changes),
+                            ..Default::default()
+                        }),
+                        is_preferred: Some(true),
+                        ..Default::default()
+                    }));
+                    continue; // handled — skip custom fallback
+                }
+
+                // If it's not Custom and edit_opt was None, the TS lookup failed
+                // (e.g. file not parseable). Nothing to emit for this diagnostic.
+                if !matches!(def.fix, FixKind::Custom) {
+                    continue;
+                }
+            }
+
+            // ── Custom / hand-written fallback ────────────────────────────────
+            // Only reaches here for codes with kind=custom or codes not in the DB.
+            // Add bespoke arms here as needed.
+            #[allow(clippy::match_single_binding)]
+            match code {
+                // 2018 — state mutability can be restricted to pure/view.
+                // The replacement (pure vs view) is embedded in the diagnostic message.
+                // 9456 — missing `override` specifier.
+                // Needs a TS walk to find the right insertion point in the modifier list.
+                _ => {}
+            }
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
         }
     }
 

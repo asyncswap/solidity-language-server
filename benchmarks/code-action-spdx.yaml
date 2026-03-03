@@ -1,0 +1,31 @@
+# textDocument/codeAction — SPDX-License-Identifier quickfix (error 1878)
+#
+# NoSpdx.sol deliberately omits the SPDX header, triggering warning 1878.
+# The server should return one QuickFix action that inserts the identifier
+# at line 0, character 0.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-spdx.yaml -v
+#   lsp-bench -c benchmarks/code-action-spdx.yaml -v --verify
+
+project: .
+file: example/NoSpdx.sol
+line: 1
+col: 1
+output: benchmarks/code-action-spdx
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    expect:
+      result_not_null: true

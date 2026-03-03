@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{Location, Position, Range, Url};
+use tower_lsp::lsp_types::{Location, Position, Range, TextEdit, Url};
 use tree_sitter::{Node, Parser};
 
 use crate::types::{NodeId, SourceLoc};
@@ -1665,6 +1665,187 @@ fn find_best_declaration(source: &str, ctx: &CursorContext, file_uri: &Url) -> O
         uri: file_uri.clone(),
         range: decls[0].range,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Code-action helpers (used by lsp.rs `code_action` handler)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What kind of edit a code action should produce.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CodeActionKind<'a> {
+    /// Insert fixed text at the very start of the file (line 0, col 0).
+    InsertAtFileStart { text: &'a str },
+
+    /// Replace the token at `diag_range.start` with `replacement`.
+    /// Used for deprecated-builtin fixes (now→block.timestamp, sha3→keccak256, …).
+    ReplaceToken { replacement: &'a str },
+
+    /// Delete the token whose start byte falls inside `diag_range`
+    /// (+ one trailing space when present).
+    DeleteToken,
+
+    /// Delete the entire `variable_declaration_statement` containing the
+    /// identifier at `diag_range.start`, including leading whitespace/newline.
+    DeleteLocalVar,
+
+    /// Walk the TS tree up to `walk_to`, then insert `text` immediately before
+    /// the first child whose kind matches any entry in `before_child`.
+    /// Used for 5424 (insert `virtual` before `returns`/`;`).
+    InsertBeforeNode {
+        walk_to: &'a str,
+        before_child: &'a [&'a str],
+        text: &'a str,
+    },
+}
+
+/// Compute the `TextEdit` for a code action using tree-sitter for precision.
+///
+/// Returns `None` when the tree cannot be parsed or the target node cannot be
+/// located (caller should fall back to returning no action for that diagnostic).
+pub(crate) fn code_action_edit(
+    source: &str,
+    diag_range: Range,
+    kind: CodeActionKind<'_>,
+) -> Option<TextEdit> {
+    let source_bytes = source.as_bytes();
+
+    match kind {
+        // ── Insert fixed text at the top of the file ──────────────────────────
+        CodeActionKind::InsertAtFileStart { text } => Some(TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_text: text.to_string(),
+        }),
+
+        // ── Replace the token at diag_range.start ─────────────────────────────
+        CodeActionKind::ReplaceToken { replacement } => {
+            let tree = ts_parse(source)?;
+            let byte = pos_to_bytes(source_bytes, diag_range.start);
+            let node = ts_node_at_byte(tree.root_node(), byte)?;
+            let start_pos = bytes_to_pos(source_bytes, node.start_byte())?;
+            let end_pos = bytes_to_pos(source_bytes, node.end_byte())?;
+            Some(TextEdit {
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+                new_text: replacement.to_string(),
+            })
+        }
+
+        // ── Delete the token at diag_range.start (+ optional trailing space) ──
+        CodeActionKind::DeleteToken => {
+            let tree = ts_parse(source)?;
+            let byte = pos_to_bytes(source_bytes, diag_range.start);
+            let node = ts_node_at_byte(tree.root_node(), byte)?;
+            let start = node.start_byte();
+            let end =
+                if node.end_byte() < source_bytes.len() && source_bytes[node.end_byte()] == b' ' {
+                    node.end_byte() + 1
+                } else {
+                    node.end_byte()
+                };
+            let start_pos = bytes_to_pos(source_bytes, start)?;
+            let end_pos = bytes_to_pos(source_bytes, end)?;
+            Some(TextEdit {
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+                new_text: String::new(),
+            })
+        }
+
+        // ── Delete the enclosing variable_declaration_statement ───────────────
+        CodeActionKind::DeleteLocalVar => {
+            let tree = ts_parse(source)?;
+            let byte = pos_to_bytes(source_bytes, diag_range.start);
+            let mut node = ts_node_at_byte(tree.root_node(), byte)?;
+
+            loop {
+                if node.kind() == "variable_declaration_statement" {
+                    break;
+                }
+                node = node.parent()?;
+            }
+
+            // Consume the preceding newline + indentation so no blank line remains.
+            let stmt_start = node.start_byte();
+            let delete_from = if stmt_start > 0 {
+                let mut i = stmt_start - 1;
+                while i > 0 && (source_bytes[i] == b' ' || source_bytes[i] == b'\t') {
+                    i -= 1;
+                }
+                if source_bytes[i] == b'\n' {
+                    i
+                } else {
+                    stmt_start
+                }
+            } else {
+                stmt_start
+            };
+
+            let start_pos = bytes_to_pos(source_bytes, delete_from)?;
+            let end_pos = bytes_to_pos(source_bytes, node.end_byte())?;
+            Some(TextEdit {
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+                new_text: String::new(),
+            })
+        }
+
+        // ── Walk up to `walk_to`, insert `text` before first matching child ───
+        //
+        // Used for 5424 (insert `virtual` before `return_type_definition` / `;`).
+        //
+        // `before_child` is tried in order — the first matching child kind wins.
+        // This lets callers express "prefer returns, fall back to semicolon".
+        CodeActionKind::InsertBeforeNode {
+            walk_to,
+            before_child,
+            text,
+        } => {
+            let tree = ts_parse(source)?;
+            let byte = pos_to_bytes(source_bytes, diag_range.start);
+            let mut node = ts_node_at_byte(tree.root_node(), byte)?;
+
+            loop {
+                if node.kind() == walk_to {
+                    break;
+                }
+                node = node.parent()?;
+            }
+
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+
+            // Try each `before_child` kind in order.
+            for target_kind in before_child {
+                if let Some(child) = children.iter().find(|c| c.kind() == *target_kind) {
+                    let insert_pos = bytes_to_pos(source_bytes, child.start_byte())?;
+                    return Some(TextEdit {
+                        range: Range {
+                            start: insert_pos,
+                            end: insert_pos,
+                        },
+                        new_text: text.to_string(),
+                    });
+                }
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]

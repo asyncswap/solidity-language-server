@@ -381,15 +381,16 @@ fn load_foundry_config_from_toml_with_profile_name(
         .unwrap_or_else(|| vec!["lib".to_string()]);
 
     // Parse ignored_error_codes: `ignored_error_codes = [2394, 6321, 3860, 5574]`
-    let ignored_error_codes = get_profile_value(active_profile, default_profile, "ignored_error_codes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_integer())
-                .map(|v| v as u64)
-                .collect()
-        })
-        .unwrap_or_default();
+    let ignored_error_codes =
+        get_profile_value(active_profile, default_profile, "ignored_error_codes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_integer())
+                    .map(|v| v as u64)
+                    .collect()
+            })
+            .unwrap_or_default();
 
     FoundryConfig {
         root,
@@ -517,7 +518,10 @@ pub fn load_lint_config_from_toml(toml_path: &Path) -> LintConfig {
     load_lint_config_from_toml_with_profile_name(toml_path, &active_profile_name())
 }
 
-fn load_lint_config_from_toml_with_profile_name(toml_path: &Path, profile_name: &str) -> LintConfig {
+fn load_lint_config_from_toml_with_profile_name(
+    toml_path: &Path,
+    profile_name: &str,
+) -> LintConfig {
     let root = toml_path.parent().unwrap_or(Path::new("")).to_path_buf();
 
     let content = match std::fs::read_to_string(toml_path) {

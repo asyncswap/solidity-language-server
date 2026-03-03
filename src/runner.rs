@@ -198,9 +198,9 @@ fn parse_json_from_mixed_stdout(stdout: &str) -> Result<serde_json::Value, Runne
         }
     }
 
-    Err(RunnerError::JsonError(serde_json::Error::io(io::Error::other(
-        "failed to parse forge JSON from mixed stdout",
-    ))))
+    Err(RunnerError::JsonError(serde_json::Error::io(
+        io::Error::other("failed to parse forge JSON from mixed stdout"),
+    )))
 }
 
 #[cfg(test)]

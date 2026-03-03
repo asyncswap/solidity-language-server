@@ -229,7 +229,11 @@
     "message": "\"msg.gas\" has been deprecated in favor of \"gasleft()\"",
     "source": "analysis/StaticAnalyzer.cpp",
     "line": 218,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `msg.gas` with `gasleft()`",
+      "replacement": "gasleft()"
+    }
   },
   {
     "code": 1406,
@@ -589,7 +593,10 @@
     "message": "Override already specified.",
     "source": "parsing/Parser.cpp",
     "line": 664,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate `override`"
+    }
   },
   {
     "code": 1834,
@@ -669,7 +676,12 @@
     "message": "SPDX license identifier not provided in source file.",
     "source": "parsing/Parser.cpp",
     "line": 2614,
-    "action": null
+    "action": {
+      "kind": "insert",
+      "title": "Add SPDX-License-Identifier: MIT",
+      "text": "// SPDX-License-Identifier: MIT\n",
+      "anchor": "file_start"
+    }
   },
   {
     "code": 1884,
@@ -757,7 +769,10 @@
     "message": "Function state mutability can be restricted to",
     "source": "analysis/ViewPureChecker.cpp",
     "line": 164,
-    "action": null
+    "action": {
+      "kind": "custom",
+      "title": "Restrict state mutability"
+    }
   },
   {
     "code": 2025,
@@ -805,7 +820,11 @@
     "message": "Unused local variable.",
     "source": "analysis/StaticAnalyzer.cpp",
     "line": 145,
-    "action": null
+    "action": {
+      "kind": "delete_node",
+      "title": "Remove unused local variable",
+      "node": "variable_declaration_statement"
+    }
   },
   {
     "code": 2074,
@@ -813,7 +832,10 @@
     "message": "Unexpected trailing comma.",
     "source": "parsing/Parser.cpp",
     "line": 2547,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove trailing comma"
+    }
   },
   {
     "code": 2090,
@@ -917,7 +939,12 @@
     "message": "\"callcode\" has been deprecated in favour of \"delegatecall\".",
     "source": "analysis/StaticAnalyzer.cpp",
     "line": 258,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `callcode` with `delegatecall`",
+      "replacement": "delegatecall",
+      "note": "only fires on solc < 0.8.x which is not supported by this server"
+    }
   },
   {
     "code": 2264,
@@ -1077,7 +1104,10 @@
     "message": "Visibility for constructor is ignored. If you want the contract to be non-deployable, making it \"abstract\" is sufficient.",
     "source": "analysis/TypeChecker.cpp",
     "line": 2083,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove constructor visibility specifier"
+    }
   },
   {
     "code": 2512,
@@ -1237,7 +1267,10 @@
     "message": "Virtual already specified.",
     "source": "parsing/Parser.cpp",
     "line": 1044,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate `virtual`"
+    }
   },
   {
     "code": 2668,
@@ -1853,7 +1886,11 @@
     "message": "\"sha3\" has been deprecated in favour of \"keccak256\".",
     "source": "analysis/TypeChecker.cpp",
     "line": 3720,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `sha3` with `keccak256`",
+      "replacement": "keccak256"
+    }
   },
   {
     "code": 3558,
@@ -2173,7 +2210,10 @@
     "message": "Visibility already specified as \"",
     "source": "parsing/Parser.cpp",
     "line": 897,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate visibility specifier"
+    }
   },
   {
     "code": 4113,
@@ -2205,7 +2245,10 @@
     "message": "Free functions cannot have visibility.",
     "source": "analysis/SyntaxChecker.cpp",
     "line": 485,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove visibility from free function"
+    }
   },
   {
     "code": 4144,
@@ -2485,7 +2528,12 @@
     "message": "\"throw\" is deprecated in favour of \"revert()\", \"require()\" and \"assert()\".",
     "source": "analysis/SyntaxChecker.cpp",
     "line": 288,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `throw` with `revert()`",
+      "replacement": "revert()",
+      "note": "only fires on solc < 0.8.x which is not supported by this server"
+    }
   },
   {
     "code": 4549,
@@ -3149,7 +3197,16 @@
     "message": "Functions without implementation must be marked virtual.",
     "source": "analysis/TypeChecker.cpp",
     "line": 463,
-    "action": null
+    "action": {
+      "kind": "insert_before_node",
+      "title": "Mark function as `virtual`",
+      "walk_to": "function_definition",
+      "before_child": [
+        "return_type_definition",
+        ";"
+      ],
+      "text": "virtual "
+    }
   },
   {
     "code": 5428,
@@ -4149,7 +4206,10 @@
     "message": "Virtual already specified.",
     "source": "parsing/Parser.cpp",
     "line": 671,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate `virtual`"
+    }
   },
   {
     "code": 6899,
@@ -4365,7 +4425,11 @@
     "message": "\"now\" has been deprecated. Use \"block.timestamp\" instead.",
     "source": "analysis/TypeChecker.cpp",
     "line": 3751,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `now` with `block.timestamp`",
+      "replacement": "block.timestamp"
+    }
   },
   {
     "code": 7364,
@@ -4533,7 +4597,10 @@
     "message": "Unexpected trailing comma in parameter list.",
     "source": "parsing/Parser.cpp",
     "line": 1413,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove trailing comma in parameter list"
+    }
   },
   {
     "code": 7593,
@@ -4845,7 +4912,11 @@
     "message": "\"suicide\" has been deprecated in favour of \"selfdestruct\".",
     "source": "analysis/TypeChecker.cpp",
     "line": 3726,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `suicide` with `selfdestruct`",
+      "replacement": "selfdestruct"
+    }
   },
   {
     "code": 8051,
@@ -4885,7 +4956,11 @@
     "message": "\"block.blockhash()\" has been deprecated in favor of \"blockhash()\"",
     "source": "analysis/StaticAnalyzer.cpp",
     "line": 224,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace `block.blockhash` with `blockhash`",
+      "replacement": "blockhash"
+    }
   },
   {
     "code": 8115,
@@ -5421,7 +5496,10 @@
     "message": "Override already specified.",
     "source": "parsing/Parser.cpp",
     "line": 1038,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate `override`"
+    }
   },
   {
     "code": 9106,
@@ -5445,7 +5523,10 @@
     "message": "Override already specified.",
     "source": "parsing/Parser.cpp",
     "line": 910,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate `override`"
+    }
   },
   {
     "code": 9132,
@@ -5525,7 +5606,10 @@
     "message": "Constructor cannot have visibility.",
     "source": "analysis/TypeChecker.cpp",
     "line": 2068,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove constructor visibility specifier"
+    }
   },
   {
     "code": 9259,
@@ -5613,7 +5697,10 @@
     "message": "Interfaces do not need the \"abstract\" keyword, they are abstract implicitly.",
     "source": "analysis/ContractLevelChecker.cpp",
     "line": 331,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove unnecessary `abstract` from interface"
+    }
   },
   {
     "code": 9397,
@@ -5653,7 +5740,10 @@
     "message": "Visibility already specified as \"",
     "source": "parsing/Parser.cpp",
     "line": 636,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate visibility specifier"
+    }
   },
   {
     "code": 9456,
@@ -5661,7 +5751,10 @@
     "message": "is missing \"override\" specifier.",
     "source": "analysis/OverrideChecker.cpp",
     "line": 534,
-    "action": null
+    "action": {
+      "kind": "custom",
+      "title": "Add missing `override`"
+    }
   },
   {
     "code": 9467,
@@ -5693,7 +5786,12 @@
     "message": "ABI coder v1 is deprecated and scheduled for removal. Use ABI coder v2 instead.",
     "source": "analysis/SyntaxChecker.cpp",
     "line": 158,
-    "action": null
+    "action": {
+      "kind": "replace_token",
+      "title": "Replace ABI coder v1 with `pragma abicoder v2`",
+      "replacement": "pragma abicoder v2;",
+      "note": "only fires on solc < 0.8.x which is not supported by this server"
+    }
   },
   {
     "code": 9515,
@@ -5861,7 +5959,10 @@
     "message": "State mutability already specified as \"",
     "source": "parsing/Parser.cpp",
     "line": 651,
-    "action": null
+    "action": {
+      "kind": "delete_token",
+      "title": "Remove duplicate state mutability specifier"
+    }
   },
   {
     "code": 9689,
