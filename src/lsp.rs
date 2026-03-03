@@ -24,6 +24,7 @@ use tower_lsp::{Client, LanguageServer, lsp_types::*};
 /// Per-document semantic token cache: `result_id` + token list.
 type SemanticTokenCache = HashMap<String, (String, Vec<SemanticToken>)>;
 
+#[derive(Clone)]
 pub struct ForgeLsp {
     client: Client,
     compiler: Arc<dyn Runner>,
@@ -1305,6 +1306,549 @@ fn merge_scoped_cached_build(
     Ok(affected_paths.len())
 }
 
+async fn did_save_background(this: ForgeLsp, params: DidSaveTextDocumentParams) {
+    this.client
+        .log_message(MessageType::INFO, "file saved")
+        .await;
+
+    let mut text_content = if let Some(text) = params.text {
+        text
+    } else {
+        // Prefer text_cache (reflects unsaved changes), fall back to disk
+        let cached = {
+            let text_cache = this.text_cache.read().await;
+            text_cache
+                .get(params.text_document.uri.as_str())
+                .map(|(_, content)| content.clone())
+        };
+        if let Some(content) = cached {
+            content
+        } else {
+            match std::fs::read_to_string(params.text_document.uri.path()) {
+                Ok(content) => content,
+                Err(e) => {
+                    this.client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("Failed to read file on save: {e}"),
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Recovery path for create-file races:
+    // if a newly-created file is still whitespace-only at first save,
+    // regenerate scaffold and apply it to the open buffer.
+    let uri_str = params.text_document.uri.to_string();
+    let template_on_create = this
+        .settings
+        .read()
+        .await
+        .file_operations
+        .template_on_create;
+    let needs_recover_scaffold = {
+        let pending = this.pending_create_scaffold.read().await;
+        template_on_create
+            && pending.contains(&uri_str)
+            && !text_content.chars().any(|ch| !ch.is_whitespace())
+    };
+    if needs_recover_scaffold {
+        let solc_version = this.foundry_config.read().await.solc_version.clone();
+        if let Some(scaffold) =
+            file_operations::generate_scaffold(&params.text_document.uri, solc_version.as_deref())
+        {
+            let end = utils::byte_offset_to_position(&text_content, text_content.len());
+            let edit = WorkspaceEdit {
+                changes: Some(HashMap::from([(
+                    params.text_document.uri.clone(),
+                    vec![TextEdit {
+                        range: Range {
+                            start: Position::default(),
+                            end,
+                        },
+                        new_text: scaffold.clone(),
+                    }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            };
+            if this
+                .client
+                .apply_edit(edit)
+                .await
+                .as_ref()
+                .is_ok_and(|r| r.applied)
+            {
+                text_content = scaffold.clone();
+                let version = this
+                    .text_cache
+                    .read()
+                    .await
+                    .get(params.text_document.uri.as_str())
+                    .map(|(v, _)| *v)
+                    .unwrap_or_default();
+                this.text_cache
+                    .write()
+                    .await
+                    .insert(uri_str.clone(), (version, scaffold));
+                this.pending_create_scaffold.write().await.remove(&uri_str);
+                this.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("didSave: recovered scaffold for {}", uri_str),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    let version = this
+        .text_cache
+        .read()
+        .await
+        .get(params.text_document.uri.as_str())
+        .map(|(version, _)| *version)
+        .unwrap_or_default();
+
+    let saved_uri = params.text_document.uri.clone();
+    if let Ok(saved_file_path) = saved_uri.to_file_path() {
+        let saved_abs = saved_file_path.to_string_lossy().to_string();
+        this.project_cache_changed_files
+            .write()
+            .await
+            .insert(saved_abs.clone());
+        this.project_cache_upsert_files
+            .write()
+            .await
+            .insert(saved_abs);
+    }
+    this.on_change(TextDocumentItem {
+        uri: saved_uri.clone(),
+        text: text_content,
+        version,
+        language_id: "".to_string(),
+    })
+    .await;
+
+    let settings_snapshot = this.settings.read().await.clone();
+
+    // Fast-path incremental v2 cache upsert on save (debounced single-flight):
+    // update shards for recently saved file builds from memory.
+    // Full-project reconcile still runs separately when marked dirty.
+    if this.use_solc
+        && settings_snapshot.project_index.full_project_scan
+        && matches!(
+            settings_snapshot.project_index.cache_mode,
+            crate::config::ProjectIndexCacheMode::V2 | crate::config::ProjectIndexCacheMode::Auto
+        )
+    {
+        if start_or_mark_project_cache_upsert_pending(
+            &this.project_cache_upsert_pending,
+            &this.project_cache_upsert_running,
+        ) {
+            let upsert_files = this.project_cache_upsert_files.clone();
+            let ast_cache = this.ast_cache.clone();
+            let client = this.client.clone();
+            let running_flag = this.project_cache_upsert_running.clone();
+            let pending_flag = this.project_cache_upsert_pending.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+                    if !take_project_cache_upsert_pending(&pending_flag) {
+                        if stop_project_cache_upsert_worker_or_reclaim(&pending_flag, &running_flag)
+                        {
+                            continue;
+                        }
+                        break;
+                    }
+
+                    let changed_paths: Vec<String> = {
+                        let mut paths = upsert_files.write().await;
+                        paths.drain().collect()
+                    };
+                    if changed_paths.is_empty() {
+                        continue;
+                    }
+
+                    let mut work_items: Vec<(
+                        crate::config::FoundryConfig,
+                        crate::goto::CachedBuild,
+                    )> = Vec::new();
+                    {
+                        let cache = ast_cache.read().await;
+                        for abs_str in changed_paths {
+                            let path = PathBuf::from(&abs_str);
+                            let Ok(uri) = Url::from_file_path(&path) else {
+                                continue;
+                            };
+                            let uri_key = uri.to_string();
+                            let Some(build) = cache.get(&uri_key).cloned() else {
+                                continue;
+                            };
+                            // Only upsert if this build contains the saved file itself.
+                            if !build.nodes.contains_key(&abs_str) {
+                                continue;
+                            }
+                            let cfg = crate::config::load_foundry_config(&path);
+                            work_items.push((cfg, (*build).clone()));
+                        }
+                    }
+
+                    if work_items.is_empty() {
+                        continue;
+                    }
+
+                    let res = tokio::task::spawn_blocking(move || {
+                        let mut total_files = 0usize;
+                        let mut total_ms = 0u128;
+                        let mut failures: Vec<String> = Vec::new();
+                        for (cfg, build) in work_items {
+                            match crate::project_cache::upsert_reference_cache_v2_with_report(
+                                &cfg, &build,
+                            ) {
+                                Ok(report) => {
+                                    total_files += report.file_count_hashed;
+                                    total_ms += report.duration_ms;
+                                }
+                                Err(e) => failures.push(e),
+                            }
+                        }
+                        (total_files, total_ms, failures)
+                    })
+                    .await;
+
+                    match res {
+                        Ok((total_files, total_ms, failures)) => {
+                            if !failures.is_empty() {
+                                client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!(
+                                            "project cache v2 upsert: {} failure(s), first={}",
+                                            failures.len(),
+                                            failures[0]
+                                        ),
+                                    )
+                                    .await;
+                            } else {
+                                client
+                                    .log_message(
+                                        MessageType::INFO,
+                                        format!(
+                                            "project cache v2 upsert (debounced): touched_files={}, duration={}ms",
+                                            total_files, total_ms
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            client
+                                .log_message(
+                                    MessageType::WARNING,
+                                    format!("project cache v2 upsert task failed: {e}"),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    // If workspace file-ops changed project structure, schedule a
+    // debounced latest-wins sync of on-disk reference cache.
+    if this.use_solc
+        && settings_snapshot.project_index.full_project_scan
+        && this.project_cache_dirty.load(Ordering::Acquire)
+    {
+        if start_or_mark_project_cache_sync_pending(
+            &this.project_cache_sync_pending,
+            &this.project_cache_sync_running,
+        ) {
+            let foundry_config = this.foundry_config.read().await.clone();
+            let root_key = this.project_cache_key().await;
+            let ast_cache = this.ast_cache.clone();
+            let text_cache = this.text_cache.clone();
+            let client = this.client.clone();
+            let dirty_flag = this.project_cache_dirty.clone();
+            let running_flag = this.project_cache_sync_running.clone();
+            let pending_flag = this.project_cache_sync_pending.clone();
+            let changed_files = this.project_cache_changed_files.clone();
+            let aggressive_scoped = settings_snapshot.project_index.incremental_edit_reindex;
+
+            tokio::spawn(async move {
+                loop {
+                    // Debounce save bursts into one trailing sync.
+                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+                    if !take_project_cache_sync_pending(&pending_flag) {
+                        if stop_project_cache_sync_worker_or_reclaim(&pending_flag, &running_flag) {
+                            continue;
+                        }
+                        break;
+                    }
+
+                    if !try_claim_project_cache_dirty(&dirty_flag) {
+                        continue;
+                    }
+
+                    let Some(cache_key) = &root_key else {
+                        dirty_flag.store(true, Ordering::Release);
+                        continue;
+                    };
+                    if !foundry_config.root.is_dir() {
+                        dirty_flag.store(true, Ordering::Release);
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!(
+                                    "didSave cache sync: invalid project root {}, deferring",
+                                    foundry_config.root.display()
+                                ),
+                            )
+                            .await;
+                        continue;
+                    }
+
+                    let mut scoped_ok = false;
+
+                    if aggressive_scoped {
+                        let changed_abs: Vec<PathBuf> = {
+                            let mut changed = changed_files.write().await;
+                            let drained =
+                                changed.drain().map(PathBuf::from).collect::<Vec<PathBuf>>();
+                            drained
+                        };
+                        if !changed_abs.is_empty() {
+                            let remappings = crate::solc::resolve_remappings(&foundry_config).await;
+                            let cfg_for_plan = foundry_config.clone();
+                            let changed_for_plan = changed_abs.clone();
+                            let remappings_for_plan = remappings.clone();
+                            let plan_res = tokio::task::spawn_blocking(move || {
+                                compute_reverse_import_closure(
+                                    &cfg_for_plan,
+                                    &changed_for_plan,
+                                    &remappings_for_plan,
+                                )
+                            })
+                            .await;
+
+                            let affected_files = match plan_res {
+                                Ok(set) => set.into_iter().collect::<Vec<PathBuf>>(),
+                                Err(_) => Vec::new(),
+                            };
+                            if !affected_files.is_empty() {
+                                client
+                                    .log_message(
+                                        MessageType::INFO,
+                                        format!(
+                                            "didSave cache sync: aggressive scoped reindex (affected={})",
+                                            affected_files.len(),
+                                        ),
+                                    )
+                                    .await;
+
+                                let text_cache_snapshot = text_cache.read().await.clone();
+                                match crate::solc::solc_project_index_scoped(
+                                    &foundry_config,
+                                    Some(&client),
+                                    Some(&text_cache_snapshot),
+                                    &affected_files,
+                                )
+                                .await
+                                {
+                                    Ok(ast_data) => {
+                                        let scoped_build =
+                                            Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
+                                        let source_count = scoped_build.nodes.len();
+                                        enum ScopedApply {
+                                            Merged { affected_count: usize },
+                                            Stored,
+                                            Failed(String),
+                                        }
+                                        let apply_outcome = {
+                                            let mut cache = ast_cache.write().await;
+                                            if let Some(existing) = cache.get(cache_key).cloned() {
+                                                let mut merged = (*existing).clone();
+                                                match merge_scoped_cached_build(
+                                                    &mut merged,
+                                                    (*scoped_build).clone(),
+                                                ) {
+                                                    Ok(affected_count) => {
+                                                        cache.insert(
+                                                            cache_key.clone(),
+                                                            Arc::new(merged),
+                                                        );
+                                                        ScopedApply::Merged { affected_count }
+                                                    }
+                                                    Err(e) => ScopedApply::Failed(e),
+                                                }
+                                            } else {
+                                                cache.insert(cache_key.clone(), scoped_build);
+                                                ScopedApply::Stored
+                                            }
+                                        };
+
+                                        match apply_outcome {
+                                            ScopedApply::Merged { affected_count } => {
+                                                client
+                                                    .log_message(
+                                                        MessageType::INFO,
+                                                        format!(
+                                                            "didSave cache sync: scoped merge applied (scoped_sources={}, affected_paths={})",
+                                                            source_count, affected_count
+                                                        ),
+                                                    )
+                                                    .await;
+                                                scoped_ok = true;
+                                            }
+                                            ScopedApply::Stored => {
+                                                client
+                                                    .log_message(
+                                                        MessageType::INFO,
+                                                        format!(
+                                                            "didSave cache sync: scoped cache stored (scoped_sources={})",
+                                                            source_count
+                                                        ),
+                                                    )
+                                                    .await;
+                                                scoped_ok = true;
+                                            }
+                                            ScopedApply::Failed(e) => {
+                                                client
+                                                .log_message(
+                                                    MessageType::WARNING,
+                                                    format!(
+                                                        "didSave cache sync: scoped merge rejected, will retry scoped on next save: {e}"
+                                                    ),
+                                                )
+                                                .await;
+                                                dirty_flag.store(true, Ordering::Release);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        client
+                                            .log_message(
+                                                MessageType::WARNING,
+                                                format!(
+                                                    "didSave cache sync: scoped reindex failed, will retry scoped on next save: {e}"
+                                                ),
+                                            )
+                                            .await;
+                                        dirty_flag.store(true, Ordering::Release);
+                                    }
+                                }
+                            } else {
+                                client
+                                    .log_message(
+                                        MessageType::INFO,
+                                        "didSave cache sync: no affected files from scoped planner",
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+
+                    if scoped_ok {
+                        continue;
+                    }
+                    if aggressive_scoped {
+                        continue;
+                    }
+
+                    client
+                        .log_message(
+                            MessageType::INFO,
+                            "didSave cache sync: rebuilding project index from disk",
+                        )
+                        .await;
+
+                    match crate::solc::solc_project_index(&foundry_config, Some(&client), None)
+                        .await
+                    {
+                        Ok(ast_data) => {
+                            let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
+                            if let Some(prev) = ast_cache.read().await.get(cache_key) {
+                                new_build.merge_missing_from(prev);
+                            }
+                            let source_count = new_build.nodes.len();
+                            let cached_build = Arc::new(new_build);
+                            let build_for_save = (*cached_build).clone();
+                            ast_cache
+                                .write()
+                                .await
+                                .insert(cache_key.clone(), cached_build);
+
+                            let cfg_for_save = foundry_config.clone();
+                            let save_res = tokio::task::spawn_blocking(move || {
+                                crate::project_cache::save_reference_cache_with_report(
+                                    &cfg_for_save,
+                                    &build_for_save,
+                                    None,
+                                )
+                            })
+                            .await;
+
+                            match save_res {
+                                Ok(Ok(report)) => {
+                                    changed_files.write().await.clear();
+                                    client
+                                        .log_message(
+                                            MessageType::INFO,
+                                            format!(
+                                                "didSave cache sync: persisted cache (sources={}, hashed_files={}, duration={}ms)",
+                                                source_count, report.file_count_hashed, report.duration_ms
+                                            ),
+                                        )
+                                        .await;
+                                }
+                                Ok(Err(e)) => {
+                                    dirty_flag.store(true, Ordering::Release);
+                                    client
+                                        .log_message(
+                                            MessageType::WARNING,
+                                            format!(
+                                                "didSave cache sync: persist failed, will retry: {e}"
+                                            ),
+                                        )
+                                        .await;
+                                }
+                                Err(e) => {
+                                    dirty_flag.store(true, Ordering::Release);
+                                    client
+                                        .log_message(
+                                            MessageType::WARNING,
+                                            format!(
+                                                "didSave cache sync: save task failed, will retry: {e}"
+                                            ),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            dirty_flag.store(true, Ordering::Release);
+                            client
+                                .log_message(
+                                    MessageType::WARNING,
+                                    format!("didSave cache sync: re-index failed, will retry: {e}"),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for ForgeLsp {
     async fn initialize(
@@ -2053,627 +2597,10 @@ impl LanguageServer for ForgeLsp {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "file saved")
-            .await;
-
-        let mut text_content = if let Some(text) = params.text {
-            text
-        } else {
-            // Prefer text_cache (reflects unsaved changes), fall back to disk
-            let cached = {
-                let text_cache = self.text_cache.read().await;
-                text_cache
-                    .get(params.text_document.uri.as_str())
-                    .map(|(_, content)| content.clone())
-            };
-            if let Some(content) = cached {
-                content
-            } else {
-                match std::fs::read_to_string(params.text_document.uri.path()) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        self.client
-                            .log_message(
-                                MessageType::ERROR,
-                                format!("Failed to read file on save: {e}"),
-                            )
-                            .await;
-                        return;
-                    }
-                }
-            }
-        };
-
-        // Recovery path for create-file races:
-        // if a newly-created file is still whitespace-only at first save,
-        // regenerate scaffold and apply it to the open buffer.
-        let uri_str = params.text_document.uri.to_string();
-        let template_on_create = self
-            .settings
-            .read()
-            .await
-            .file_operations
-            .template_on_create;
-        let needs_recover_scaffold = {
-            let pending = self.pending_create_scaffold.read().await;
-            template_on_create
-                && pending.contains(&uri_str)
-                && !text_content.chars().any(|ch| !ch.is_whitespace())
-        };
-        if needs_recover_scaffold {
-            let solc_version = self.foundry_config.read().await.solc_version.clone();
-            if let Some(scaffold) = file_operations::generate_scaffold(
-                &params.text_document.uri,
-                solc_version.as_deref(),
-            ) {
-                let end = utils::byte_offset_to_position(&text_content, text_content.len());
-                let edit = WorkspaceEdit {
-                    changes: Some(HashMap::from([(
-                        params.text_document.uri.clone(),
-                        vec![TextEdit {
-                            range: Range {
-                                start: Position::default(),
-                                end,
-                            },
-                            new_text: scaffold.clone(),
-                        }],
-                    )])),
-                    document_changes: None,
-                    change_annotations: None,
-                };
-                if self
-                    .client
-                    .apply_edit(edit)
-                    .await
-                    .as_ref()
-                    .is_ok_and(|r| r.applied)
-                {
-                    text_content = scaffold.clone();
-                    let version = self
-                        .text_cache
-                        .read()
-                        .await
-                        .get(params.text_document.uri.as_str())
-                        .map(|(v, _)| *v)
-                        .unwrap_or_default();
-                    self.text_cache
-                        .write()
-                        .await
-                        .insert(uri_str.clone(), (version, scaffold));
-                    self.pending_create_scaffold.write().await.remove(&uri_str);
-                    self.client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("didSave: recovered scaffold for {}", uri_str),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        let version = self
-            .text_cache
-            .read()
-            .await
-            .get(params.text_document.uri.as_str())
-            .map(|(version, _)| *version)
-            .unwrap_or_default();
-
-        let saved_uri = params.text_document.uri.clone();
-        if let Ok(saved_file_path) = saved_uri.to_file_path() {
-            let saved_abs = saved_file_path.to_string_lossy().to_string();
-            self.project_cache_changed_files
-                .write()
-                .await
-                .insert(saved_abs.clone());
-            self.project_cache_upsert_files
-                .write()
-                .await
-                .insert(saved_abs);
-        }
-        self.on_change(TextDocumentItem {
-            uri: saved_uri.clone(),
-            text: text_content,
-            version,
-            language_id: "".to_string(),
-        })
-        .await;
-
-        let settings_snapshot = self.settings.read().await.clone();
-
-        // Immediate v2 upsert on successful save/build path for the current file.
-        // This keeps on-disk cache fresh every save without waiting for debounce.
-        if self.use_solc
-            && settings_snapshot.project_index.full_project_scan
-            && matches!(
-                settings_snapshot.project_index.cache_mode,
-                crate::config::ProjectIndexCacheMode::V2
-                    | crate::config::ProjectIndexCacheMode::Auto
-            )
-            && let Ok(saved_file_path) = saved_uri.to_file_path()
-        {
-            let saved_abs = saved_file_path.to_string_lossy().to_string();
-            let uri_key = saved_uri.to_string();
-            let build_opt = { self.ast_cache.read().await.get(&uri_key).cloned() };
-            if let Some(build) = build_opt {
-                if build.nodes.contains_key(&saved_abs) {
-                    let cfg = crate::config::load_foundry_config(&saved_file_path);
-                    let build_for_upsert = (*build).clone();
-                    let upsert_res = tokio::task::spawn_blocking(move || {
-                        crate::project_cache::upsert_reference_cache_v2_with_report(
-                            &cfg,
-                            &build_for_upsert,
-                        )
-                    })
-                    .await;
-                    match upsert_res {
-                        Ok(Ok(report)) => {
-                            self.project_cache_upsert_files
-                                .write()
-                                .await
-                                .remove(&saved_abs);
-                            self.client
-                                .log_message(
-                                    MessageType::INFO,
-                                    format!(
-                                        "project cache v2 upsert (immediate): touched_files={}, duration={}ms",
-                                        report.file_count_hashed, report.duration_ms
-                                    ),
-                                )
-                                .await;
-                        }
-                        Ok(Err(e)) => {
-                            self.client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!("project cache v2 upsert (immediate) failed: {}", e),
-                                )
-                                .await;
-                        }
-                        Err(e) => {
-                            self.client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!(
-                                        "project cache v2 upsert (immediate) task failed: {}",
-                                        e
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fast-path incremental v2 cache upsert on save (debounced single-flight):
-        // update shards for recently saved file builds from memory.
-        // Full-project reconcile still runs separately when marked dirty.
-        if self.use_solc
-            && settings_snapshot.project_index.full_project_scan
-            && matches!(
-                settings_snapshot.project_index.cache_mode,
-                crate::config::ProjectIndexCacheMode::V2
-                    | crate::config::ProjectIndexCacheMode::Auto
-            )
-        {
-            if start_or_mark_project_cache_upsert_pending(
-                &self.project_cache_upsert_pending,
-                &self.project_cache_upsert_running,
-            ) {
-                let upsert_files = self.project_cache_upsert_files.clone();
-                let ast_cache = self.ast_cache.clone();
-                let client = self.client.clone();
-                let running_flag = self.project_cache_upsert_running.clone();
-                let pending_flag = self.project_cache_upsert_pending.clone();
-
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-
-                        if !take_project_cache_upsert_pending(&pending_flag) {
-                            if stop_project_cache_upsert_worker_or_reclaim(
-                                &pending_flag,
-                                &running_flag,
-                            ) {
-                                continue;
-                            }
-                            break;
-                        }
-
-                        let changed_paths: Vec<String> = {
-                            let mut paths = upsert_files.write().await;
-                            paths.drain().collect()
-                        };
-                        if changed_paths.is_empty() {
-                            continue;
-                        }
-
-                        let mut work_items: Vec<(
-                            crate::config::FoundryConfig,
-                            crate::goto::CachedBuild,
-                        )> = Vec::new();
-                        {
-                            let cache = ast_cache.read().await;
-                            for abs_str in changed_paths {
-                                let path = PathBuf::from(&abs_str);
-                                let Ok(uri) = Url::from_file_path(&path) else {
-                                    continue;
-                                };
-                                let uri_key = uri.to_string();
-                                let Some(build) = cache.get(&uri_key).cloned() else {
-                                    continue;
-                                };
-                                // Only upsert if this build contains the saved file itself.
-                                if !build.nodes.contains_key(&abs_str) {
-                                    continue;
-                                }
-                                let cfg = crate::config::load_foundry_config(&path);
-                                work_items.push((cfg, (*build).clone()));
-                            }
-                        }
-
-                        if work_items.is_empty() {
-                            continue;
-                        }
-
-                        let res = tokio::task::spawn_blocking(move || {
-                            let mut total_files = 0usize;
-                            let mut total_ms = 0u128;
-                            let mut failures: Vec<String> = Vec::new();
-                            for (cfg, build) in work_items {
-                                match crate::project_cache::upsert_reference_cache_v2_with_report(
-                                    &cfg, &build,
-                                ) {
-                                    Ok(report) => {
-                                        total_files += report.file_count_hashed;
-                                        total_ms += report.duration_ms;
-                                    }
-                                    Err(e) => failures.push(e),
-                                }
-                            }
-                            (total_files, total_ms, failures)
-                        })
-                        .await;
-
-                        match res {
-                            Ok((total_files, total_ms, failures)) => {
-                                if !failures.is_empty() {
-                                    client
-                                        .log_message(
-                                            MessageType::WARNING,
-                                            format!(
-                                                "project cache v2 upsert: {} failure(s), first={}",
-                                                failures.len(),
-                                                failures[0]
-                                            ),
-                                        )
-                                        .await;
-                                } else {
-                                    client
-                                        .log_message(
-                                            MessageType::INFO,
-                                            format!(
-                                                "project cache v2 upsert (debounced): touched_files={}, duration={}ms",
-                                                total_files, total_ms
-                                            ),
-                                        )
-                                        .await;
-                                }
-                            }
-                            Err(e) => {
-                                client
-                                    .log_message(
-                                        MessageType::WARNING,
-                                        format!("project cache v2 upsert task failed: {e}"),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                });
-            }
-        }
-
-        // If workspace file-ops changed project structure, schedule a
-        // debounced latest-wins sync of on-disk reference cache.
-        if self.use_solc
-            && settings_snapshot.project_index.full_project_scan
-            && self.project_cache_dirty.load(Ordering::Acquire)
-        {
-            if start_or_mark_project_cache_sync_pending(
-                &self.project_cache_sync_pending,
-                &self.project_cache_sync_running,
-            ) {
-                let foundry_config = self.foundry_config.read().await.clone();
-                let root_key = self.project_cache_key().await;
-                let ast_cache = self.ast_cache.clone();
-                let text_cache = self.text_cache.clone();
-                let client = self.client.clone();
-                let dirty_flag = self.project_cache_dirty.clone();
-                let running_flag = self.project_cache_sync_running.clone();
-                let pending_flag = self.project_cache_sync_pending.clone();
-                let changed_files = self.project_cache_changed_files.clone();
-                let aggressive_scoped = settings_snapshot.project_index.incremental_edit_reindex;
-
-                tokio::spawn(async move {
-                    loop {
-                        // Debounce save bursts into one trailing sync.
-                        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-
-                        if !take_project_cache_sync_pending(&pending_flag) {
-                            // No pending work right now; try to stop worker.
-                            // If new work arrived concurrently after stop,
-                            // reclaim leadership and keep running.
-                            if stop_project_cache_sync_worker_or_reclaim(
-                                &pending_flag,
-                                &running_flag,
-                            ) {
-                                continue;
-                            }
-                            break;
-                        }
-
-                        if !try_claim_project_cache_dirty(&dirty_flag) {
-                            continue;
-                        }
-
-                        let Some(cache_key) = &root_key else {
-                            dirty_flag.store(true, Ordering::Release);
-                            continue;
-                        };
-                        if !foundry_config.root.is_dir() {
-                            dirty_flag.store(true, Ordering::Release);
-                            client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!(
-                                        "didSave cache sync: invalid project root {}, deferring",
-                                        foundry_config.root.display()
-                                    ),
-                                )
-                                .await;
-                            continue;
-                        }
-
-                        let mut scoped_ok = false;
-
-                        if aggressive_scoped {
-                            let changed_abs: Vec<PathBuf> = {
-                                let mut changed = changed_files.write().await;
-                                let drained =
-                                    changed.drain().map(PathBuf::from).collect::<Vec<PathBuf>>();
-                                drained
-                            };
-                            if !changed_abs.is_empty() {
-                                let remappings =
-                                    crate::solc::resolve_remappings(&foundry_config).await;
-                                let cfg_for_plan = foundry_config.clone();
-                                let changed_for_plan = changed_abs.clone();
-                                let remappings_for_plan = remappings.clone();
-                                let plan_res = tokio::task::spawn_blocking(move || {
-                                    compute_reverse_import_closure(
-                                        &cfg_for_plan,
-                                        &changed_for_plan,
-                                        &remappings_for_plan,
-                                    )
-                                })
-                                .await;
-
-                                let affected_files = match plan_res {
-                                    Ok(set) => set.into_iter().collect::<Vec<PathBuf>>(),
-                                    Err(_) => Vec::new(),
-                                };
-                                if !affected_files.is_empty() {
-                                    client
-                                        .log_message(
-                                            MessageType::INFO,
-                                            format!(
-                                                "didSave cache sync: aggressive scoped reindex (affected={})",
-                                                affected_files.len(),
-                                            ),
-                                        )
-                                        .await;
-
-                                    let text_cache_snapshot = text_cache.read().await.clone();
-                                    match crate::solc::solc_project_index_scoped(
-                                        &foundry_config,
-                                        Some(&client),
-                                        Some(&text_cache_snapshot),
-                                        &affected_files,
-                                    )
-                                    .await
-                                    {
-                                        Ok(ast_data) => {
-                                            let scoped_build = Arc::new(
-                                                crate::goto::CachedBuild::new(ast_data, 0),
-                                            );
-                                            let source_count = scoped_build.nodes.len();
-                                            enum ScopedApply {
-                                                Merged { affected_count: usize },
-                                                Stored,
-                                                Failed(String),
-                                            }
-                                            let apply_outcome = {
-                                                let mut cache = ast_cache.write().await;
-                                                if let Some(existing) =
-                                                    cache.get(cache_key).cloned()
-                                                {
-                                                    let mut merged = (*existing).clone();
-                                                    match merge_scoped_cached_build(
-                                                        &mut merged,
-                                                        (*scoped_build).clone(),
-                                                    ) {
-                                                        Ok(affected_count) => {
-                                                            cache.insert(
-                                                                cache_key.clone(),
-                                                                Arc::new(merged),
-                                                            );
-                                                            ScopedApply::Merged { affected_count }
-                                                        }
-                                                        Err(e) => ScopedApply::Failed(e),
-                                                    }
-                                                } else {
-                                                    cache.insert(cache_key.clone(), scoped_build);
-                                                    ScopedApply::Stored
-                                                }
-                                            };
-
-                                            match apply_outcome {
-                                                ScopedApply::Merged { affected_count } => {
-                                                    client
-                                                        .log_message(
-                                                            MessageType::INFO,
-                                                            format!(
-                                                                "didSave cache sync: scoped merge applied (scoped_sources={}, affected_paths={})",
-                                                                source_count, affected_count
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    scoped_ok = true;
-                                                }
-                                                ScopedApply::Stored => {
-                                                    client
-                                                        .log_message(
-                                                            MessageType::INFO,
-                                                            format!(
-                                                                "didSave cache sync: scoped cache stored (scoped_sources={})",
-                                                                source_count
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    scoped_ok = true;
-                                                }
-                                                ScopedApply::Failed(e) => {
-                                                    client
-                                                    .log_message(
-                                                        MessageType::WARNING,
-                                                        format!(
-                                                            "didSave cache sync: scoped merge rejected, will retry scoped on next save: {e}"
-                                                        ),
-                                                    )
-                                                    .await;
-                                                    dirty_flag.store(true, Ordering::Release);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            client
-                                                .log_message(
-                                                    MessageType::WARNING,
-                                                    format!(
-                                                        "didSave cache sync: scoped reindex failed, will retry scoped on next save: {e}"
-                                                    ),
-                                                )
-                                                .await;
-                                            dirty_flag.store(true, Ordering::Release);
-                                        }
-                                    }
-                                } else {
-                                    client
-                                        .log_message(
-                                            MessageType::INFO,
-                                            "didSave cache sync: no affected files from scoped planner",
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-
-                        if scoped_ok {
-                            continue;
-                        }
-                        if aggressive_scoped {
-                            continue;
-                        }
-
-                        client
-                            .log_message(
-                                MessageType::INFO,
-                                "didSave cache sync: rebuilding project index from disk",
-                            )
-                            .await;
-
-                        match crate::solc::solc_project_index(&foundry_config, Some(&client), None)
-                            .await
-                        {
-                            Ok(ast_data) => {
-                                let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
-                                if let Some(prev) = ast_cache.read().await.get(cache_key) {
-                                    new_build.merge_missing_from(prev);
-                                }
-                                let source_count = new_build.nodes.len();
-                                let cached_build = Arc::new(new_build);
-                                let build_for_save = (*cached_build).clone();
-                                ast_cache
-                                    .write()
-                                    .await
-                                    .insert(cache_key.clone(), cached_build);
-
-                                let cfg_for_save = foundry_config.clone();
-                                let save_res = tokio::task::spawn_blocking(move || {
-                                    crate::project_cache::save_reference_cache_with_report(
-                                        &cfg_for_save,
-                                        &build_for_save,
-                                        None,
-                                    )
-                                })
-                                .await;
-
-                                match save_res {
-                                    Ok(Ok(report)) => {
-                                        changed_files.write().await.clear();
-                                        client
-                                            .log_message(
-                                                MessageType::INFO,
-                                                format!(
-                                                    "didSave cache sync: persisted cache (sources={}, hashed_files={}, duration={}ms)",
-                                                    source_count, report.file_count_hashed, report.duration_ms
-                                                ),
-                                            )
-                                            .await;
-                                    }
-                                    Ok(Err(e)) => {
-                                        dirty_flag.store(true, Ordering::Release);
-                                        client
-                                            .log_message(
-                                                MessageType::WARNING,
-                                                format!(
-                                                    "didSave cache sync: persist failed, will retry: {e}"
-                                                ),
-                                            )
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        dirty_flag.store(true, Ordering::Release);
-                                        client
-                                            .log_message(
-                                                MessageType::WARNING,
-                                                format!(
-                                                    "didSave cache sync: save task failed, will retry: {e}"
-                                                ),
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                dirty_flag.store(true, Ordering::Release);
-                                client
-                                    .log_message(
-                                        MessageType::WARNING,
-                                        format!(
-                                            "didSave cache sync: re-index failed, will retry: {e}"
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                });
-            }
-        }
+        // did_save is a notification — return to the editor immediately.
+        // All compile, diagnostics, and cache work run in a background task.
+        let this = self.clone();
+        tokio::spawn(did_save_background(this, params));
     }
 
     async fn will_save(&self, params: WillSaveTextDocumentParams) {
