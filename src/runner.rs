@@ -116,6 +116,11 @@ impl Runner for ForgeRunner {
         Ok(normalize_forge_output(parsed))
     }
 
+    // NOTE: forge-fmt 0.2.0 on crates.io is from September 2023 and has not been updated since.
+    // Foundry is currently at v1.6.0 with active formatter fixes. Using the crate would produce
+    // different output than the user's installed `forge fmt`. Keep the subprocess — it is correct
+    // by definition and format requests are infrequent (once per save).
+    // Revisit if Foundry ever publishes updated crates to crates.io.
     async fn format(&self, file_path: &str) -> Result<String, RunnerError> {
         let output = Command::new("forge")
             .arg("fmt")
