@@ -75,6 +75,13 @@ pub struct ForgeLsp {
     /// the server will pull settings via `workspace/configuration` during
     /// `initialized()`.
     settings_from_init: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-URI watch channels for serialising didSave background work.
+    ///
+    /// Each URI gets one long-lived worker task that always processes the
+    /// *latest* save params.  Rapid saves collapse: the worker wakes once per
+    /// compile cycle and picks up the newest params via `borrow_and_update`.
+    did_save_workers:
+        Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>>,
 }
 
 impl ForgeLsp {
@@ -115,6 +122,7 @@ impl ForgeLsp {
             project_cache_upsert_files: Arc::new(RwLock::new(HashSet::new())),
             pending_create_scaffold: Arc::new(RwLock::new(HashSet::new())),
             settings_from_init: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            did_save_workers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1306,7 +1314,12 @@ fn merge_scoped_cached_build(
     Ok(affected_paths.len())
 }
 
-async fn did_save_background(this: ForgeLsp, params: DidSaveTextDocumentParams) {
+/// Core per-save work: compile, diagnostics, cache upsert.
+///
+/// Called from the per-URI worker loop (see `did_save_workers`).  Because the
+/// worker serialises calls for the same URI, this function never runs
+/// concurrently for the same document.
+async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
     this.client
         .log_message(MessageType::INFO, "file saved")
         .await;
@@ -2598,9 +2611,44 @@ impl LanguageServer for ForgeLsp {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         // did_save is a notification — return to the editor immediately.
-        // All compile, diagnostics, and cache work run in a background task.
+        // We route each URI through a dedicated watch channel so that rapid
+        // saves collapse: the worker always picks up the *latest* params via
+        // `borrow_and_update`, avoiding stale-result races.
+        let uri_key = params.text_document.uri.to_string();
+
+        // Fast path: worker already running for this URI — just send new params.
+        {
+            let workers = self.did_save_workers.read().await;
+            if let Some(tx) = workers.get(&uri_key) {
+                // Ignore send errors — worker may have panicked; fall through to
+                // the slow path below which will respawn it.
+                if tx.send(Some(params.clone())).is_ok() {
+                    return;
+                }
+            }
+        }
+
+        // Slow path: first save for this URI (or worker died) — create channel
+        // and spawn the worker.
+        let (tx, mut rx) = tokio::sync::watch::channel(Some(params));
+        self.did_save_workers.write().await.insert(uri_key, tx);
+
         let this = self.clone();
-        tokio::spawn(did_save_background(this, params));
+        tokio::spawn(async move {
+            loop {
+                // Wait for a new value to be sent.
+                if rx.changed().await.is_err() {
+                    // All senders dropped — shouldn't happen while ForgeLsp is
+                    // alive, but exit cleanly just in case.
+                    break;
+                }
+                let params = match rx.borrow_and_update().clone() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                run_did_save(this.clone(), params).await;
+            }
+        });
     }
 
     async fn will_save(&self, params: WillSaveTextDocumentParams) {
