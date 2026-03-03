@@ -12,6 +12,7 @@
 - **Signature Help** — parameter info on function calls, event emits, and mapping access
 - **Inlay Hints** — parameter names and gas estimates
 - **File Operations** — `workspace/willCreateFiles` scaffolding + `workspace/willRenameFiles`/`workspace/willDeleteFiles` import edits + `workspace/didCreateFiles`/`workspace/didRenameFiles`/`workspace/didDeleteFiles` cache migration/re-index (`fileOperations.templateOnCreate`, `fileOperations.updateImportsOnRename`, `fileOperations.updateImportsOnDelete`)
+- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + in-memory AST, force clean rebuild) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
 
 See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
 
@@ -74,7 +75,7 @@ See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
 - [x] `workspace/didChangeWatchedFiles` - Acknowledges watched file changes (logs only)
 - [x] `workspace/didChangeWorkspaceFolders` - Acknowledges workspace folder changes (logs only)
 - [ ] `workspace/applyEdit` - Inbound handler not implemented (server uses outbound `workspace/applyEdit` to scaffold created files)
-- [ ] `workspace/executeCommand` - Execute workspace commands (stub implementation)
+- [x] `workspace/executeCommand` - Execute workspace commands (`solidity.clearCache`, `solidity.reindex`)
 - [x] `workspace/willCreateFiles` - File creation preview (scaffolding for `.sol`, `.t.sol`, `.s.sol`)
 - [x] `workspace/didCreateFiles` - Post-create scaffold fallback + cache/index refresh
 - [x] `workspace/willRenameFiles` - File rename preview (import path updates)

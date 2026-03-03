@@ -8,6 +8,8 @@
 
 - Drop v1 cache path; v2 cache is now the only supported mode
 - Auto-create `.gitignore` in the cache directory on first write
+- `workspace/executeCommand` — `solidity.clearCache` deletes the on-disk cache and wipes in-memory AST, forcing a clean rebuild; `solidity.reindex` evicts in-memory AST and triggers a fast background reindex from the warm disk cache
+- Cache fingerprint now includes `lsp_version` so upgrading the server binary automatically invalidates stale caches; optimizer settings (`optimizer`, `optimizer_runs`, `via_ir`) removed from the fingerprint as they do not affect the reference index
 
 ### Fixes
 

@@ -2135,6 +2135,15 @@ impl LanguageServer for ForgeLsp {
                         ..Default::default()
                     }),
                 }),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![
+                        "solidity.clearCache".to_string(),
+                        "solidity.reindex".to_string(),
+                    ],
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                }),
                 ..ServerCapabilities::default()
             },
         })
@@ -2476,6 +2485,94 @@ impl LanguageServer for ForgeLsp {
                     }
                 }
             });
+        }
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            // ----------------------------------------------------------------
+            // solidity.clearCache
+            //
+            // Deletes the entire `.solidity-language-server/` directory on disk
+            // and wipes the in-memory AST cache for the current project root.
+            // The next save or file-open will trigger a clean rebuild from
+            // scratch.
+            //
+            // Usage (nvim):
+            //   vim.lsp.buf.execute_command({ command = "solidity.clearCache" })
+            // ----------------------------------------------------------------
+            "solidity.clearCache" => {
+                let root = self.foundry_config.read().await.root.clone();
+                let cache_dir = crate::project_cache::cache_dir(&root);
+
+                let disk_result = if cache_dir.exists() {
+                    std::fs::remove_dir_all(&cache_dir).map_err(|e| format!("{e}"))
+                } else {
+                    Ok(())
+                };
+
+                let root_key = root.to_string_lossy().to_string();
+                self.ast_cache.write().await.remove(&root_key);
+
+                match disk_result {
+                    Ok(()) => {
+                        self.client
+                            .log_message(
+                                MessageType::INFO,
+                                format!(
+                                    "solidity.clearCache: removed {} and cleared in-memory cache",
+                                    cache_dir.display()
+                                ),
+                            )
+                            .await;
+                        Ok(Some(serde_json::json!({ "success": true })))
+                    }
+                    Err(e) => {
+                        self.client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("solidity.clearCache: failed to remove cache dir: {e}"),
+                            )
+                            .await;
+                        Err(tower_lsp::jsonrpc::Error {
+                            code: tower_lsp::jsonrpc::ErrorCode::InternalError,
+                            message: std::borrow::Cow::Owned(e),
+                            data: None,
+                        })
+                    }
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // solidity.reindex
+            //
+            // Evicts the in-memory AST cache entry for the current project root
+            // and sets the dirty flag so the background cache-sync worker
+            // triggers a fresh project index build. The on-disk cache is left
+            // intact so the warm-load on reindex will be fast.
+            //
+            // Usage (nvim):
+            //   vim.lsp.buf.execute_command({ command = "solidity.reindex" })
+            // ----------------------------------------------------------------
+            "solidity.reindex" => {
+                let root = self.foundry_config.read().await.root.clone();
+                let root_key = root.to_string_lossy().to_string();
+                self.ast_cache.write().await.remove(&root_key);
+                self.project_cache_dirty
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        "solidity.reindex: in-memory cache evicted, background reindex triggered",
+                    )
+                    .await;
+                Ok(Some(serde_json::json!({ "success": true })))
+            }
+
+            _ => Err(tower_lsp::jsonrpc::Error::method_not_found()),
         }
     }
 

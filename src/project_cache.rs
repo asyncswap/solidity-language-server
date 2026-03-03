@@ -67,6 +67,12 @@ pub struct CacheSaveReport {
     pub duration_ms: u128,
 }
 
+/// Public helper — returns the root of the on-disk cache directory for
+/// `project_root`. Used by the `solidity.clearCache` command handler.
+pub fn cache_dir(root: &Path) -> PathBuf {
+    root.join(CACHE_DIR)
+}
+
 fn cache_file_path_v2(root: &Path) -> PathBuf {
     root.join(CACHE_DIR).join(CACHE_FILE_V2)
 }
@@ -180,11 +186,11 @@ fn hash_file_list(
 
 fn config_fingerprint(config: &FoundryConfig) -> String {
     let payload = serde_json::json!({
+        // Including the server version means any binary upgrade automatically
+        // invalidates the on-disk cache and triggers a clean rebuild.
+        "lsp_version": env!("CARGO_PKG_VERSION"),
         "solc_version": config.solc_version,
         "remappings": config.remappings,
-        "via_ir": config.via_ir,
-        "optimizer": config.optimizer,
-        "optimizer_runs": config.optimizer_runs,
         "evm_version": config.evm_version,
         "sources_dir": config.sources_dir,
         "libs": config.libs,
