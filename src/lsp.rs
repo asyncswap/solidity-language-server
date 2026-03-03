@@ -2943,41 +2943,22 @@ impl LanguageServer for ForgeLsp {
             .and_then(|p| p.to_str().map(|s| s.to_string()));
 
         // --- Import path completions ---
-        // When triggered by `"`, `'`, or `/` — or when the cursor is manually
-        // invoked inside an import string — we exclusively serve path completions.
-        // If the trigger char is one of these but the cursor is NOT inside an
-        // import string, return nothing (don't fall through to AST completions).
+        // If the cursor is on an import line, return all .sol paths in the
+        // project relative to the current file. The editor's fuzzy filter
+        // narrows the list — no partial-path or trigger-char edge cases needed.
         let is_import_trigger = matches!(trigger_char, Some("\"") | Some("'") | Some("/"));
-        let import_ctx = completion::import_path_at_cursor(&source_text, position);
+        let on_import_line = completion::cursor_is_on_import_line(&source_text, position);
 
-        if is_import_trigger || import_ctx.is_some() {
-            return if let Some(ctx) = import_ctx {
-                if let Ok(current_file) = uri.to_file_path() {
-                    let foundry_cfg = self.foundry_config.read().await.clone();
-                    let project_root = foundry_cfg.root.clone();
-                    // Use the full three-tier remapping resolution (forge remappings →
-                    // foundry.toml → remappings.txt) so that projects whose remappings
-                    // come from remappings.txt or auto-detected libs are covered.
-                    let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
-
-                    let items = completion::import_path_completions(
-                        &ctx,
-                        &current_file,
-                        &project_root,
-                        &remappings,
-                    );
-                    Ok(Some(CompletionResponse::List(CompletionList {
-                        is_incomplete: false,
-                        items,
-                    })))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                // Trigger was `"`, `'`, or `/` but cursor is not in an import string —
-                // produce no completions rather than leaking AST symbols.
-                Ok(None)
-            };
+        if is_import_trigger || on_import_line {
+            if let Ok(current_file) = uri.to_file_path() {
+                let project_root = self.foundry_config.read().await.root.clone();
+                let items = completion::all_sol_import_paths(&current_file, &project_root);
+                return Ok(Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: false,
+                    items,
+                })));
+            }
+            return Ok(None);
         }
 
         let tail_candidates = if trigger_char == Some(".") {
