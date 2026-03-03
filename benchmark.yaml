@@ -2,8 +2,8 @@
 # Usage: cargo build --release && lsp-bench
 project: example
 file: Shop.sol
-line: 68
-col: 14
+line: 130
+col: 26
 
 iterations: 10
 warmup: 2
@@ -35,9 +35,9 @@ methods:
     # Inside PRICE.addTax(TAX, TAX_BASE) — parameter info on first arg
 
   textDocument/documentHighlight:
-    line: 68
-    col: 14
-    # PRICE immutable — used across constructor and buy()
+    line: 130
+    col: 26
+    # owner — used across constructor, checkOwner, transferOwnership
 
   textDocument/inlayHint:
     line: 135
