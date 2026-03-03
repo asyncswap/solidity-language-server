@@ -119,6 +119,10 @@ pub struct CachedBuild {
     /// The text_cache version this build was created from.
     /// Used to detect dirty files (unsaved edits since last build).
     pub build_version: i32,
+    /// FxHash of the source text this build was compiled from.
+    /// Used to skip redundant rebuilds when content has not changed
+    /// (e.g. format-on-save loops that re-trigger didSave with identical text).
+    pub content_hash: u64,
 }
 
 impl CachedBuild {
@@ -202,6 +206,7 @@ impl CachedBuild {
             doc_index,
             completion_cache,
             build_version,
+            content_hash: 0,
         }
     }
 
@@ -260,6 +265,7 @@ impl CachedBuild {
             doc_index: HashMap::new(),
             completion_cache,
             build_version,
+            content_hash: 0,
         }
     }
 }

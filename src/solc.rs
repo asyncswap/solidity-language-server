@@ -882,8 +882,16 @@ pub async fn solc_ast(
 
     // Collect pragma constraints from the file and all its transitive imports
     // so we pick a solc version that satisfies the entire dependency graph.
-    let file_abs = Path::new(file_path);
-    let pragmas = collect_import_pragmas(file_abs, &config.root, &remappings);
+    // This is a synchronous recursive FS crawl — run it on the blocking pool
+    // so we don't stall the tokio async runtime on large projects.
+    let file_abs = Path::new(file_path).to_path_buf();
+    let config_root = config.root.clone();
+    let remappings_clone = remappings.clone();
+    let pragmas = tokio::task::spawn_blocking(move || {
+        collect_import_pragmas(&file_abs, &config_root, &remappings_clone)
+    })
+    .await
+    .unwrap_or_default();
     let constraint = tightest_constraint(&pragmas);
     let solc_binary = resolve_solc_binary(config, constraint.as_ref(), client).await;
 

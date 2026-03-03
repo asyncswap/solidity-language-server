@@ -422,6 +422,30 @@ impl ForgeLsp {
             }
         };
 
+        // Skip rebuild if the content is identical to what was last compiled.
+        // This avoids a redundant solc invocation on format-on-save loops where
+        // the formatter returns edits, Neovim applies them, saves again, and the
+        // resulting text is already fully formatted (same bytes as last build).
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            params.text.hash(&mut hasher);
+            let incoming_hash = hasher.finish();
+
+            let cache = self.ast_cache.read().await;
+            if let Some(cached) = cache.get(&uri.to_string()) {
+                if cached.content_hash != 0 && cached.content_hash == incoming_hash {
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            "on_change: content unchanged since last build, skipping rebuild",
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+
         // Check if linting should be skipped based on foundry.toml + editor settings.
         let (should_lint, lint_settings) = {
             let lint_cfg = self.lint_config.read().await;
@@ -545,9 +569,20 @@ impl ForgeLsp {
         // Only replace cache with new AST if build succeeded (no errors; warnings are OK)
         let build_succeeded = matches!(&build_result, Ok(diagnostics) if diagnostics.iter().all(|d| d.severity != Some(DiagnosticSeverity::ERROR)));
 
+        // Compute content hash once — used to stamp the build and skip
+        // future rebuilds when content hasn't changed.
+        let content_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            params.text.hash(&mut hasher);
+            hasher.finish()
+        };
+
         if build_succeeded {
             if let Ok(ast_data) = ast_result {
-                let cached_build = Arc::new(goto::CachedBuild::new(ast_data, version));
+                let mut cached_build = goto::CachedBuild::new(ast_data, version);
+                cached_build.content_hash = content_hash;
+                let cached_build = Arc::new(cached_build);
                 let mut cache = self.ast_cache.write().await;
                 cache.insert(uri.to_string(), cached_build.clone());
                 drop(cache);
