@@ -309,10 +309,7 @@ fn build_top_level_importables_by_name(
 ///
 /// - Includes: contract/interface/library/struct/enum/UDVT/top-level free function/top-level constant
 /// - Excludes: imported aliases/re-exports, nested declarations, non-constant variables
-pub fn extract_top_level_importables_for_file(
-    path: &str,
-    ast: &Value,
-) -> Vec<TopLevelImportable> {
+pub fn extract_top_level_importables_for_file(path: &str, ast: &Value) -> Vec<TopLevelImportable> {
     let mut out: Vec<TopLevelImportable> = Vec::new();
     let mut stack: Vec<&Value> = vec![ast];
     let mut source_unit_id: Option<NodeId> = None;
@@ -1709,9 +1706,9 @@ pub fn append_auto_import_candidates_last(
 ) -> Vec<CompletionItem> {
     let mut unique_label_edits: HashMap<String, Option<Vec<TextEdit>>> = HashMap::new();
     for item in &auto_import_candidates {
-        let entry = unique_label_edits.entry(item.label.clone()).or_insert_with(|| {
-            item.additional_text_edits.clone()
-        });
+        let entry = unique_label_edits
+            .entry(item.label.clone())
+            .or_insert_with(|| item.additional_text_edits.clone());
         if *entry != item.additional_text_edits {
             *entry = None;
         }
@@ -2046,6 +2043,138 @@ const GLOBAL_FUNCTIONS: &[(&str, &str)] = &[
     ("selfdestruct(address payable recipient)", ""),
 ];
 
+// ---------------------------------------------------------------------------
+// Import path completions
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `position` is on a line that contains an import
+/// statement (i.e. the line starts with `import` after trimming whitespace).
+/// This is intentionally loose — we just need to know whether to offer
+/// import-path completions at all.
+pub fn cursor_is_on_import_line(source: &str, position: Position) -> bool {
+    source
+        .lines()
+        .nth(position.line as usize)
+        .map(|l| l.trim_start().starts_with("import"))
+        .unwrap_or(false)
+}
+
+/// Walk `project_root` recursively and return every `.sol` file as:
+///   1. A relative path from the current file's directory (e.g. `./libraries/Pool.sol`)
+///   2. A remapped path for each matching remapping (e.g. `forge-std/Test.sol`)
+///
+/// Skips `out/`, `cache/`, `node_modules/`, `.git/`.
+pub fn all_sol_import_paths(
+    current_file: &Path,
+    project_root: &Path,
+    remappings: &[String],
+) -> Vec<CompletionItem> {
+    let current_dir = match current_file.parent() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    // Pre-parse remappings into (prefix, abs_target_path) pairs.
+    // e.g. "forge-std/=lib/forge-std/src/" → ("forge-std/", "/project/lib/forge-std/src/")
+    let parsed_remappings: Vec<(String, std::path::PathBuf)> = remappings
+        .iter()
+        .filter_map(|r| {
+            let mut it = r.splitn(2, '=');
+            let prefix = it.next()?.to_string();
+            let target = it.next()?;
+            if prefix.is_empty() || target.is_empty() {
+                return None;
+            }
+            Some((prefix, project_root.join(target)))
+        })
+        .collect();
+
+    let skip_dirs: &[&str] = &["out", "cache", "node_modules", ".git"];
+    let mut items = Vec::new();
+
+    collect_sol_files(
+        project_root,
+        current_dir,
+        &parsed_remappings,
+        skip_dirs,
+        &mut items,
+    );
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+fn collect_sol_files(
+    dir: &Path,
+    current_dir: &Path,
+    remappings: &[(String, std::path::PathBuf)],
+    skip_dirs: &[&str],
+    out: &mut Vec<CompletionItem>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            if skip_dirs.contains(&name_str.as_ref()) {
+                continue;
+            }
+            collect_sol_files(&path, current_dir, remappings, skip_dirs, out);
+            continue;
+        }
+
+        if !path.is_file() || !name_str.ends_with(".sol") {
+            continue;
+        }
+
+        let filename = name_str.to_string();
+
+        // 1. Relative path (always emitted)
+        if let Some(rel) = pathdiff::diff_paths(&path, current_dir) {
+            let s = rel.to_string_lossy().to_string();
+            let label = if s.starts_with("../") || s.starts_with("./") {
+                s
+            } else {
+                format!("./{s}")
+            };
+            out.push(make_import_item(label));
+        }
+
+        // 2. Remapped paths — for every remapping whose target is a prefix of
+        //    this file's absolute path, emit the remapped form.
+        //    e.g. file=/project/lib/forge-std/src/Test.sol
+        //         remap forge-std/=/project/lib/forge-std/src/
+        //         → label = "forge-std/Test.sol"
+        for (prefix, target_abs) in remappings {
+            if let Ok(suffix) = path.strip_prefix(target_abs) {
+                let label = format!("{}{}", prefix, suffix.to_string_lossy());
+                out.push(make_import_item(label));
+            }
+        }
+    }
+}
+
+fn make_import_item(label: String) -> CompletionItem {
+    // No filter_text — fall back to label so the editor matches on the full
+    // path. Typing "forge-std" narrows to forge-std/... paths, typing "Pool"
+    // narrows to anything containing "Pool", typing "./lib" narrows relative
+    // paths, etc.
+    CompletionItem {
+        insert_text: Some(label.clone()),
+        kind: Some(CompletionItemKind::FILE),
+        label,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2354,5 +2483,73 @@ mod tests {
             }
             _ => panic!("expected completion list"),
         }
+    }
+
+    // --- import path completion tests ---
+
+    #[test]
+    fn cursor_is_on_import_line_detects_import() {
+        let src = "import \"./Foo.sol\";";
+        assert!(super::cursor_is_on_import_line(
+            src,
+            Position {
+                line: 0,
+                character: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn cursor_is_on_import_line_false_for_non_import() {
+        let src = "contract Foo {}";
+        assert!(!super::cursor_is_on_import_line(
+            src,
+            Position {
+                line: 0,
+                character: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn cursor_is_on_import_line_handles_from_style() {
+        let src = "import {Foo} from \"./Foo.sol\";";
+        assert!(super::cursor_is_on_import_line(
+            src,
+            Position {
+                line: 0,
+                character: 20
+            }
+        ));
+    }
+
+    #[test]
+    fn all_sol_import_paths_no_panic_missing_dir() {
+        let current = std::path::Path::new("/nonexistent/src/Foo.sol");
+        let root = std::path::Path::new("/nonexistent");
+        let items = super::all_sol_import_paths(current, root, &[]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn all_sol_import_paths_relative_labels() {
+        // Use real paths from the repo fixture
+        let root = std::path::Path::new("example");
+        let current = root.join("A.sol");
+        let items = super::all_sol_import_paths(&current, root, &[]);
+        // All labels should start with ./ or ../
+        for item in &items {
+            assert!(
+                item.label.starts_with("./") || item.label.starts_with("../"),
+                "label should be relative: {}",
+                item.label
+            );
+            assert!(
+                item.label.ends_with(".sol"),
+                "label should end with .sol: {}",
+                item.label
+            );
+        }
+        assert!(!items.is_empty(), "should find at least one .sol file");
     }
 }

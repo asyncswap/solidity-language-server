@@ -1958,7 +1958,12 @@ impl LanguageServer for ForgeLsp {
             capabilities: ServerCapabilities {
                 position_encoding: Some(encoding.into()),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string()]),
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        "\"".to_string(),
+                        "'".to_string(),
+                        "/".to_string(),
+                    ]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
@@ -3033,6 +3038,28 @@ impl LanguageServer for ForgeLsp {
             .to_file_path()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
+
+        // --- Import path completions ---
+        // If the cursor is on an import line, return all .sol paths in the
+        // project relative to the current file. The editor's fuzzy filter
+        // narrows the list — no partial-path or trigger-char edge cases needed.
+        let is_import_trigger = matches!(trigger_char, Some("\"") | Some("'") | Some("/"));
+        let on_import_line = completion::cursor_is_on_import_line(&source_text, position);
+
+        if is_import_trigger || on_import_line {
+            if let Ok(current_file) = uri.to_file_path() {
+                let foundry_cfg = self.foundry_config.read().await.clone();
+                let project_root = foundry_cfg.root.clone();
+                let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
+                let items =
+                    completion::all_sol_import_paths(&current_file, &project_root, &remappings);
+                return Ok(Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: true,
+                    items,
+                })));
+            }
+            return Ok(None);
+        }
 
         let tail_candidates = if trigger_char == Some(".") {
             vec![]

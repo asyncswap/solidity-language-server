@@ -1,0 +1,29 @@
+# Import path completions — PoolManager.sol (v4-core/src)
+#   lsp-bench -c benchmarks/import-completions.yaml -v
+
+project: v4-core
+file: src/PoolManager.sol
+line: 3
+col: 20
+output: benchmarks/import-completions
+# report: README.md
+
+servers:
+  - mmsaki@latest
+
+benchmarks:
+  - textDocument/completion
+
+methods:
+  # Line 3:  import {  } from "../licenses/";
+  # col 20 = right after opening `"` → remapping prefixes + ./ ../
+  # col 32 = after "../licenses/"    → files inside that dir
+  #
+  # Line 5:  import {Hooks} from "./libraries/Hooks.sol";
+  # col 33 = after "./libraries/"    → all .sol files in src/libraries/
+
+  # --- change line/col/trigger below to test each case ---
+  textDocument/completion:
+    line: 3
+    col: 20
+    trigger: "\""
