@@ -2953,10 +2953,12 @@ impl LanguageServer for ForgeLsp {
         if is_import_trigger || import_ctx.is_some() {
             return if let Some(ctx) = import_ctx {
                 if let Ok(current_file) = uri.to_file_path() {
-                    let foundry_cfg = self.foundry_config.read().await;
+                    let foundry_cfg = self.foundry_config.read().await.clone();
                     let project_root = foundry_cfg.root.clone();
-                    let remappings = foundry_cfg.remappings.clone();
-                    drop(foundry_cfg);
+                    // Use the full three-tier remapping resolution (forge remappings →
+                    // foundry.toml → remappings.txt) so that projects whose remappings
+                    // come from remappings.txt or auto-detected libs are covered.
+                    let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
 
                     let items = completion::import_path_completions(
                         &ctx,
