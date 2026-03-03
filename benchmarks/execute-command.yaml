@@ -1,0 +1,37 @@
+# workspace/executeCommand — solidity.clearCache and solidity.reindex
+#
+# Measures round-trip latency of each command.
+# Use waitForProgress: true on solidity.reindex to include the full
+# background rebuild time in the measurement.
+#
+# Run:
+#   lsp-bench -c benchmarks/execute-command.yaml -v
+#   lsp-bench -c benchmarks/execute-command.yaml -v --verify
+
+project: v4-core
+file: src/PoolManager.sol
+line: 5
+col: 10
+output: benchmarks/execute-command
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - workspace/executeCommand
+
+methods:
+  workspace/executeCommand:
+    command: solidity.reindex
+    arguments: []
+    # Set waitForProgress: true to measure end-to-end time including the
+    # full background project rebuild triggered by solidity.reindex.
+    # Leave false (default) to measure only command round-trip latency.
+    waitForProgress: false
+    expect:
+      success: true
