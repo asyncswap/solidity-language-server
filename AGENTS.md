@@ -12,3 +12,13 @@ There are many examples on ./benchmarks on how to write a simple yaml config to 
 ## Building
 
 Always build with `--release` flag
+
+## Documentation Sync Rule
+
+When adding or changing a struct field, LSP method, named data structure, or feature behavior in `src/`, update the corresponding reference page in `docs/pages/reference/` in the same commit.
+
+Also keep these files in sync with each other whenever LSP methods or features change:
+- `FEATURES.md` (root) and `docs/pages/docs/features.md` must always match
+- `CHANGELOG.md` (root) and `docs/pages/changelog.md` must always match
+
+After any doc changes, run `bun run docs:publish` to deploy to Cloudflare Pages.
