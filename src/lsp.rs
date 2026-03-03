@@ -2519,8 +2519,9 @@ impl LanguageServer for ForgeLsp {
                     Ok(())
                 };
 
-                let root_key = root.to_string_lossy().to_string();
-                self.ast_cache.write().await.remove(&root_key);
+                if let Some(root_key) = self.project_cache_key().await {
+                    self.ast_cache.write().await.remove(&root_key);
+                }
 
                 match disk_result {
                     Ok(()) => {
@@ -2563,11 +2564,163 @@ impl LanguageServer for ForgeLsp {
             //   vim.lsp.buf.execute_command({ command = "solidity.reindex" })
             // ----------------------------------------------------------------
             "solidity.reindex" => {
-                let root = self.foundry_config.read().await.root.clone();
-                let root_key = root.to_string_lossy().to_string();
-                self.ast_cache.write().await.remove(&root_key);
+                if let Some(root_key) = self.project_cache_key().await {
+                    self.ast_cache.write().await.remove(&root_key);
+                }
                 self.project_cache_dirty
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+
+                // Wake the background cache-sync worker directly. Setting the
+                // dirty flag alone is not enough — the worker is only started
+                // from the didSave path, so without an explicit spawn here the
+                // reindex would be silently deferred until the next file save.
+                if start_or_mark_project_cache_sync_pending(
+                    &self.project_cache_sync_pending,
+                    &self.project_cache_sync_running,
+                ) {
+                    let foundry_config = self.foundry_config.read().await.clone();
+                    let root_key = self.project_cache_key().await;
+                    let ast_cache = self.ast_cache.clone();
+                    let client = self.client.clone();
+                    let dirty_flag = self.project_cache_dirty.clone();
+                    let running_flag = self.project_cache_sync_running.clone();
+                    let pending_flag = self.project_cache_sync_pending.clone();
+                    let changed_files = self.project_cache_changed_files.clone();
+
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+                            if !take_project_cache_sync_pending(&pending_flag) {
+                                if stop_project_cache_sync_worker_or_reclaim(
+                                    &pending_flag,
+                                    &running_flag,
+                                ) {
+                                    continue;
+                                }
+                                break;
+                            }
+
+                            if !try_claim_project_cache_dirty(&dirty_flag) {
+                                continue;
+                            }
+
+                            let Some(cache_key) = &root_key else {
+                                dirty_flag.store(true, Ordering::Release);
+                                continue;
+                            };
+                            if !foundry_config.root.is_dir() {
+                                dirty_flag.store(true, Ordering::Release);
+                                client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!(
+                                            "solidity.reindex cache sync: invalid project root {}, deferring",
+                                            foundry_config.root.display()
+                                        ),
+                                    )
+                                    .await;
+                                continue;
+                            }
+
+                            client
+                                .log_message(
+                                    MessageType::INFO,
+                                    "solidity.reindex: rebuilding project index from disk",
+                                )
+                                .await;
+
+                            match crate::solc::solc_project_index(
+                                &foundry_config,
+                                Some(&client),
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(ast_data) => {
+                                    let mut new_build = crate::goto::CachedBuild::new(ast_data, 0);
+                                    if let Some(prev) = ast_cache.read().await.get(cache_key) {
+                                        new_build.merge_missing_from(prev);
+                                    }
+                                    let source_count = new_build.nodes.len();
+                                    let cached_build = Arc::new(new_build);
+                                    let build_for_save = (*cached_build).clone();
+                                    ast_cache
+                                        .write()
+                                        .await
+                                        .insert(cache_key.clone(), cached_build);
+
+                                    let cfg_for_save = foundry_config.clone();
+                                    let save_res = tokio::task::spawn_blocking(move || {
+                                        crate::project_cache::save_reference_cache_with_report(
+                                            &cfg_for_save,
+                                            &build_for_save,
+                                            None,
+                                        )
+                                    })
+                                    .await;
+
+                                    match save_res {
+                                        Ok(Ok(report)) => {
+                                            changed_files.write().await.clear();
+                                            client
+                                                .log_message(
+                                                    MessageType::INFO,
+                                                    format!(
+                                                        "solidity.reindex: persisted cache (sources={}, hashed_files={}, duration={}ms)",
+                                                        source_count, report.file_count_hashed, report.duration_ms
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                        Ok(Err(e)) => {
+                                            dirty_flag.store(true, Ordering::Release);
+                                            client
+                                                .log_message(
+                                                    MessageType::WARNING,
+                                                    format!(
+                                                        "solidity.reindex: persist failed, will retry: {e}"
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            dirty_flag.store(true, Ordering::Release);
+                                            client
+                                                .log_message(
+                                                    MessageType::WARNING,
+                                                    format!(
+                                                        "solidity.reindex: save task failed, will retry: {e}"
+                                                    ),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    dirty_flag.store(true, Ordering::Release);
+                                    client
+                                        .log_message(
+                                            MessageType::WARNING,
+                                            format!(
+                                                "solidity.reindex: re-index failed, will retry: {e}"
+                                            ),
+                                        )
+                                        .await;
+                                }
+                            }
+
+                            if stop_project_cache_sync_worker_or_reclaim(
+                                &pending_flag,
+                                &running_flag,
+                            ) {
+                                continue;
+                            }
+                            break;
+                        }
+                    });
+                }
+
                 self.client
                     .log_message(
                         MessageType::INFO,
