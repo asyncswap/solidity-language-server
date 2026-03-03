@@ -3193,24 +3193,96 @@ impl LanguageServer for ForgeLsp {
             .and_then(|p| p.to_str().map(|s| s.to_string()));
 
         // --- Import path completions ---
-        // If the cursor is on an import line, return all .sol paths in the
-        // project relative to the current file. The editor's fuzzy filter
-        // narrows the list — no partial-path or trigger-char edge cases needed.
-        let is_import_trigger = matches!(trigger_char, Some("\"") | Some("'") | Some("/"));
-        let on_import_line = completion::cursor_is_on_import_line(&source_text, position);
+        // Use tree-sitter to determine whether the cursor is inside an import
+        // string.  This is exact: it finds `import_directive > string` nodes
+        // and checks if the cursor falls within the inner range (excluding
+        // quotes).  This avoids false positives for arbitrary string literals
+        // like `string memory s = "l`.
+        //
+        // For `"` / `'` trigger chars the LSP trigger position is the column
+        // of the quote character itself; the inside of the string starts one
+        // character to the right.
+        let check_pos = if matches!(trigger_char, Some("\"") | Some("'")) {
+            Position {
+                line: position.line,
+                character: position.character.saturating_add(1),
+            }
+        } else {
+            position
+        };
 
-        if is_import_trigger || on_import_line {
+        // --- Assembly dialect completions ---
+        // `assembly ("memory-safe") {}` — the only valid Solidity assembly
+        // dialect is "memory-safe".  Fire exactly one completion item when
+        // the cursor is inside the assembly_flags string.
+        if let Some(asm_range) =
+            links::ts_cursor_in_assembly_flags(source_text.as_bytes(), check_pos)
+        {
+            let text_edit = CompletionTextEdit::Edit(TextEdit {
+                range: Range {
+                    start: Position {
+                        line: position.line,
+                        character: asm_range.start.character,
+                    },
+                    end: Position {
+                        line: position.line,
+                        character: check_pos.character,
+                    },
+                },
+                new_text: "memory-safe".to_string(),
+            });
+            let item = CompletionItem {
+                label: "memory-safe".to_string(),
+                kind: Some(CompletionItemKind::VALUE),
+                detail: Some("Solidity assembly dialect".to_string()),
+                filter_text: Some("memory-safe".to_string()),
+                text_edit: Some(text_edit),
+                ..Default::default()
+            };
+            return Ok(Some(CompletionResponse::List(CompletionList {
+                is_incomplete: false,
+                items: vec![item],
+            })));
+        }
+
+        // --- Import path completions ---
+        // Use tree-sitter to determine whether the cursor is inside an import
+        // string.  This is exact: it finds `import_directive > string` nodes
+        // and checks if the cursor falls within the inner range (excluding
+        // quotes).  This avoids false positives for arbitrary string literals
+        // like `string memory s = "l`.
+        if let Some(import_range) =
+            links::ts_cursor_in_import_string(source_text.as_bytes(), check_pos)
+        {
             if let Ok(current_file) = uri.to_file_path() {
                 let foundry_cfg = self.foundry_config.read().await.clone();
                 let project_root = foundry_cfg.root.clone();
                 let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
-                let items =
-                    completion::all_sol_import_paths(&current_file, &project_root, &remappings);
+                // Replace only the already-typed portion of the path so the
+                // client inserts cleanly (no duplication).
+                let typed_range = Some((
+                    position.line,
+                    import_range.start.character,
+                    check_pos.character,
+                ));
+                let items = completion::all_sol_import_paths(
+                    &current_file,
+                    &project_root,
+                    &remappings,
+                    typed_range,
+                );
                 return Ok(Some(CompletionResponse::List(CompletionList {
                     is_incomplete: true,
                     items,
                 })));
             }
+            return Ok(None);
+        }
+
+        // A `"` or `'` trigger that is not inside an import string or assembly
+        // flags string should never produce completions — return null so the
+        // client does not show a spurious popup.
+        if matches!(trigger_char, Some("\"") | Some("'")) {
             return Ok(None);
         }
 

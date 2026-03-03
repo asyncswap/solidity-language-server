@@ -1,0 +1,43 @@
+# String completion guard — StringCompletions.sol (example/)
+#
+# Five cases across two bench configs:
+#
+#   string-completions.yaml      (this file) — import + assembly (MUST fire)
+#   string-completions-no.yaml                — revert + strvar  (MUST NOT fire)
+#
+# Import cases use no trigger (invoked) because the cursor is mid-string.
+# Assembly uses trigger '"' because the user just typed the opening quote.
+#
+#   lsp-bench -c benchmarks/string-completions.yaml -v
+
+project: example
+file: StringCompletions.sol
+line: 3
+col: 18
+output: benchmarks/string-completions
+
+servers:
+  - mmsaki@latest
+
+benchmarks:
+  - textDocument/completion
+
+methods:
+  textDocument/completion:
+    # snap 1 — import "forge-std/ (bare, cursor mid-string col 18, no trigger)
+    line: 3
+    col: 18
+    didChange:
+      - file: StringCompletions.import-bare.snapshot
+        line: 3
+        col: 18
+
+      # snap 2 — import {} from "forge-std/ (cursor col 26, no trigger)
+      - file: StringCompletions.import-from.snapshot
+        line: 4
+        col: 26
+
+      # snap 3 — assembly (" (cursor inside at col 19, no trigger)
+      - file: StringCompletions.assembly.snapshot
+        line: 17
+        col: 19

@@ -1,0 +1,36 @@
+# String completion guard — MUST NOT fire cases
+#
+# Verifies that '"' trigger outside import/assembly returns null.
+#
+#   snap 4  revert("    line 8  col 15  trigger '"'  -> NULL
+#   snap 5  string s = " line 12 col 26  trigger '"'  -> NULL
+#
+#   lsp-bench -c benchmarks/string-completions-no.yaml -v
+
+project: example
+file: StringCompletions.sol
+line: 8
+col: 15
+output: benchmarks/string-completions-no
+
+servers:
+  - mmsaki@latest
+
+benchmarks:
+  - textDocument/completion
+
+methods:
+  textDocument/completion:
+    # snap 4 — revert(" trigger '"' at col 15
+    line: 8
+    col: 15
+    trigger: "\""
+    didChange:
+      - file: StringCompletions.revert.snapshot
+        line: 8
+        col: 15
+
+      # snap 5 — string memory s = " trigger '"' at col 26
+      - file: StringCompletions.strvar.snapshot
+        line: 12
+        col: 26
