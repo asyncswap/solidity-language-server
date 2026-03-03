@@ -26,15 +26,6 @@ export default defineConfig({
       ]
     },
     {
-      text: "LSP Benchmarks",
-      items: [
-        { text: "Overview", link: "/benchmarks/overview" },
-        { text: "Shop.sol", link: "/benchmarks/reports/shop" },
-        { text: "Pool.sol", link: "/benchmarks/reports/pool" },
-        { text: "PoolManager.t.sol", link: "/benchmarks/reports/poolmanager-t" }
-      ]
-    },
-    {
       text: "Reference",
       items: [
         { text: "Index", link: "/reference" },
@@ -51,6 +42,15 @@ export default defineConfig({
         { text: "Code Actions", link: "/reference/code-actions" },
         { text: "Caches", link: "/reference/caches" },
         { text: "Profiling", link: "/reference/profiling" }
+      ]
+    },
+    {
+      text: "LSP Benchmarks",
+      items: [
+        { text: "Overview", link: "/benchmarks/overview" },
+        { text: "Shop.sol", link: "/benchmarks/reports/shop" },
+        { text: "Pool.sol", link: "/benchmarks/reports/pool" },
+        { text: "PoolManager.t.sol", link: "/benchmarks/reports/poolmanager-t" }
       ]
     },
     {
