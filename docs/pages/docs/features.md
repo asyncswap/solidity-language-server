@@ -14,6 +14,9 @@
 - **File Operations** — `workspace/willCreateFiles` scaffolding + `workspace/willRenameFiles`/`workspace/willDeleteFiles` import edits + `workspace/didCreateFiles`/`workspace/didRenameFiles`/`workspace/didDeleteFiles` cache migration/re-index (`fileOperations.templateOnCreate`, `fileOperations.updateImportsOnRename`, `fileOperations.updateImportsOnDelete`)
 - **Project Indexing Mode** — full-project indexing via `projectIndex.fullProjectScan` (enabled by default), v2 project cache (`projectIndex.cacheMode = "v2"`), and aggressive dependency-closure dirty-sync via `projectIndex.incrementalEditReindex`
 - **Persistent Project Cache** — on-disk warm-start cache for reference/goto data, with atomic writes, immediate per-save v2 upserts, and warm-load changed-file reconcile
+- **Code Actions** — `textDocument/codeAction` quickfix engine; handles `unused-import` forge-lint diagnostic with "Remove unused import" action; JSON-driven rule table in `data/error_codes.json`
+- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + in-memory AST, force clean rebuild) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
+- **Save Performance** — content hash check skips redundant solc rebuilds when file is unchanged; `collect_import_pragmas` runs on blocking thread pool to avoid stalling the async runtime on large projects
 
 ### LSP Methods
 
@@ -52,7 +55,7 @@
 - [ ] `textDocument/typeDefinition` - Go to type definition
 - [ ] `textDocument/implementation` - Go to implementation
 - [x] `textDocument/documentHighlight` - Document highlighting (read/write classification)
-- [ ] `textDocument/codeAction` - Code actions (quick fixes, refactoring)
+- [x] `textDocument/codeAction` - Code actions (unused-import quickfix via forge-lint diagnostics)
 - [ ] `textDocument/codeLens` - Code lens
 - [x] `textDocument/documentLink` - Document links (clickable references and import paths)
 - [ ] `textDocument/documentColor` - Color information
@@ -74,7 +77,7 @@
 - [x] `workspace/didChangeWatchedFiles` - Acknowledges watched file changes (logs only)
 - [x] `workspace/didChangeWorkspaceFolders` - Acknowledges workspace folder changes (logs only)
 - [ ] `workspace/applyEdit` - Inbound handler not implemented (server uses outbound `workspace/applyEdit` to scaffold created files)
-- [ ] `workspace/executeCommand` - Execute workspace commands (stub implementation)
+- [x] `workspace/executeCommand` - Execute workspace commands (`solidity.clearCache`, `solidity.reindex`)
 - [x] `workspace/willCreateFiles` - File creation preview (scaffolding for `.sol`, `.t.sol`, `.s.sol`)
 - [x] `workspace/didCreateFiles` - Post-create scaffold fallback + cache/index refresh
 - [x] `workspace/willRenameFiles` - File rename preview (import path updates)

@@ -23,3 +23,11 @@ That means:
 - `textDocument/references` does not return import-string literals as references for a declaration.
 
 This boundary is deliberate in the current design so references remain declaration/usage based, while import paths remain file-navigation based.
+
+## Import path completions
+
+There is a third distinct behavior for import strings: **completions**.
+
+When the cursor is inside an import string literal (e.g. `import "|"`), the server provides filesystem-based path completions — not symbol completions. This is handled in the completions pipeline, not in goto or references.
+
+See [`completions.md`](./completions) for details on import path completion mode.

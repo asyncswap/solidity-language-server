@@ -1,21 +1,38 @@
 # Changelog
 
-## v0.1.28
+## v0.1.29
 
 ### Features
 
-- `textDocument/codeAction` — JSON-driven quickfix engine; handles `unused-import` forge-lint diagnostic with a "Remove unused import" action
-- `workspace/executeCommand` — `solidity.clearCache` and `solidity.reindex` commands
-- Drop v1 cache path; v2 cache is now the only supported mode
-- Auto-create `.gitignore` in the cache directory on first write
-- `workspace/executeCommand` — `solidity.clearCache` deletes the on-disk cache and wipes in-memory AST, forcing a clean rebuild; `solidity.reindex` evicts in-memory AST and triggers a fast background reindex from the warm disk cache
-- Cache fingerprint now includes `lsp_version` so upgrading the server binary automatically invalidates stale caches; optimizer settings (`optimizer`, `optimizer_runs`, `via_ir`) removed from the fingerprint as they do not affect the reference index
+- `textDocument/codeAction` — JSON-driven quickfix engine; handles `unused-import` forge-lint diagnostic with a "Remove unused import" action (#168)
+- `workspace/executeCommand` — `solidity.clearCache` deletes the on-disk cache and wipes in-memory AST, forcing a clean rebuild; `solidity.reindex` evicts in-memory AST and triggers a fast background reindex from the warm disk cache (#175)
+- `textDocument/completion` — import path completions inside import strings (#173)
+- Non-blocking `didSave` with per-URI watch channel serialisation — rapid saves collapse instead of stacking (#171)
 
 ### Fixes
 
 - Skip redundant solc rebuild on save when file content is unchanged — eliminates ~5s recompilation from format-on-save loops on large projects (#181)
 - Wrap `collect_import_pragmas` in `spawn_blocking` — the transitive import FS crawl no longer blocks the tokio async runtime, preventing request timeouts on first save of large files (#181)
-- `textDocument/references` now returns results for state variables and other declarations (was returning null) — benchmark shows 11 refs for `Shop.sol`, 67 for `PoolManager.t.sol`
+- `textDocument/references` now returns results for state variables and other declarations (was returning null) — 11 refs for `Shop.sol`, 67 for `PoolManager.t.sol`
+- Guarantee full rebuild when reindex races with a running didSave worker (#178)
+- Tree-sitter import/assembly string completion guards (#177)
+- Use `project_cache_key()` in executeCommand and wake reindex worker correctly (#176)
+
+### Benchmarks
+
+- `Shop.sol`: 26/26 methods, references 11 results, rename 11 edits, codeAction working
+- `PoolManager.t.sol`: 26/26 methods, references 67 results, 1082 inlay hints at 9.3ms
+
+## v0.1.28
+
+### Features
+
+- Drop v1 cache path; v2 cache is now the only supported mode
+- Auto-create `.gitignore` in the cache directory on first write
+- Cache fingerprint now includes `lsp_version` so upgrading the server binary automatically invalidates stale caches
+
+### Fixes
+
 - Pull settings via `workspace/configuration` when `initializationOptions` is absent — fixes Neovim which sends settings only via pull requests, not as `initializationOptions` (#164)
 - Use import-closure for project index: BFS from source/test/script roots via forge remappings compiles only files the project actually imports (~510 vs 1788 for v4-core), cross-file `referencedDeclaration` IDs now populated correctly (#165)
 - Resolve solc version from transitive import pragmas: intersects pragma constraints across the full import graph so a wildcard pragma file importing an exact-version file picks a compatible solc, fixing empty ASTs and broken goto-definition (#162)

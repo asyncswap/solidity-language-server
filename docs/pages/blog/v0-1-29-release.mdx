@@ -1,0 +1,85 @@
+# v0.1.29
+
+Quick-fix actions, import completions, and faster saves.
+
+## Code actions — remove unused imports
+
+`textDocument/codeAction` is now implemented. When forge-lint reports an
+`unused-import` diagnostic, the server offers a **Remove unused import**
+quick-fix that deletes the entire import directive in one step.
+
+In Neovim this shows up via `vim.lsp.buf.code_action()`. No configuration
+needed — it works automatically when lint is enabled.
+
+## Import path completions
+
+Typing inside an import string now triggers path completions:
+
+```solidity
+import "./  // ← completion list shows files in the directory
+import "@openzeppelin/  // ← completion list shows package contents
+```
+
+Completions resolve against forge remappings and the project root so
+remapped paths (e.g. `@uniswap/v4-core/`) resolve correctly.
+
+## Find all references — working for declarations
+
+`textDocument/references` was returning null for most cursor positions.
+It now returns results for state variables, functions, events, errors,
+and other declarations:
+
+- `owner` state variable in `Shop.sol` → **11 references**
+- `PoolNotInitialized` error in `PoolManager.t.sol` → **67 references**
+
+## Faster saves on large projects
+
+Two changes make saves noticeably faster on large codebases like v4-core:
+
+**Redundant rebuild skip.** On every `didSave` the server now hashes the
+incoming file content and compares it against the last compiled build. If
+the content is identical — which happens on format-on-save loops where the
+formatter returns edits, Neovim applies them, and the file is saved again
+already-formatted — the full solc recompilation is skipped entirely.
+Repeat saves go from ~5s to instant.
+
+**Non-blocking pragma crawl.** Before compiling, the server walks the
+full transitive import graph to find the tightest solc pragma constraint.
+On `PoolManager.t.sol` that is ~95 files read synchronously. This crawl
+was running on the tokio async thread, blocking all other LSP requests
+(hover, completion, definition) until it finished. It now runs on the
+blocking thread pool via `spawn_blocking`.
+
+## workspace/executeCommand
+
+Two commands are available:
+
+- **`solidity.clearCache`** — deletes the on-disk cache and wipes
+  in-memory AST, forcing a clean rebuild on next save.
+- **`solidity.reindex`** — evicts in-memory AST and triggers a fast
+  background reindex from the warm disk cache without deleting it.
+
+Trigger from Neovim with:
+
+```lua
+vim.lsp.buf.execute_command({ command = "solidity.reindex" })
+```
+
+## Non-blocking didSave
+
+Rapid saves (`:w` spam) no longer stack. Each URI has a dedicated watch
+channel — new saves collapse into the running worker instead of queuing
+separate builds. Only the latest content is compiled.
+
+## Benchmarks
+
+| File | Methods | References | Rename |
+|------|---------|-----------|--------|
+| `Shop.sol` | 26/26 ⚡ | 11 results | 11 edits |
+| `PoolManager.t.sol` | 26/26 ⚡ | 67 results | 9 edits |
+
+## Upgrade
+
+```sh
+cargo install solidity-language-server
+```

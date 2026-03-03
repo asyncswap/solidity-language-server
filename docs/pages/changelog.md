@@ -2,6 +2,29 @@
 
 # Changelog
 
+## v0.1.29
+
+### Features
+
+- `textDocument/codeAction` — JSON-driven quickfix engine; handles `unused-import` forge-lint diagnostic with a "Remove unused import" action (#168)
+- `workspace/executeCommand` — `solidity.clearCache` and `solidity.reindex` commands (#175)
+- `textDocument/completion` — import path completions inside import strings (#173)
+- Non-blocking `didSave` with per-URI watch channel serialisation — rapid saves collapse instead of stacking (#171)
+
+### Fixes
+
+- Skip redundant solc rebuild on save when file content is unchanged — eliminates ~5s recompilation from format-on-save loops on large projects (#181)
+- Wrap `collect_import_pragmas` in `spawn_blocking` — the transitive import FS crawl no longer blocks the tokio async runtime, preventing request timeouts on first save of large files (#181)
+- `textDocument/references` now returns results for state variables and other declarations (was returning null) — 11 refs for `Shop.sol`, 67 for `PoolManager.t.sol`
+- Guarantee full rebuild when reindex races with a running didSave worker (#178)
+- Tree-sitter import/assembly string completion guards (#177)
+- Use `project_cache_key()` in executeCommand and wake reindex worker correctly (#176)
+
+### Benchmarks
+
+- `Shop.sol`: 26/26 methods, references 11 results, rename 11 edits, codeAction working
+- `PoolManager.t.sol`: 26/26 methods, references 67 results, 1082 inlay hints at 9.3ms
+
 ## v0.1.28
 
 ### Features

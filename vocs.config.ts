@@ -47,6 +47,8 @@ export default defineConfig({
         { text: "Signature Help", link: "/reference/signature-help" },
         { text: "Will Rename Files", link: "/reference/will-rename-files" },
         { text: "Imports and References", link: "/reference/imports-references" },
+        { text: "Diagnostics", link: "/reference/diagnostics" },
+        { text: "Code Actions", link: "/reference/code-actions" },
         { text: "Caches", link: "/reference/caches" },
         { text: "Profiling", link: "/reference/profiling" }
       ]
@@ -55,6 +57,7 @@ export default defineConfig({
       text: "Blog",
       items: [
         { text: "All Posts", link: "/blog" },
+        { text: "v0.1.29 Release", link: "/blog/v0-1-29-release" },
         { text: "v0.1.28 Release", link: "/blog/v0-1-28-release" },
         { text: "v0.1.27 Release", link: "/blog/v0-1-27-release" },
         { text: "v0.1.26 Release", link: "/blog/v0-1-26-release" },

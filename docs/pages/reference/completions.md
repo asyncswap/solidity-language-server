@@ -109,11 +109,34 @@ AST member lists are useful but do not always carry full external signature deta
 - selector metadata in label details,
 - better external/public method display for contract and interface completions.
 
+## Import path completions
+
+When the cursor is inside an import string literal (e.g. `import "|"`), the server provides file-path completions instead of symbol completions.
+
+### How it works
+
+At request time, `textDocument/completion` detects whether the cursor is inside a string literal inside an `import_directive` node using tree-sitter. If so, it switches to import-path mode:
+
+- The partial path typed so far is extracted from the string literal.
+- The server resolves the project root and remapping table from `foundry.toml`.
+- Candidate paths are collected from the filesystem relative to the current file (for relative imports) and from configured remapping prefixes (e.g. `@openzeppelin/` → `lib/openzeppelin/src/`).
+- Each candidate is returned as a `CompletionItem` with `kind: Module` and a label that represents the relative or remapped import path.
+
+This mode is entirely separate from symbol completions: `CompletionCache` is not consulted, and tail candidates are not appended.
+
+### Important boundary
+
+Import path completions only apply inside import string literals. They do not apply to:
+
+- identifier expressions (use regular symbol completions),
+- string literals in other contexts (no completions are offered).
+
 ## Current limitations / tradeoffs
 
 - Completion quality depends on cache freshness; background cache hydration is best-effort.
 - Dot-chain resolution for very complex expressions is intentionally heuristic, not a full type-check pass.
 - Tail candidate import edits are only added in non-dot mode by design.
+- Import path completions are filesystem-based; they do not filter to files that actually export the symbol you need.
 
 ## Test coverage and confidence
 
