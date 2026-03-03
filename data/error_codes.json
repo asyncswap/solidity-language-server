@@ -101,7 +101,13 @@
     "message": "Fallback function must be defined as \"external\".",
     "source": "analysis/TypeChecker.cpp",
     "line": 2031,
-    "action": null
+    "action": {
+      "kind": "replace_child_node",
+      "title": "Change visibility to `external`",
+      "walk_to": "fallback_receive_definition",
+      "node": "visibility",
+      "replacement": "external"
+    }
   },
   {
     "code": 1164,
@@ -232,7 +238,8 @@
     "action": {
       "kind": "replace_token",
       "title": "Replace `msg.gas` with `gasleft()`",
-      "replacement": "gasleft()"
+      "replacement": "gasleft()",
+      "walk_to": "member_expression"
     }
   },
   {
@@ -377,7 +384,13 @@
     "message": "Functions in interfaces must be declared external.",
     "source": "analysis/TypeChecker.cpp",
     "line": 446,
-    "action": null
+    "action": {
+      "kind": "replace_child_node",
+      "title": "Change visibility to `external`",
+      "walk_to": "function_definition",
+      "node": "visibility",
+      "replacement": "external"
+    }
   },
   {
     "code": 1561,
@@ -628,7 +641,15 @@
     "message": "Non-abstract contracts cannot have internal constructors. Remove the \"internal\" keyword and make the contract abstract to fix this.",
     "source": "analysis/TypeChecker.cpp",
     "line": 2077,
-    "action": null
+    "action": {
+      "kind": "delete_child_node",
+      "title": "Remove `internal` from non-abstract constructor",
+      "walk_to": "constructor_definition",
+      "before_child": [
+        "modifier_invocation",
+        "public"
+      ]
+    }
   },
   {
     "code": 1847,
@@ -1105,8 +1126,13 @@
     "source": "analysis/TypeChecker.cpp",
     "line": 2083,
     "action": {
-      "kind": "delete_token",
-      "title": "Remove constructor visibility specifier"
+      "kind": "delete_child_node",
+      "title": "Remove constructor visibility specifier",
+      "walk_to": "constructor_definition",
+      "before_child": [
+        "public",
+        "modifier_invocation"
+      ]
     }
   },
   {
@@ -2194,7 +2220,13 @@
     "message": "Receive ether function must be defined as \"external\".",
     "source": "analysis/ContractLevelChecker.cpp",
     "line": 222,
-    "action": null
+    "action": {
+      "kind": "replace_child_node",
+      "title": "Change visibility to `external`",
+      "walk_to": "fallback_receive_definition",
+      "node": "visibility",
+      "replacement": "external"
+    }
   },
   {
     "code": 4103,
@@ -2246,8 +2278,10 @@
     "source": "analysis/SyntaxChecker.cpp",
     "line": 485,
     "action": {
-      "kind": "delete_token",
-      "title": "Remove visibility from free function"
+      "kind": "delete_child_node",
+      "title": "Remove visibility from free function",
+      "walk_to": "function_definition",
+      "node": "visibility"
     }
   },
   {
@@ -3318,7 +3352,12 @@
     "message": "\"internal\" and \"private\" functions cannot be payable.",
     "source": "analysis/TypeChecker.cpp",
     "line": 336,
-    "action": null
+    "action": {
+      "kind": "delete_child_node",
+      "title": "Remove `payable` from internal/private function",
+      "walk_to": "function_definition",
+      "node": "state_mutability"
+    }
   },
   {
     "code": 5604,
@@ -4417,7 +4456,13 @@
     "message": "Fallback function must be external.",
     "source": "analysis/SyntaxRestrictor.cpp",
     "line": 73,
-    "action": null
+    "action": {
+      "kind": "replace_child_node",
+      "title": "Change visibility to `external`",
+      "walk_to": "fallback_receive_definition",
+      "node": "visibility",
+      "replacement": "external"
+    }
   },
   {
     "code": 7359,
@@ -4672,7 +4717,12 @@
     "message": "Library functions cannot be payable.",
     "source": "analysis/TypeChecker.cpp",
     "line": 332,
-    "action": null
+    "action": {
+      "kind": "delete_child_node",
+      "title": "Remove `payable` from library function",
+      "walk_to": "function_definition",
+      "node": "state_mutability"
+    }
   },
   {
     "code": 7710,
@@ -4932,7 +4982,16 @@
     "message": "Modifiers without implementation must be marked virtual.",
     "source": "analysis/TypeChecker.cpp",
     "line": 305,
-    "action": null
+    "action": {
+      "kind": "insert_before_node",
+      "title": "Mark modifier as `virtual`",
+      "walk_to": "modifier_definition",
+      "before_child": [
+        ";",
+        "function_body"
+      ],
+      "text": " virtual"
+    }
   },
   {
     "code": 8065,
@@ -4959,7 +5018,8 @@
     "action": {
       "kind": "replace_token",
       "title": "Replace `block.blockhash` with `blockhash`",
-      "replacement": "blockhash"
+      "replacement": "blockhash",
+      "walk_to": "member_expression"
     }
   },
   {
@@ -5072,7 +5132,15 @@
     "message": "Abstract contracts cannot have public constructors. Remove the \"public\" keyword to fix this.",
     "source": "analysis/TypeChecker.cpp",
     "line": 2071,
-    "action": null
+    "action": {
+      "kind": "delete_child_node",
+      "title": "Remove `public` from abstract constructor",
+      "walk_to": "constructor_definition",
+      "before_child": [
+        "public",
+        "modifier_invocation"
+      ]
+    }
   },
   {
     "code": 8297,
@@ -5607,8 +5675,12 @@
     "source": "analysis/TypeChecker.cpp",
     "line": 2068,
     "action": {
-      "kind": "delete_token",
-      "title": "Remove constructor visibility specifier"
+      "kind": "delete_child_node",
+      "title": "Remove constructor visibility specifier",
+      "walk_to": "constructor_definition",
+      "before_child": [
+        "modifier_invocation"
+      ]
     }
   },
   {
@@ -5815,7 +5887,12 @@
     "message": "Free functions cannot be payable.",
     "source": "analysis/TypeChecker.cpp",
     "line": 334,
-    "action": null
+    "action": {
+      "kind": "delete_child_node",
+      "title": "Remove `payable` from free function",
+      "walk_to": "function_definition",
+      "node": "state_mutability"
+    }
   },
   {
     "code": 9563,

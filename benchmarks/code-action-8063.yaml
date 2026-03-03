@@ -1,0 +1,32 @@
+# textDocument/codeAction — modifier missing virtual (error 8063)
+#
+# MissingVirtualModifier.sol has a modifier without `virtual` triggering
+# error 8063. The server should return a QuickFix that inserts `virtual`.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-8063.yaml -v
+#   lsp-bench -c benchmarks/code-action-8063.yaml -v --verify
+
+project: .
+file: example/codeaction/MissingVirtualModifier.sol
+line: 7
+col: 4
+output: benchmarks/code-action-8063
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    line: 7
+    col: 4
+    expect:
+      titleContains: "virtual"

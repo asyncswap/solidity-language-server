@@ -4531,11 +4531,17 @@ impl LanguageServer for ForgeLsp {
                         )
                     }
 
-                    FixKind::ReplaceToken { replacement } => source.as_deref().and_then(|src| {
+                    FixKind::ReplaceToken {
+                        replacement,
+                        walk_to,
+                    } => source.as_deref().and_then(|src| {
                         goto::code_action_edit(
                             src,
                             diag.range,
-                            goto::CodeActionKind::ReplaceToken { replacement },
+                            goto::CodeActionKind::ReplaceToken {
+                                replacement,
+                                walk_to: walk_to.as_deref(),
+                            },
                         )
                     }),
 
@@ -4557,6 +4563,39 @@ impl LanguageServer for ForgeLsp {
                             None
                         }
                     }
+
+                    FixKind::DeleteChildNode {
+                        walk_to,
+                        child_kinds,
+                    } => {
+                        let ck: Vec<&str> = child_kinds.iter().map(|s| s.as_str()).collect();
+                        source.as_deref().and_then(|src| {
+                            goto::code_action_edit(
+                                src,
+                                diag.range,
+                                goto::CodeActionKind::DeleteChildNode {
+                                    walk_to,
+                                    child_kinds: &ck,
+                                },
+                            )
+                        })
+                    }
+
+                    FixKind::ReplaceChildNode {
+                        walk_to,
+                        child_kind,
+                        replacement,
+                    } => source.as_deref().and_then(|src| {
+                        goto::code_action_edit(
+                            src,
+                            diag.range,
+                            goto::CodeActionKind::ReplaceChildNode {
+                                walk_to,
+                                child_kind,
+                                replacement,
+                            },
+                        )
+                    }),
 
                     FixKind::InsertBeforeNode {
                         walk_to,

@@ -1,0 +1,32 @@
+# textDocument/codeAction — deprecated block.blockhash (error 8113)
+#
+# DeprecatedBlockhash.sol uses `block.blockhash()` triggering error 8113.
+# The server should return a QuickFix that replaces it with `blockhash()`.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-8113.yaml -v
+#   lsp-bench -c benchmarks/code-action-8113.yaml -v --verify
+
+project: .
+file: example/codeaction/DeprecatedBlockhash.sol
+line: 8
+col: 15
+output: benchmarks/code-action-8113
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    line: 8
+    col: 15
+    expect:
+      titleContains: "blockhash"

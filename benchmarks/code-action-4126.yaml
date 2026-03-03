@@ -1,0 +1,32 @@
+# textDocument/codeAction — free function visibility (error 4126)
+#
+# FreeFunction.sol has `function double(...) internal pure ...` triggering
+# error 4126. The server should return a QuickFix that deletes `internal`.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-4126.yaml -v
+#   lsp-bench -c benchmarks/code-action-4126.yaml -v --verify
+
+project: .
+file: example/codeaction/FreeFunction.sol
+line: 6
+col: 0
+output: benchmarks/code-action-4126
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    line: 6
+    col: 0
+    expect:
+      titleContains: "Remove visibility from free function"

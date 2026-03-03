@@ -1,0 +1,32 @@
+# textDocument/codeAction — deprecated msg.gas (error 1400)
+#
+# DeprecatedMsgGas.sol uses `msg.gas` triggering error 1400.
+# The server should return a QuickFix that replaces `msg.gas` with `gasleft()`.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-1400.yaml -v
+#   lsp-bench -c benchmarks/code-action-1400.yaml -v --verify
+
+project: .
+file: example/codeaction/DeprecatedMsgGas.sol
+line: 8
+col: 15
+output: benchmarks/code-action-1400
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    line: 8
+    col: 15
+    expect:
+      titleContains: "gasleft()"

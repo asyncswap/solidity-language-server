@@ -76,7 +76,12 @@ pub enum FixKind {
     Insert { text: String, anchor: InsertAnchor },
 
     /// Replace the token whose byte range starts at `diag_range.start`.
-    ReplaceToken { replacement: String },
+    /// When `walk_to` is `Some`, walk up the TS tree to the first ancestor of
+    /// that kind and replace that whole node instead of just the leaf token.
+    ReplaceToken {
+        replacement: String,
+        walk_to: Option<String>,
+    },
 
     /// Delete the token at `diag_range.start` (+ one trailing space if present).
     DeleteToken,
@@ -84,6 +89,24 @@ pub enum FixKind {
     /// Walk the TS tree up to `node_kind`, then delete the whole node
     /// (including leading whitespace/newline so the line disappears cleanly).
     DeleteNode { node_kind: String },
+
+    /// Walk the TS tree up to `walk_to`, then delete the first child whose
+    /// kind matches any entry in `child_kinds` (tried in order).
+    /// Used when the diagnostic points to the parent node (e.g. 4126: diag
+    /// starts at `function` keyword but we need to delete the `visibility` child).
+    DeleteChildNode {
+        walk_to: String,
+        child_kinds: Vec<String>,
+    },
+
+    /// Walk the TS tree up to `walk_to`, then replace the first child whose
+    /// kind matches `child_kind` with `replacement`.
+    /// Used for 1560/1159/4095: replace wrong visibility with `external`.
+    ReplaceChildNode {
+        walk_to: String,
+        child_kind: String,
+        replacement: String,
+    },
 
     /// Walk the TS tree up to `walk_to`, then insert `text` immediately before
     /// the first child whose kind matches any entry in `before_child`.
@@ -144,11 +167,28 @@ fn parse_action(a: RawAction) -> Option<CodeActionDef> {
 
         "replace_token" => FixKind::ReplaceToken {
             replacement: a.replacement?,
+            walk_to: a.walk_to,
         },
 
         "delete_token" => FixKind::DeleteToken,
 
         "delete_node" => FixKind::DeleteNode { node_kind: a.node? },
+
+        "delete_child_node" => {
+            // `before_child` is an ordered list of candidate kinds (first match wins).
+            // `node` is a single-kind shorthand; if both present, before_child wins.
+            let child_kinds = a.before_child.or_else(|| a.node.map(|n| vec![n]))?;
+            FixKind::DeleteChildNode {
+                walk_to: a.walk_to?,
+                child_kinds,
+            }
+        }
+
+        "replace_child_node" => FixKind::ReplaceChildNode {
+            walk_to: a.walk_to?,
+            child_kind: a.node?,
+            replacement: a.replacement?,
+        },
 
         "insert_before_node" => FixKind::InsertBeforeNode {
             walk_to: a.walk_to?,
@@ -185,7 +225,12 @@ mod tests {
         // Every code we explicitly handle should be in the map.
         let expected = [
             1878u32, 2072, 2074, 7591, 1827, 9102, 9125, 2662, 6879, 9348, 5424, 7359, 3557, 4538,
-            8050, 1400, 2256, 8113,
+            8050, 1400, 2256, 8113, // constructor visibility
+            2462, 9239, 8295, 1845, // payable
+            9559, 7708, 5587, // interface/fallback/receive must be external
+            1560, 1159, 4095, 7341, // modifier virtual
+            8063, // free function visibility (fixed kind)
+            4126,
         ];
         for code in expected {
             assert!(db.contains_key(&code), "missing code {code}");
@@ -208,7 +253,7 @@ mod tests {
     fn test_7359_is_replace_token() {
         let db = load();
         let def = db.get(&7359).unwrap();
-        if let FixKind::ReplaceToken { replacement } = &def.fix {
+        if let FixKind::ReplaceToken { replacement, .. } = &def.fix {
             assert_eq!(replacement, "block.timestamp");
         } else {
             panic!("expected ReplaceToken for 7359");

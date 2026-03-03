@@ -1,0 +1,32 @@
+# textDocument/codeAction — constructor visibility ignored (warning 2462)
+#
+# ConstructorVisibility.sol has `constructor() public {}` triggering
+# warning 2462. The server should return a QuickFix that deletes `public`.
+#
+# Run:
+#   lsp-bench -c benchmarks/code-action-2462.yaml -v
+#   lsp-bench -c benchmarks/code-action-2462.yaml -v --verify
+
+project: .
+file: example/codeaction/ConstructorVisibility.sol
+line: 9
+col: 4
+output: benchmarks/code-action-2462
+iterations: 3
+warmup: 1
+timeout: 30
+index_timeout: 60
+
+servers:
+  - label: mmsaki
+    cmd: solidity-language-server
+
+benchmarks:
+  - textDocument/codeAction
+
+methods:
+  textDocument/codeAction:
+    line: 9
+    col: 4
+    expect:
+      titleContains: "Remove constructor visibility"
