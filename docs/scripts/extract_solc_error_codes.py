@@ -286,6 +286,8 @@ def parse_context_output(text: str) -> list[dict]:
         if not m_code:
             continue
         code = m_code.group(1)
+        if int(code) == 0:
+            continue  # 0000_error is a placeholder in comments, not a real code
         if code in seen:
             continue
 

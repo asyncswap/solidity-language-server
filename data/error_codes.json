@@ -1,13 +1,5 @@
 [
   {
-    "code": 0,
-    "severity": "error",
-    "message": "python ./scripts/error_codes.py --fix",
-    "source": "liblangutil/Exceptions.h",
-    "line": 156,
-    "action": null
-  },
-  {
     "code": 1005,
     "severity": "error",
     "message": "Expected elementary type name or identifier for mapping key type",
