@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tiny_keccak::{Hasher, Keccak};
 
-const CACHE_SCHEMA_VERSION_V2: u32 = 2;
+const CACHE_SCHEMA_VERSION_V2: u32 = 3;
 const CACHE_DIR: &str = ".solidity-language-server";
 const CACHE_FILE_V2: &str = "solidity-lsp-schema-v2.json";
 const CACHE_SHARDS_DIR_V2: &str = "reference-index-v2";
@@ -19,14 +19,14 @@ const CACHE_GITIGNORE_CONTENTS: &str = "*\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedNodeEntry {
-    id: u64,
+    id: i64,
     info: NodeInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedExternalRef {
     src: String,
-    decl_id: u64,
+    decl_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,7 +328,7 @@ pub fn upsert_reference_cache_v2_with_report(
     // Also prune external_refs whose target decl_id no longer exists in
     // id_to_path_map (i.e. old IDs from the recompiled files that were just
     // removed above).  This prevents stale cross-file reference hits.
-    let live_ids: std::collections::HashSet<u64> = meta
+    let live_ids: std::collections::HashSet<i64> = meta
         .id_to_path_map
         .keys()
         .filter_map(|k| k.parse().ok())

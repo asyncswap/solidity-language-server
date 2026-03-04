@@ -606,13 +606,13 @@ fn find_node_by_id(sources: &Value, target_id: NodeId) -> Option<&Value> {
         let ast = source_data.get("ast")?;
 
         // Check root
-        if ast.get("id").and_then(|v| v.as_u64()) == Some(target_id.0) {
+        if ast.get("id").and_then(|v| v.as_i64()) == Some(target_id.0) {
             return Some(ast);
         }
 
         let mut stack = vec![ast];
         while let Some(node) = stack.pop() {
-            if node.get("id").and_then(|v| v.as_u64()) == Some(target_id.0) {
+            if node.get("id").and_then(|v| v.as_i64()) == Some(target_id.0) {
                 return Some(node);
             }
             for key in CHILD_KEYS {
@@ -1136,7 +1136,7 @@ pub fn signature_help(
     })?;
 
     // Typed DeclNode — O(1) from decl_index
-    let typed_decl = di.get(&(decl_id as i64))?;
+    let typed_decl = di.get(&decl_id)?;
 
     // Build the signature label
     let sig_label = typed_decl.build_signature()?;
@@ -1382,7 +1382,7 @@ pub fn hover_info(
     let decl_id = node_info.referenced_declaration.unwrap_or(node_id);
 
     // Typed DeclNode — O(1) from decl_index
-    let typed_decl = cached_build.decl_index.get(&(decl_id.0 as i64));
+    let typed_decl = cached_build.decl_index.get(&decl_id.0);
 
     // Build hover content
     let mut parts: Vec<String> = Vec::new();
@@ -1463,7 +1463,7 @@ pub fn hover_info(
             )
         {
             // Look up @param doc via typed DeclNode
-            let typed_fn = di.get(&(resolved.decl_id as i64));
+            let typed_fn = di.get(&resolved.decl_id);
             let param_doc = typed_fn.and_then(|fn_decl| {
                 // Try DocIndex first (structured devdoc)
                 if let Some(doc_entry) = lookup_doc_entry_typed(doc_index, fn_decl, di, id_to_path)

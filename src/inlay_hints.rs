@@ -36,7 +36,7 @@ struct CallSite {
     /// Function/event name (for matching with tree-sitter).
     name: String,
     /// The AST node id of the called function/event declaration (for DocIndex lookup).
-    decl_id: u64,
+    decl_id: i64,
 }
 
 /// Resolved callsite info returned to hover for param doc lookup.
@@ -45,7 +45,7 @@ pub struct ResolvedCallSite {
     /// The parameter name at the given argument index.
     pub param_name: String,
     /// The AST node id of the called function/event declaration.
-    pub decl_id: u64,
+    pub decl_id: i64,
 }
 
 /// Both lookup strategies: exact byte-offset match and (name, arg_count) fallback.
@@ -72,7 +72,7 @@ impl HintLookup {
         call_offset: usize,
         func_name: &str,
         arg_count: usize,
-    ) -> Option<(u64, usize)> {
+    ) -> Option<(i64, usize)> {
         // Try exact match first
         if let Some(site) = lookup_call_site(self, call_offset, func_name, arg_count) {
             return Some((site.decl_id, site.info.skip));
@@ -121,13 +121,13 @@ pub type HintIndex = HashMap<String, HintLookup>;
 /// Maps contract declaration ID → (constructor declaration ID, contract name, param names).
 #[derive(Debug, Clone)]
 pub struct ConstructorInfo {
-    pub constructor_id: u64,
+    pub constructor_id: i64,
     pub contract_name: String,
     pub param_names: Vec<String>,
 }
 
 /// Index of contract ID → constructor info, built from the typed `decl_index`.
-pub type ConstructorIndex = HashMap<u64, ConstructorInfo>;
+pub type ConstructorIndex = HashMap<i64, ConstructorInfo>;
 
 /// Build the constructor index from the `decl_index`.
 ///
@@ -147,9 +147,9 @@ pub fn build_constructor_index(
                 .map(|d| d.name().to_string())
                 .unwrap_or_default();
             index.insert(
-                scope as u64,
+                scope,
                 ConstructorInfo {
-                    constructor_id: *id as u64,
+                    constructor_id: *id,
                     contract_name,
                     param_names: names,
                 },
@@ -359,7 +359,7 @@ struct CallInfo {
     /// Parameter names and skip count.
     params: ParamInfo,
     /// The AST node id of the referenced declaration (for DocIndex lookup).
-    decl_id: u64,
+    decl_id: i64,
 }
 
 /// Extract function/event name and parameter info from an AST FunctionCall node.
@@ -394,9 +394,9 @@ fn extract_call_info(
         return extract_new_expression_call_info(expr, args.len(), constructor_index);
     }
 
-    let decl_id = expr.get("referencedDeclaration").and_then(|v| v.as_u64())?;
+    let decl_id = expr.get("referencedDeclaration").and_then(|v| v.as_i64())?;
 
-    let decl = decl_index.get(&(decl_id as i64))?;
+    let decl = decl_index.get(&decl_id)?;
     let names = decl.param_names()?;
 
     // Extract the function name from the expression
@@ -438,7 +438,7 @@ fn extract_new_expression_call_info(
     let type_name = new_expr.get("typeName")?;
     let contract_id = type_name
         .get("referencedDeclaration")
-        .and_then(|v| v.as_u64())?;
+        .and_then(|v| v.as_i64())?;
 
     let info = constructor_index.get(&contract_id)?;
 

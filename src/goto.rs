@@ -311,7 +311,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                     nodes.insert(abs_path.clone(), HashMap::with_capacity(size_hint));
                 }
 
-                if let Some(id) = ast.get("id").and_then(|v| v.as_u64())
+                if let Some(id) = ast.get("id").and_then(|v| v.as_i64())
                     && let Some(src) = ast.get("src").and_then(|v| v.as_str())
                 {
                     nodes.get_mut(&abs_path).unwrap().insert(
@@ -337,7 +337,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                 let mut stack = vec![ast];
 
                 while let Some(tree) = stack.pop() {
-                    if let Some(raw_id) = tree.get("id").and_then(|v| v.as_u64())
+                    if let Some(raw_id) = tree.get("id").and_then(|v| v.as_i64())
                         && let Some(src) = tree.get("src").and_then(|v| v.as_str())
                     {
                         let id = NodeId(raw_id);
@@ -391,7 +391,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                             name_locations,
                             referenced_declaration: tree
                                 .get("referencedDeclaration")
-                                .and_then(|v| v.as_u64())
+                                .and_then(|v| v.as_i64())
                                 .map(NodeId),
                             node_type: tree
                                 .get("nodeType")
@@ -417,7 +417,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                             for ext_ref in ext_refs {
                                 if let Some(src_str) = ext_ref.get("src").and_then(|v| v.as_str())
                                     && let Some(decl_id) =
-                                        ext_ref.get("declaration").and_then(|v| v.as_u64())
+                                        ext_ref.get("declaration").and_then(|v| v.as_i64())
                                 {
                                     external_refs.insert(src_str.to_string(), NodeId(decl_id));
                                 }

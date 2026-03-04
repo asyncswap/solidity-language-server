@@ -166,7 +166,7 @@ pub fn extract_node_id_from_type(type_id: &str) -> Option<NodeId> {
                 i += 1;
             }
             if i > start
-                && let Ok(id) = type_id[start..i].parse::<u64>()
+                && let Ok(id) = type_id[start..i].parse::<i64>()
             {
                 last_id = Some(NodeId(id));
             }
@@ -316,7 +316,7 @@ pub fn extract_top_level_importables_for_file(path: &str, ast: &Value) -> Vec<To
 
     while let Some(tree) = stack.pop() {
         let node_type = tree.get("nodeType").and_then(|v| v.as_str()).unwrap_or("");
-        let node_id = tree.get("id").and_then(|v| v.as_u64()).map(NodeId);
+        let node_id = tree.get("id").and_then(|v| v.as_i64()).map(NodeId);
         if node_type == "SourceUnit" {
             source_unit_id = node_id;
         }
@@ -325,7 +325,7 @@ pub fn extract_top_level_importables_for_file(path: &str, ast: &Value) -> Vec<To
         if !name.is_empty()
             && is_top_level_importable_decl(node_type, tree)
             && let Some(src_scope) = source_unit_id
-            && tree.get("scope").and_then(|v| v.as_u64()) == Some(src_scope.0)
+            && tree.get("scope").and_then(|v| v.as_i64()) == Some(src_scope.0)
         {
             out.push(TopLevelImportable {
                 name: name.to_string(),
@@ -422,7 +422,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                 while let Some(tree) = stack.pop() {
                     let node_type = tree.get("nodeType").and_then(|v| v.as_str()).unwrap_or("");
                     let name = tree.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let node_id = tree.get("id").and_then(|v| v.as_u64()).map(NodeId);
+                    let node_id = tree.get("id").and_then(|v| v.as_i64()).map(NodeId);
 
                     // --- Scope-aware data collection ---
 
@@ -447,7 +447,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                             });
                         }
                         // Record parent link: this node's scope → its parent
-                        if let Some(parent_id) = tree.get("scope").and_then(|v| v.as_u64()) {
+                        if let Some(parent_id) = tree.get("scope").and_then(|v| v.as_i64()) {
                             scope_parent.insert(nid, NodeId(parent_id));
                         }
                     }
@@ -461,7 +461,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                     {
                         let base_ids: Vec<NodeId> = bases
                             .iter()
-                            .filter_map(|b| b.as_u64())
+                            .filter_map(|b| b.as_i64())
                             .map(NodeId)
                             .collect();
                         if !base_ids.is_empty() {
@@ -472,7 +472,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                     // For VariableDeclarations, record the declaration in its scope
                     if node_type == "VariableDeclaration"
                         && !name.is_empty()
-                        && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_u64())
+                        && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_i64())
                         && let Some(tid) = tree
                             .get("typeDescriptions")
                             .and_then(|td| td.get("typeIdentifier"))
@@ -490,7 +490,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                     // For FunctionDefinitions, record them in their parent scope (the contract)
                     if node_type == "FunctionDefinition"
                         && !name.is_empty()
-                        && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_u64())
+                        && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_i64())
                         && let Some(tid) = tree
                             .get("typeDescriptions")
                             .and_then(|td| td.get("typeIdentifier"))
@@ -727,7 +727,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                         // Form 1: library name object with referencedDeclaration
                         if let Some(lib) = tree.get("libraryName") {
                             if let Some(lib_id) =
-                                lib.get("referencedDeclaration").and_then(|v| v.as_u64())
+                                lib.get("referencedDeclaration").and_then(|v| v.as_i64())
                             {
                                 using_for_directives.push((NodeId(lib_id), target_type));
                             }
@@ -1284,7 +1284,7 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
             // Handle synthetic __node_id_ markers from name_to_node_id fallback
             type_id
                 .strip_prefix("__node_id_")
-                .and_then(|s| s.parse::<u64>().ok())
+                .and_then(|s| s.parse::<i64>().ok())
                 .map(NodeId)
         });
 
@@ -1446,7 +1446,7 @@ fn resolve_member_type(
             // Handle synthetic __node_id_ markers
             context_type_id
                 .strip_prefix("__node_id_")
-                .and_then(|s| s.parse::<u64>().ok())
+                .and_then(|s| s.parse::<i64>().ok())
                 .map(NodeId)
         });
 

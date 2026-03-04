@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every node in the Solidity compiler's JSON AST has a unique numeric `id`.
 /// Wrapping it prevents accidental mixups with [`FileId`] or plain integers.
+///
+/// Signed because solc uses negative IDs for built-in symbols (e.g. `-1` for
+/// `abi`, `-15` for `msg`, `-18` for `require`, `-28` for `this`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct NodeId(pub u64);
+pub struct NodeId(pub i64);
 
 /// Newtype wrapper for source file IDs.
 ///
