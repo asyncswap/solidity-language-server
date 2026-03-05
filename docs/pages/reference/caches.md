@@ -64,7 +64,7 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 | `id_to_path_map` | `HashMap<SolcFileId, String>` | `CachedBuild::new()` | Source file id → relative path. `SolcFileId` wraps the stringified solc id (`"0"`, `"34"`, …). |
 | `decl_index` | `HashMap<NodeId, DeclNode>` | `solc_ast::extract_decl_nodes()` | Typed declaration lookup: function, variable, contract, event, error, struct, enum, modifier, UDVT. Keyed by `NodeId`. |
 | `node_id_to_source_path` | `HashMap<NodeId, AbsPath>` | `solc_ast::extract_decl_nodes()` | O(1): declaration node id → source file absolute path. Avoids O(N) walk. |
-| `gas_index` | `HashMap<String, ContractGas>` | `gas::build_gas_index()` | Key `"path:ContractName"`. Creation costs and per-function gas by selector/signature. Used by hover and inlay hints. |
+| `gas_index` | `HashMap<GasKey, ContractGas>` | `gas::build_gas_index()` | Key `GasKey("path:ContractName")`. Creation costs and per-function gas by selector/signature. Used by hover and inlay hints. |
 | `hint_index` | `HashMap<AbsPath, HintLookup>` | `inlay_hints::build_hint_index()` | Keyed by `AbsPath`. Each `HintLookup` has by-offset and by-`(name, arg_count)` sub-indexes for resolving parameter names at call sites. |
 | `doc_index` | `HashMap<DocKey, DocEntry>` | `hover::build_doc_index()` | Merged userdoc/devdoc. Keyed by 4-byte selector, 32-byte event topic, or `"path:Name"`. |
 | `completion_cache` | `Arc<CompletionCache>` | `completion::build_completion_cache()` | Full completion index (see below). Wrapped in `Arc` so it can be shared into `ForgeLsp.completion_cache` without cloning. |

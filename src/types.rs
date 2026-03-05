@@ -233,6 +233,82 @@ impl std::borrow::Borrow<str> for RelPath {
     }
 }
 
+/// Composite key for gas estimates: `"<path>:<contract_name>"`.
+///
+/// Used as the key type in `GasIndex` to avoid mixing this domain-specific
+/// composite string with unrelated plain strings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GasKey(String);
+
+impl GasKey {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn from_parts(path: &str, contract_name: &str) -> Self {
+        Self(format!("{path}:{contract_name}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    /// Split into `(path, contract_name)` using the last `:` separator.
+    pub fn split(&self) -> Option<(&str, &str)> {
+        self.0.rsplit_once(':')
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        self.split().map(|(path, _)| path)
+    }
+
+    pub fn contract_name(&self) -> Option<&str> {
+        self.split().map(|(_, name)| name)
+    }
+}
+
+impl std::fmt::Display for GasKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for GasKey {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for GasKey {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for GasKey {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for GasKey {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::borrow::Borrow<str> for GasKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A solc source-file ID in string form (e.g. `"0"`, `"34"`, `"127"`).
 ///
 /// The compiler assigns each input file a numeric ID that appears as the

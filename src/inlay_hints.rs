@@ -1091,17 +1091,14 @@ fn find_gas_key<'a>(
     gas_index: &'a gas::GasIndex,
     abs_path: &str,
     contract_name: &str,
-) -> Option<&'a str> {
-    let exact = format!("{abs_path}:{contract_name}");
+) -> Option<&'a crate::types::GasKey> {
+    let exact = crate::types::GasKey::from_parts(abs_path, contract_name);
     if gas_index.contains_key(&exact) {
-        return Some(gas_index.get_key_value(&exact)?.0.as_str());
+        return Some(gas_index.get_key_value(&exact)?.0);
     }
     let file_name = std::path::Path::new(abs_path).file_name()?.to_str()?;
     let suffix = format!("{file_name}:{contract_name}");
-    gas_index
-        .keys()
-        .find(|k| k.ends_with(&suffix))
-        .map(|k| k.as_str())
+    gas_index.keys().find(|k| k.as_str().ends_with(&suffix))
 }
 
 /// Check if a tree-sitter node has a preceding comment containing the gas sentinel.

@@ -1554,8 +1554,8 @@ fn merge_scoped_cached_build(
         .hint_index
         .retain(|abs_path, _| !affected_abs_paths.contains(abs_path));
     existing.gas_index.retain(|k, _| {
-        k.split_once(':')
-            .map(|(path, _)| !affected_paths.contains(path))
+        k.path()
+            .map(|path| !affected_paths.contains(path))
             .unwrap_or(true)
     });
     existing.doc_index.retain(|k, _| {
