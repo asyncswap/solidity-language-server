@@ -418,11 +418,11 @@ fn test_dot_completion_on_struct() {
     // PoolKey is a struct with members: currency0, currency1, fee, tickSpacing, hooks
     // We need a variable that has type PoolKey — check name_to_type for one
     // "key" is commonly used as a PoolKey parameter name
-    let pool_key_vars: Vec<&String> = cache
+    let pool_key_vars: Vec<&str> = cache
         .name_to_type
         .iter()
         .filter(|(_, tid)| tid.contains("PoolKey"))
-        .map(|(name, _)| name)
+        .map(|(name, _)| name.as_str())
         .collect();
 
     // There should be at least one variable with PoolKey type

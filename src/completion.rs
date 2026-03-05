@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::{
 
 use crate::goto::CHILD_KEYS;
 use crate::hover::build_function_signature;
-use crate::types::{FileId, NodeId, SourceLoc};
+use crate::types::{FileId, NodeId, RelPath, SourceLoc, SymbolName, TypeIdentifier};
 use crate::utils::push_if_node_or_array;
 
 /// A directly-declared top-level symbol that can be imported.
@@ -53,16 +53,16 @@ pub struct CompletionCache {
     pub names: Vec<CompletionItem>,
 
     /// name → typeIdentifier (for dot-completion: look up what type a variable is).
-    pub name_to_type: HashMap<String, String>,
+    pub name_to_type: HashMap<SymbolName, TypeIdentifier>,
 
     /// node id → Vec<CompletionItem> (members of structs, contracts, enums, libraries).
     pub node_members: HashMap<NodeId, Vec<CompletionItem>>,
 
     /// typeIdentifier → node id (resolve a type string to its definition).
-    pub type_to_node: HashMap<String, NodeId>,
+    pub type_to_node: HashMap<TypeIdentifier, NodeId>,
 
     /// contract/library/interface name → node id (for direct name dot-completion like `FullMath.`).
-    pub name_to_node_id: HashMap<String, NodeId>,
+    pub name_to_node_id: HashMap<SymbolName, NodeId>,
 
     /// node id → Vec<CompletionItem> from methodIdentifiers in .contracts section.
     /// Full function signatures with 4-byte selectors for contracts/interfaces.
@@ -74,7 +74,7 @@ pub struct CompletionCache {
 
     /// typeIdentifier → Vec<CompletionItem> from UsingForDirective.
     /// Library functions available on a type via `using X for Y`.
-    pub using_for: HashMap<String, Vec<CompletionItem>>,
+    pub using_for: HashMap<TypeIdentifier, Vec<CompletionItem>>,
 
     /// Wildcard using-for: `using X for *` — available on all types.
     pub using_for_wildcard: Vec<CompletionItem>,
@@ -98,7 +98,7 @@ pub struct CompletionCache {
 
     /// absolute file path → AST source file id.
     /// Used to map a URI to the file_id needed for scope resolution.
-    pub path_to_file_id: HashMap<String, FileId>,
+    pub path_to_file_id: HashMap<RelPath, FileId>,
 
     /// contract node_id → linearized base contracts (C3 linearization order).
     /// First element is the contract itself, followed by parents in resolution order.
@@ -115,13 +115,13 @@ pub struct CompletionCache {
     /// This intentionally excludes imported aliases/re-exports and excludes
     /// non-constant variables. It is used for import-on-completion candidate
     /// lookup without re-scanning the full AST per request.
-    pub top_level_importables_by_name: HashMap<String, Vec<TopLevelImportable>>,
+    pub top_level_importables_by_name: HashMap<SymbolName, Vec<TopLevelImportable>>,
 
     /// Directly-declared importable top-level symbols keyed by declaring file path.
     ///
     /// This enables cheap incremental invalidation/update on file edits/deletes:
     /// only the changed file's symbols need to be replaced.
-    pub top_level_importables_by_file: HashMap<String, Vec<TopLevelImportable>>,
+    pub top_level_importables_by_file: HashMap<RelPath, Vec<TopLevelImportable>>,
 }
 
 /// Map AST nodeType to LSP CompletionItemKind.
@@ -291,13 +291,13 @@ fn is_top_level_importable_decl(node_type: &str, node: &Value) -> bool {
 }
 
 fn build_top_level_importables_by_name(
-    by_file: &HashMap<String, Vec<TopLevelImportable>>,
-) -> HashMap<String, Vec<TopLevelImportable>> {
-    let mut by_name: HashMap<String, Vec<TopLevelImportable>> = HashMap::new();
+    by_file: &HashMap<RelPath, Vec<TopLevelImportable>>,
+) -> HashMap<SymbolName, Vec<TopLevelImportable>> {
+    let mut by_name: HashMap<SymbolName, Vec<TopLevelImportable>> = HashMap::new();
     for symbols in by_file.values() {
         for symbol in symbols {
             by_name
-                .entry(symbol.name.clone())
+                .entry(SymbolName::new(symbol.name.clone()))
                 .or_default()
                 .push(symbol.clone());
         }
@@ -351,7 +351,8 @@ impl CompletionCache {
         path: String,
         symbols: Vec<TopLevelImportable>,
     ) {
-        self.top_level_importables_by_file.insert(path, symbols);
+        self.top_level_importables_by_file
+            .insert(RelPath::new(path), symbols);
         self.top_level_importables_by_name =
             build_top_level_importables_by_name(&self.top_level_importables_by_file);
     }
@@ -368,13 +369,13 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
 
     let mut names: Vec<CompletionItem> = Vec::with_capacity(est_names);
     let mut seen_names: HashMap<String, usize> = HashMap::with_capacity(est_names);
-    let mut name_to_type: HashMap<String, String> = HashMap::with_capacity(est_names);
+    let mut name_to_type: HashMap<SymbolName, TypeIdentifier> = HashMap::with_capacity(est_names);
     let mut node_members: HashMap<NodeId, Vec<CompletionItem>> =
         HashMap::with_capacity(est_contracts);
-    let mut type_to_node: HashMap<String, NodeId> = HashMap::with_capacity(est_contracts);
+    let mut type_to_node: HashMap<TypeIdentifier, NodeId> = HashMap::with_capacity(est_contracts);
     let mut method_identifiers: HashMap<NodeId, Vec<CompletionItem>> =
         HashMap::with_capacity(est_contracts);
-    let mut name_to_node_id: HashMap<String, NodeId> = HashMap::with_capacity(est_names);
+    let mut name_to_node_id: HashMap<SymbolName, NodeId> = HashMap::with_capacity(est_names);
     let mut contract_kinds: HashMap<NodeId, String> = HashMap::with_capacity(est_contracts);
 
     // Collect (path, contract_name, node_id) during AST walk for methodIdentifiers lookup after.
@@ -389,7 +390,8 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
         HashMap::with_capacity(source_count * 10);
 
     // typeIdentifier → Vec<CompletionItem> from UsingForDirective
-    let mut using_for: HashMap<String, Vec<CompletionItem>> = HashMap::with_capacity(source_count);
+    let mut using_for: HashMap<TypeIdentifier, Vec<CompletionItem>> =
+        HashMap::with_capacity(source_count);
     let mut using_for_wildcard: Vec<CompletionItem> = Vec::new();
 
     // Temp: (library_node_id, target_type_id_or_none) for resolving after walk
@@ -400,10 +402,10 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
         HashMap::with_capacity(est_contracts);
     let mut scope_parent: HashMap<NodeId, NodeId> = HashMap::with_capacity(est_contracts);
     let mut scope_ranges: Vec<ScopeRange> = Vec::with_capacity(est_contracts);
-    let mut path_to_file_id: HashMap<String, FileId> = HashMap::with_capacity(source_count);
+    let mut path_to_file_id: HashMap<RelPath, FileId> = HashMap::with_capacity(source_count);
     let mut linearized_base_contracts: HashMap<NodeId, Vec<NodeId>> =
         HashMap::with_capacity(est_contracts);
-    let mut top_level_importables_by_file: HashMap<String, Vec<TopLevelImportable>> =
+    let mut top_level_importables_by_file: HashMap<RelPath, Vec<TopLevelImportable>> =
         HashMap::with_capacity(est_names);
 
     if let Some(sources_obj) = sources.as_object() {
@@ -411,11 +413,11 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
             if let Some(ast) = source_data.get("ast") {
                 // Map file path → source file id for scope resolution
                 if let Some(fid) = source_data.get("id").and_then(|v| v.as_u64()) {
-                    path_to_file_id.insert(path.clone(), FileId(fid));
+                    path_to_file_id.insert(RelPath::new(path), FileId(fid));
                 }
                 let file_importables = extract_top_level_importables_for_file(path, ast);
                 if !file_importables.is_empty() {
-                    top_level_importables_by_file.insert(path.clone(), file_importables);
+                    top_level_importables_by_file.insert(RelPath::new(path), file_importables);
                 }
                 let mut stack: Vec<&Value> = vec![ast];
 
@@ -533,7 +535,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
 
                         // Store name → typeIdentifier mapping
                         if let Some(tid) = type_id {
-                            name_to_type.insert(name.to_string(), tid.to_string());
+                            name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
                         }
                     }
 
@@ -573,7 +575,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                             .and_then(|td| td.get("typeIdentifier"))
                             .and_then(|v| v.as_str())
                         {
-                            type_to_node.insert(tid.to_string(), id);
+                            type_to_node.insert(TypeIdentifier::new(tid), id);
                         }
                     }
 
@@ -666,13 +668,13 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                             .and_then(|td| td.get("typeIdentifier"))
                             .and_then(|v| v.as_str())
                         {
-                            type_to_node.insert(tid.to_string(), id);
+                            type_to_node.insert(TypeIdentifier::new(tid), id);
                         }
 
                         // Record for methodIdentifiers lookup after traversal
                         if !name.is_empty() {
                             contract_locations.push((path.clone(), name.to_string(), id));
-                            name_to_node_id.insert(name.to_string(), id);
+                            name_to_node_id.insert(SymbolName::new(name), id);
                         }
 
                         // Record contractKind (contract, interface, library) for type(X). completions
@@ -710,7 +712,7 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                             .and_then(|td| td.get("typeIdentifier"))
                             .and_then(|v| v.as_str())
                         {
-                            type_to_node.insert(tid.to_string(), id);
+                            type_to_node.insert(TypeIdentifier::new(tid), id);
                         }
                     }
 
@@ -748,7 +750,9 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                                         def.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                     if !fn_name.is_empty() {
                                         let items = if let Some(ref tid) = target_type {
-                                            using_for.entry(tid.clone()).or_default()
+                                            using_for
+                                                .entry(TypeIdentifier::new(tid.clone()))
+                                                .or_default()
                                         } else {
                                             &mut using_for_wildcard
                                         };
@@ -784,7 +788,10 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                 .collect();
             if !items.is_empty() {
                 if let Some(tid) = target_type {
-                    using_for.entry(tid.clone()).or_default().extend(items);
+                    using_for
+                        .entry(TypeIdentifier::new(tid.clone()))
+                        .or_default()
+                        .extend(items);
                 } else {
                     using_for_wildcard.extend(items);
                 }
@@ -1344,14 +1351,14 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
 fn resolve_name_to_type_id(cache: &CompletionCache, name: &str) -> Option<String> {
     // Direct type lookup
     if let Some(tid) = cache.name_to_type.get(name) {
-        return Some(tid.clone());
+        return Some(tid.to_string());
     }
     // Contract/library/interface name → synthesize a type id from node id
     if let Some(node_id) = cache.name_to_node_id.get(name) {
         // Find a matching typeIdentifier in type_to_node (reverse lookup)
         for (tid, nid) in &cache.type_to_node {
             if nid == node_id {
-                return Some(tid.clone());
+                return Some(tid.to_string());
             }
         }
         // Fallback: use a synthetic marker so completions_for_type can resolve via node_id
@@ -1468,9 +1475,9 @@ fn resolve_member_type(
                         // Get the typeIdentifier from name_to_type
                         if let Some(tid) = cache.name_to_type.get(member_name) {
                             if tid.starts_with("t_mapping") {
-                                return extract_mapping_value_type(tid);
+                                return extract_mapping_value_type(tid.as_str());
                             }
-                            return Some(tid.clone());
+                            return Some(tid.to_string());
                         }
                     }
                 }
@@ -1479,13 +1486,16 @@ fn resolve_member_type(
             if let Some(tid) = cache.name_to_type.get(member_name)
                 && tid.starts_with("t_mapping")
             {
-                return extract_mapping_value_type(tid);
+                return extract_mapping_value_type(tid.as_str());
             }
             None
         }
         AccessKind::Plain => {
             // Look up member's own type from name_to_type
-            cache.name_to_type.get(member_name).cloned()
+            cache
+                .name_to_type
+                .get(member_name)
+                .map(|tid| tid.to_string())
         }
     }
 }
@@ -2202,6 +2212,7 @@ mod tests {
         CompletionCache, TopLevelImportable, append_auto_import_candidates_last,
         build_completion_cache, extract_top_level_importables_for_file,
     };
+    use crate::types::SymbolName;
     use serde_json::json;
     use std::collections::HashMap;
     use tower_lsp::lsp_types::CompletionItemKind;
@@ -2454,7 +2465,7 @@ mod tests {
     fn top_level_importable_candidates_include_import_edit() {
         let mut cache = empty_cache();
         cache.top_level_importables_by_name.insert(
-            "B".to_string(),
+            SymbolName::new("B"),
             vec![TopLevelImportable {
                 name: "B".to_string(),
                 declaring_path: "/tmp/example/B.sol".to_string(),

@@ -1555,7 +1555,8 @@ fn resolve_via_cache(
                         .map(|(name, _)| name.clone());
 
                     if let Some(base_name) = base_name
-                        && let Some(path) = find_file_for_contract(cache, &base_name, file_uri)
+                        && let Some(path) =
+                            find_file_for_contract(cache, base_name.as_str(), file_uri)
                     {
                         return Some(ResolvedTarget::OtherFile {
                             path,
@@ -1570,7 +1571,7 @@ fn resolve_via_cache(
     }
 
     // Check if the name is a contract/library/interface name
-    if cache.name_to_node_id.contains_key(&ctx.name) {
+    if cache.name_to_node_id.contains_key(ctx.name.as_str()) {
         // Could be same file or different file — check if it's in the current file
         if let Some(path) = find_file_for_contract(cache, &ctx.name, file_uri) {
             let current_path = file_uri.to_file_path().ok()?;
@@ -1587,7 +1588,7 @@ fn resolve_via_cache(
     }
 
     // Flat fallback — name_to_type knows about it but we can't determine the file
-    if cache.name_to_type.contains_key(&ctx.name) {
+    if cache.name_to_type.contains_key(ctx.name.as_str()) {
         return Some(ResolvedTarget::SameFile);
     }
 
@@ -1644,7 +1645,7 @@ fn find_file_for_contract(
         .path_to_file_id
         .iter()
         .find(|&(_, &fid)| fid == file_id)
-        .map(|(path, _)| path.clone())
+        .map(|(path, _)| path.to_string())
 }
 
 /// Read source for a target file — prefer text_cache (open buffers), fallback to disk.

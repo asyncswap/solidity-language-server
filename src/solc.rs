@@ -1238,6 +1238,7 @@ fn extract_version_error_files(solc_output: &Value) -> HashSet<String> {
 /// Extract source file paths from solc error code 6275 ("Source not found")
 /// errors.  Returns the relative paths of source files whose imports failed.
 #[cfg(test)]
+#[allow(dead_code)]
 fn extract_import_error_files(solc_output: &Value) -> HashSet<String> {
     let mut files = HashSet::new();
     if let Some(errors) = solc_output.get("errors").and_then(|e| e.as_array()) {
