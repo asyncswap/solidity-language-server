@@ -164,23 +164,26 @@ pub fn gas_for_contract<'a>(
 pub fn resolve_contract_key_typed(
     decl: &crate::solc_ast::DeclNode,
     index: &GasIndex,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &HashMap<i64, String>,
+    decl_index: &HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &HashMap<crate::types::NodeId, crate::types::AbsPath>,
 ) -> Option<String> {
     use crate::solc_ast::DeclNode;
 
     // Get the contract name and source unit scope
     let (contract_name, source_unit_scope) = match decl {
-        DeclNode::ContractDefinition(c) => (c.name.as_str(), c.scope?),
+        DeclNode::ContractDefinition(c) => (c.name.as_str(), crate::types::NodeId(c.scope?)),
         _ => {
             // Walk up to containing contract via scope
-            let scope_id = decl.scope()?;
+            let scope_id = crate::types::NodeId(decl.scope()?);
             let scope_decl = decl_index.get(&scope_id)?;
             let contract = match scope_decl {
                 DeclNode::ContractDefinition(c) => c,
                 _ => return None,
             };
-            (contract.name.as_str(), contract.scope?)
+            (
+                contract.name.as_str(),
+                crate::types::NodeId(contract.scope?),
+            )
         }
     };
 

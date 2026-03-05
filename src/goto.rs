@@ -99,11 +99,11 @@ pub struct CachedBuild {
     /// O(1) typed declaration node lookup by AST node ID.
     /// Built from the typed AST via visitor. Contains functions, variables,
     /// contracts, events, errors, structs, enums, modifiers, and UDVTs.
-    pub decl_index: HashMap<i64, crate::solc_ast::DeclNode>,
+    pub decl_index: HashMap<NodeId, crate::solc_ast::DeclNode>,
     /// O(1) lookup from any declaration/source-unit node ID to its source file path.
     /// Built from `typed_ast` during construction. Replaces the O(N)
     /// `find_source_path_for_node()` that walked raw JSON.
-    pub node_id_to_source_path: HashMap<i64, String>,
+    pub node_id_to_source_path: HashMap<NodeId, AbsPath>,
     /// Pre-built gas index from contract output. Built once, reused by
     /// hover, inlay hints, and code lens.
     pub gas_index: crate::gas::GasIndex,
@@ -166,7 +166,18 @@ impl CachedBuild {
         // are stripped before deserialization.
         let (decl_index, node_id_to_source_path) = if let Some(sources) = ast.get("sources") {
             match crate::solc_ast::extract_decl_nodes(sources) {
-                Some(extracted) => (extracted.decl_index, extracted.node_id_to_source_path),
+                Some(extracted) => (
+                    extracted
+                        .decl_index
+                        .into_iter()
+                        .map(|(id, decl)| (NodeId(id), decl))
+                        .collect(),
+                    extracted
+                        .node_id_to_source_path
+                        .into_iter()
+                        .map(|(id, path)| (NodeId(id), AbsPath::new(path)))
+                        .collect(),
+                ),
                 None => (HashMap::new(), HashMap::new()),
             }
         } else {

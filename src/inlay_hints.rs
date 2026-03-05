@@ -1,6 +1,6 @@
 use crate::gas;
 use crate::goto::CachedBuild;
-use crate::types::SourceLoc;
+use crate::types::{AbsPath, NodeId, SourceLoc};
 use serde_json::Value;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
@@ -36,7 +36,7 @@ struct CallSite {
     /// Function/event name (for matching with tree-sitter).
     name: String,
     /// The AST node id of the called function/event declaration (for DocIndex lookup).
-    decl_id: i64,
+    decl_id: NodeId,
 }
 
 /// Resolved callsite info returned to hover for param doc lookup.
@@ -45,7 +45,7 @@ pub struct ResolvedCallSite {
     /// The parameter name at the given argument index.
     pub param_name: String,
     /// The AST node id of the called function/event declaration.
-    pub decl_id: i64,
+    pub decl_id: NodeId,
 }
 
 /// Both lookup strategies: exact byte-offset match and (name, arg_count) fallback.
@@ -72,7 +72,7 @@ impl HintLookup {
         call_offset: usize,
         func_name: &str,
         arg_count: usize,
-    ) -> Option<(i64, usize)> {
+    ) -> Option<(NodeId, usize)> {
         // Try exact match first
         if let Some(site) = lookup_call_site(self, call_offset, func_name, arg_count) {
             return Some((site.decl_id, site.info.skip));
@@ -114,32 +114,33 @@ impl HintLookup {
 
 /// Pre-computed hint lookups for all files, keyed by absolutePath.
 /// Built once in `CachedBuild::new()`, reused on every inlay hint request.
-pub type HintIndex = HashMap<String, HintLookup>;
+pub type HintIndex = HashMap<AbsPath, HintLookup>;
 
 /// Build the hint index for all files from the AST sources.
 /// Pre-computed constructor info for `new ContractName(args)` resolution.
 /// Maps contract declaration ID → (constructor declaration ID, contract name, param names).
 #[derive(Debug, Clone)]
 pub struct ConstructorInfo {
-    pub constructor_id: i64,
+    pub constructor_id: NodeId,
     pub contract_name: String,
     pub param_names: Vec<String>,
 }
 
 /// Index of contract ID → constructor info, built from the typed `decl_index`.
-pub type ConstructorIndex = HashMap<i64, ConstructorInfo>;
+pub type ConstructorIndex = HashMap<NodeId, ConstructorInfo>;
 
 /// Build the constructor index from the `decl_index`.
 ///
 /// For every constructor in the decl_index, record contract ID → constructor info.
 pub fn build_constructor_index(
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &HashMap<NodeId, crate::solc_ast::DeclNode>,
 ) -> ConstructorIndex {
     let mut index = HashMap::with_capacity(decl_index.len() / 8);
     for (id, decl) in decl_index {
         if decl.is_constructor()
             && let Some(scope) = decl.scope()
         {
+            let scope = NodeId(scope);
             let names = decl.param_names().unwrap_or_default();
             // Look up contract name from the scope's decl entry
             let contract_name = decl_index
@@ -165,7 +166,7 @@ pub fn build_constructor_index(
 /// resolution, replacing the previous `id_index: HashMap<u64, Value>`.
 pub fn build_hint_index(
     sources: &Value,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &HashMap<NodeId, crate::solc_ast::DeclNode>,
     constructor_index: &ConstructorIndex,
 ) -> HintIndex {
     let source_count = sources.as_object().map_or(0, |obj| obj.len());
@@ -177,7 +178,7 @@ pub fn build_hint_index(
                 && let Some(abs_path) = ast.get("absolutePath").and_then(|v| v.as_str())
             {
                 let lookup = build_hint_lookup(ast, decl_index, constructor_index);
-                hint_index.insert(abs_path.to_string(), lookup);
+                hint_index.insert(AbsPath::new(abs_path), lookup);
             }
         }
     }
@@ -211,7 +212,7 @@ pub fn inlay_hints(
     };
 
     // Use the pre-cached hint lookup for this file
-    let lookup = match build.hint_index.get(abs.as_str()) {
+    let lookup = match build.hint_index.get(&abs) {
         Some(l) => l,
         None => return vec![],
     };
@@ -253,7 +254,7 @@ pub fn ts_parse(source: &str) -> Option<tree_sitter::Tree> {
 /// Build both lookup strategies from the AST.
 fn build_hint_lookup(
     file_ast: &Value,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &HashMap<NodeId, crate::solc_ast::DeclNode>,
     constructor_index: &ConstructorIndex,
 ) -> HintLookup {
     let mut lookup = HintLookup {
@@ -273,7 +274,7 @@ fn parse_src_offset(node: &Value) -> Option<usize> {
 /// Recursively walk AST nodes collecting call site info.
 fn collect_ast_calls(
     node: &Value,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &HashMap<NodeId, crate::solc_ast::DeclNode>,
     constructor_index: &ConstructorIndex,
     lookup: &mut HintLookup,
 ) {
@@ -359,13 +360,13 @@ struct CallInfo {
     /// Parameter names and skip count.
     params: ParamInfo,
     /// The AST node id of the referenced declaration (for DocIndex lookup).
-    decl_id: i64,
+    decl_id: NodeId,
 }
 
 /// Extract function/event name and parameter info from an AST FunctionCall node.
 fn extract_call_info(
     node: &Value,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &HashMap<NodeId, crate::solc_ast::DeclNode>,
     constructor_index: &ConstructorIndex,
 ) -> Option<CallInfo> {
     let args = node.get("arguments")?.as_array()?;
@@ -394,7 +395,7 @@ fn extract_call_info(
         return extract_new_expression_call_info(expr, args.len(), constructor_index);
     }
 
-    let decl_id = expr.get("referencedDeclaration").and_then(|v| v.as_i64())?;
+    let decl_id = NodeId(expr.get("referencedDeclaration").and_then(|v| v.as_i64())?);
 
     let decl = decl_index.get(&decl_id)?;
     let names = decl.param_names()?;
@@ -436,9 +437,11 @@ fn extract_new_expression_call_info(
     constructor_index: &ConstructorIndex,
 ) -> Option<CallInfo> {
     let type_name = new_expr.get("typeName")?;
-    let contract_id = type_name
-        .get("referencedDeclaration")
-        .and_then(|v| v.as_i64())?;
+    let contract_id = NodeId(
+        type_name
+            .get("referencedDeclaration")
+            .and_then(|v| v.as_i64())?,
+    );
 
     let info = constructor_index.get(&contract_id)?;
 
@@ -1523,9 +1526,9 @@ contract Factory {
 
         let mut constructor_index = ConstructorIndex::new();
         constructor_index.insert(
-            22,
+            NodeId(22),
             ConstructorInfo {
-                constructor_id: 21,
+                constructor_id: NodeId(21),
                 contract_name: "Token".to_string(),
                 param_names: vec!["_name".to_string(), "_supply".to_string()],
             },
@@ -1535,7 +1538,7 @@ contract Factory {
         assert_eq!(info.name, "Token");
         assert_eq!(info.params.names, vec!["_name", "_supply"]);
         assert_eq!(info.params.skip, 0);
-        assert_eq!(info.decl_id, 21);
+        assert_eq!(info.decl_id, NodeId(21));
     }
 
     #[test]
@@ -1766,19 +1769,19 @@ contract Foo {
                     skip: 0,
                 },
                 name: "transfer".to_string(),
-                decl_id: 42,
+                decl_id: NodeId(42),
             },
         );
 
         // Resolve first argument
         let result = lookup.resolve_callsite_param(0, "transfer", 2, 0).unwrap();
         assert_eq!(result.param_name, "to");
-        assert_eq!(result.decl_id, 42);
+        assert_eq!(result.decl_id, NodeId(42));
 
         // Resolve second argument
         let result = lookup.resolve_callsite_param(0, "transfer", 2, 1).unwrap();
         assert_eq!(result.param_name, "amount");
-        assert_eq!(result.decl_id, 42);
+        assert_eq!(result.decl_id, NodeId(42));
     }
 
     #[test]
@@ -1796,7 +1799,7 @@ contract Foo {
                     skip: 1,
                 },
                 name: "addTax".to_string(),
-                decl_id: 99,
+                decl_id: NodeId(99),
             },
         );
 
@@ -1823,7 +1826,7 @@ contract Foo {
                     skip: 0,
                 },
                 name: "foo".to_string(),
-                decl_id: 1,
+                decl_id: NodeId(1),
             },
         );
 

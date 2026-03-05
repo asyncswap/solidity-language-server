@@ -1456,8 +1456,8 @@ fn merge_scoped_cached_build(
     if affected_paths.is_empty() {
         return Ok(0);
     }
-    let affected_abs_paths: HashSet<String> =
-        scoped.path_to_abs.values().map(|p| p.to_string()).collect();
+    let affected_abs_paths: HashSet<crate::types::AbsPath> =
+        scoped.path_to_abs.values().cloned().collect();
 
     // Safety guard: reject scoped merge when declaration IDs collide with
     // unaffected files in the existing cache.

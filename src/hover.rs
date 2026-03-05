@@ -388,8 +388,8 @@ fn compute_event_topic(sig: &str) -> String {
 pub fn lookup_doc_entry_typed(
     doc_index: &DocIndex,
     decl: &crate::solc_ast::DeclNode,
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &std::collections::HashMap<i64, String>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &std::collections::HashMap<crate::types::NodeId, crate::types::AbsPath>,
 ) -> Option<DocEntry> {
     use crate::solc_ast::DeclNode;
 
@@ -407,8 +407,8 @@ pub fn lookup_doc_entry_typed(
             if matches!(decl, DeclNode::VariableDeclaration(_))
                 && let var_name = decl.name()
                 && let Some(scope_id) = decl.scope()
-                && let Some(scope_decl) = decl_index.get(&scope_id)
-                && let Some(path) = node_id_to_source_path.get(&scope_id)
+                && let Some(scope_decl) = decl_index.get(&crate::types::NodeId(scope_id))
+                && let Some(path) = node_id_to_source_path.get(&crate::types::NodeId(scope_id))
             {
                 let contract_name = scope_decl.name();
                 let key = DocKey::StateVar(format!("{path}:{contract_name}:{var_name}"));
@@ -420,9 +420,9 @@ pub fn lookup_doc_entry_typed(
             // Fallback: try method by name
             let fn_name = decl.name();
             let scope_id = decl.scope()?;
-            let scope_decl = decl_index.get(&scope_id)?;
+            let scope_decl = decl_index.get(&crate::types::NodeId(scope_id))?;
             let contract_name = scope_decl.name();
-            let path = node_id_to_source_path.get(&scope_id)?;
+            let path = node_id_to_source_path.get(&crate::types::NodeId(scope_id))?;
             let key = DocKey::Method(format!("{path}:{contract_name}:{fn_name}"));
             doc_index.get(&key).cloned()
         }
@@ -439,7 +439,7 @@ pub fn lookup_doc_entry_typed(
         DeclNode::ContractDefinition(_) => {
             let contract_name = decl.name();
             let node_id = decl.id();
-            let path = node_id_to_source_path.get(&node_id)?;
+            let path = node_id_to_source_path.get(&crate::types::NodeId(node_id))?;
             let key = DocKey::Contract(format!("{path}:{contract_name}"));
             doc_index.get(&key).cloned()
         }
@@ -458,8 +458,8 @@ pub fn lookup_doc_entry_typed(
 pub fn lookup_param_doc_typed(
     doc_index: &DocIndex,
     decl: &crate::solc_ast::DeclNode,
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &std::collections::HashMap<i64, String>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &std::collections::HashMap<crate::types::NodeId, crate::types::AbsPath>,
 ) -> Option<String> {
     use crate::solc_ast::DeclNode;
 
@@ -476,7 +476,7 @@ pub fn lookup_param_doc_typed(
 
     // Walk up to the parent via scope
     let scope_id = var.scope?;
-    let parent = decl_index.get(&scope_id)?;
+    let parent = decl_index.get(&crate::types::NodeId(scope_id))?;
 
     // Only handle function/error/event/modifier parents
     if !matches!(
@@ -671,7 +671,7 @@ pub fn extract_selector(node: &Value) -> Option<Selector> {
 pub fn resolve_inheritdoc_typed(
     decl: &crate::solc_ast::DeclNode,
     doc_text: &str,
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
 ) -> Option<String> {
     use crate::solc_ast::DeclNode;
 
@@ -691,7 +691,7 @@ pub fn resolve_inheritdoc_typed(
     let scope_id = decl.scope()?;
 
     // Find the scope contract in decl_index
-    let scope_decl = decl_index.get(&scope_id)?;
+    let scope_decl = decl_index.get(&crate::types::NodeId(scope_id))?;
     let scope_contract = match scope_decl {
         DeclNode::ContractDefinition(c) => c,
         _ => return None,
@@ -707,7 +707,7 @@ pub fn resolve_inheritdoc_typed(
     })?;
 
     // Find the parent contract in decl_index
-    let parent_decl = decl_index.get(&parent_id)?;
+    let parent_decl = decl_index.get(&crate::types::NodeId(parent_id))?;
     let parent_contract = match parent_decl {
         DeclNode::ContractDefinition(c) => c,
         _ => return None,
@@ -1012,7 +1012,7 @@ pub(crate) fn build_function_signature(node: &Value) -> Option<String> {
 /// Returns the `VariableDeclaration` whose `name` matches and whose
 /// `type_name` is `TypeName::Mapping`.
 fn find_mapping_decl_typed<'a>(
-    decl_index: &'a std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &'a std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
     name: &str,
 ) -> Option<&'a crate::solc_ast::VariableDeclaration> {
     use crate::solc_ast::DeclNode;
@@ -1036,7 +1036,7 @@ fn find_mapping_decl_typed<'a>(
 /// Builds signature help for `name[key]` from a typed `VariableDeclaration`
 /// with a `Mapping` type name, avoiding the O(N) CHILD_KEYS DFS walk.
 fn mapping_signature_help_typed(
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
     name: &str,
 ) -> Option<SignatureHelp> {
     use crate::solc_ast::TypeName;
@@ -1259,8 +1259,8 @@ fn source_has_gas_sentinel(source: &str, src_field: &str) -> bool {
 fn gas_hover_for_function_typed(
     decl: &crate::solc_ast::DeclNode,
     gas_index: &GasIndex,
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &std::collections::HashMap<i64, String>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &std::collections::HashMap<crate::types::NodeId, crate::types::AbsPath>,
 ) -> Option<String> {
     use crate::solc_ast::DeclNode;
 
@@ -1295,8 +1295,8 @@ fn gas_hover_for_function_typed(
 fn gas_hover_for_contract_typed(
     decl: &crate::solc_ast::DeclNode,
     gas_index: &GasIndex,
-    decl_index: &std::collections::HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &std::collections::HashMap<i64, String>,
+    decl_index: &std::collections::HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &std::collections::HashMap<crate::types::NodeId, crate::types::AbsPath>,
 ) -> Option<String> {
     use crate::solc_ast::DeclNode;
 
@@ -1382,7 +1382,7 @@ pub fn hover_info(
     let decl_id = node_info.referenced_declaration.unwrap_or(node_id);
 
     // Typed DeclNode — O(1) from decl_index
-    let typed_decl = cached_build.decl_index.get(&decl_id.0);
+    let typed_decl = cached_build.decl_index.get(&decl_id);
 
     // Build hover content
     let mut parts: Vec<String> = Vec::new();
@@ -1450,7 +1450,7 @@ pub fn hover_info(
     // in a function call, show the @param doc from the called function's definition.
     // Uses tree-sitter on the live buffer to find the enclosing call and argument
     // index, then resolves via HintIndex for the param name and declaration id.
-    if let Some(hint_lookup) = hint_index.get(abs_path.as_str()) {
+    if let Some(hint_lookup) = hint_index.get(&abs_path) {
         let source_str = String::from_utf8_lossy(source_bytes);
         if let Some(tree) = crate::inlay_hints::ts_parse(&source_str)
             && let Some(ctx) =
@@ -1783,7 +1783,7 @@ mod tests {
         let ast = load_test_ast();
         let build = crate::goto::CachedBuild::new(ast, 0);
         // PoolManager.swap (id=616) has "@inheritdoc IPoolManager"
-        let decl = build.decl_index.get(&616).unwrap();
+        let decl = build.decl_index.get(&NodeId(616)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
         assert!(doc_text.contains("@inheritdoc"));
 
@@ -1797,7 +1797,7 @@ mod tests {
         let ast = load_test_ast();
         let build = crate::goto::CachedBuild::new(ast, 0);
         // PoolManager.initialize (id=330) has "@inheritdoc IPoolManager"
-        let decl = build.decl_index.get(&330).unwrap();
+        let decl = build.decl_index.get(&NodeId(330)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
 
         let resolved = resolve_inheritdoc_typed(decl, &doc_text, &build.decl_index).unwrap();
@@ -1811,20 +1811,20 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // extsload(bytes32) — id=1306, selector "1e2eaeaf"
-        let decl = build.decl_index.get(&1306).unwrap();
+        let decl = build.decl_index.get(&NodeId(1306)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
         let resolved = resolve_inheritdoc_typed(decl, &doc_text, &build.decl_index).unwrap();
         assert!(resolved.contains("granular pool state"));
         assert!(resolved.contains("@param slot"));
 
         // extsload(bytes32, uint256) — id=1319, selector "35fd631a"
-        let decl2 = build.decl_index.get(&1319).unwrap();
+        let decl2 = build.decl_index.get(&NodeId(1319)).unwrap();
         let doc_text2 = decl2.extract_doc_text().unwrap();
         let resolved2 = resolve_inheritdoc_typed(decl2, &doc_text2, &build.decl_index).unwrap();
         assert!(resolved2.contains("@param startSlot"));
 
         // extsload(bytes32[]) — id=1331, selector "dbd035ff"
-        let decl3 = build.decl_index.get(&1331).unwrap();
+        let decl3 = build.decl_index.get(&NodeId(1331)).unwrap();
         let doc_text3 = decl3.extract_doc_text().unwrap();
         let resolved3 = resolve_inheritdoc_typed(decl3, &doc_text3, &build.decl_index).unwrap();
         assert!(resolved3.contains("sparse pool state"));
@@ -1835,7 +1835,7 @@ mod tests {
         let ast = load_test_ast();
         let build = crate::goto::CachedBuild::new(ast, 0);
         // PoolManager.swap with @inheritdoc — verify format_natspec resolves it
-        let decl = build.decl_index.get(&616).unwrap();
+        let decl = build.decl_index.get(&NodeId(616)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
         let inherited = resolve_inheritdoc_typed(decl, &doc_text, &build.decl_index);
         let formatted = format_natspec(&doc_text, inherited.as_deref());
@@ -1852,7 +1852,7 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // PriceLimitAlreadyExceeded.sqrtPriceCurrentX96 (id=3821)
-        let decl = build.decl_index.get(&3821).unwrap();
+        let decl = build.decl_index.get(&NodeId(3821)).unwrap();
         assert_eq!(decl.name(), "sqrtPriceCurrentX96");
 
         let doc = lookup_param_doc_typed(
@@ -1874,7 +1874,7 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // PriceLimitAlreadyExceeded.sqrtPriceLimitX96 (id=3823)
-        let decl = build.decl_index.get(&3823).unwrap();
+        let decl = build.decl_index.get(&NodeId(3823)).unwrap();
         let doc = lookup_param_doc_typed(
             &build.doc_index,
             decl,
@@ -1894,7 +1894,7 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // Pool.modifyLiquidity return param "delta" (id=4055)
-        let decl = build.decl_index.get(&4055).unwrap();
+        let decl = build.decl_index.get(&NodeId(4055)).unwrap();
         assert_eq!(decl.name(), "delta");
 
         let doc = lookup_param_doc_typed(
@@ -1942,7 +1942,7 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // PoolManager.swap `key` param (id=478) — parent has @inheritdoc IPoolManager
-        let decl = build.decl_index.get(&478).unwrap();
+        let decl = build.decl_index.get(&NodeId(478)).unwrap();
         assert_eq!(decl.name(), "key");
 
         let doc = lookup_param_doc_typed(
@@ -1964,7 +1964,7 @@ mod tests {
         let build = crate::goto::CachedBuild::new(ast, 0);
 
         // PoolManager contract (id=1216) is not a parameter
-        let decl = build.decl_index.get(&1216).unwrap();
+        let decl = build.decl_index.get(&NodeId(1216)).unwrap();
         assert!(
             lookup_param_doc_typed(
                 &build.doc_index,
