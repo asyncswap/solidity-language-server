@@ -1235,6 +1235,27 @@ fn extract_version_error_files(solc_output: &Value) -> HashSet<String> {
     files
 }
 
+/// Extract source file paths from solc error code 6275 ("Source not found")
+/// errors.  Returns the relative paths of source files whose imports failed.
+#[cfg(test)]
+fn extract_import_error_files(solc_output: &Value) -> HashSet<String> {
+    let mut files = HashSet::new();
+    if let Some(errors) = solc_output.get("errors").and_then(|e| e.as_array()) {
+        for err in errors {
+            let is_6275 = err.get("errorCode").and_then(|c| c.as_str()) == Some("6275");
+            if is_6275
+                && let Some(file) = err
+                    .get("sourceLocation")
+                    .and_then(|sl| sl.get("file"))
+                    .and_then(|f| f.as_str())
+            {
+                files.insert(file.to_string());
+            }
+        }
+    }
+    files
+}
+
 /// Build a reverse-import closure: given a set of files to exclude, find all
 /// files that transitively import any of them.  Those files must also be
 /// excluded because solc will still resolve their imports from disk and fail.

@@ -89,6 +89,164 @@ pub struct ForgeLsp {
         Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>>,
     /// JSON-driven code-action database loaded once at startup.
     code_action_db: Arc<HashMap<u32, crate::code_actions::CodeActionDef>>,
+    /// Cached builds loaded from sub-project (lib) caches.
+    ///
+    /// When `fullProjectScan` is enabled, the server discovers existing LSP
+    /// caches in lib sub-projects (e.g. `lib/v4-core/.solidity-language-server/`)
+    /// and loads them.  The references handler searches these alongside the
+    /// main project build to find cross-file references in lib test files
+    /// that aren't part of the root project's compilation closure.
+    ///
+    /// Each sub-cache has its own node ID space — matching across caches
+    /// is done by absolute file path + byte offset, not by node ID.
+    sub_caches: Arc<RwLock<Vec<Arc<goto::CachedBuild>>>>,
+    /// Guards against multiple concurrent sub-cache loading tasks.
+    sub_caches_loading: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Spawn a background task to discover, build (if missing), and load caches
+/// from lib sub-projects.  Non-blocking: returns immediately.
+///
+/// Accepts already-resolved `FoundryConfig` so it can be called from inside
+/// `tokio::spawn` closures that don't have access to `&self`.
+fn spawn_load_lib_sub_caches_task(
+    foundry_config: crate::config::FoundryConfig,
+    sub_caches: Arc<RwLock<Vec<Arc<goto::CachedBuild>>>>,
+    loading_flag: Arc<std::sync::atomic::AtomicBool>,
+    client: Client,
+) {
+    // Atomic guard: only one task runs at a time.
+    if loading_flag
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        let cfg = foundry_config.clone();
+        let discovered = tokio::task::spawn_blocking(move || {
+            crate::project_cache::discover_lib_sub_projects(&cfg)
+        })
+        .await
+        .unwrap_or_else(|_| crate::project_cache::DiscoveredLibs {
+            cached: Vec::new(),
+            uncached: Vec::new(),
+        });
+
+        // Build missing caches first (compile each sub-project).
+        for sub_root in &discovered.uncached {
+            let sub_config =
+                crate::config::load_foundry_config_from_toml(&sub_root.join("foundry.toml"));
+            client
+                .log_message(
+                    MessageType::INFO,
+                    format!("sub-cache: building {} ...", sub_root.display()),
+                )
+                .await;
+            match crate::solc::solc_project_index(&sub_config, Some(&client), None).await {
+                Ok(ast_data) => {
+                    let build = crate::goto::CachedBuild::new(ast_data, 0);
+                    let source_count = build.nodes.len();
+                    if source_count == 0 {
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!(
+                                    "sub-cache: build produced 0 sources for {}",
+                                    sub_root.display()
+                                ),
+                            )
+                            .await;
+                        continue;
+                    }
+                    // Persist to disk so next startup can load from cache.
+                    let cfg_for_save = sub_config.clone();
+                    let build_for_save = build.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::project_cache::save_reference_cache_with_report(
+                            &cfg_for_save,
+                            &build_for_save,
+                            None,
+                        )
+                    })
+                    .await;
+                    client
+                        .log_message(
+                            MessageType::INFO,
+                            format!(
+                                "sub-cache: built and saved {} (sources={})",
+                                sub_root.display(),
+                                source_count
+                            ),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!("sub-cache: build failed for {}: {}", sub_root.display(), e),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        // Now load all caches (existing + newly built).
+        let cfg2 = foundry_config.clone();
+        let all_cached =
+            tokio::task::spawn_blocking(move || crate::project_cache::discover_lib_caches(&cfg2))
+                .await
+                .unwrap_or_default();
+
+        if all_cached.is_empty() {
+            return;
+        }
+
+        let mut loaded = Vec::new();
+        for sub_root in &all_cached {
+            let root = sub_root.clone();
+            let build =
+                tokio::task::spawn_blocking(move || crate::project_cache::load_lib_cache(&root))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(build) = build {
+                let source_count = build.nodes.len();
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "sub-cache loaded: {} (sources={})",
+                            sub_root.display(),
+                            source_count
+                        ),
+                    )
+                    .await;
+                loaded.push(Arc::new(build));
+            }
+        }
+
+        if !loaded.is_empty() {
+            let total: usize = loaded.iter().map(|b| b.nodes.len()).sum();
+            client
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "sub-caches: loaded {} lib caches ({} total sources)",
+                        loaded.len(),
+                        total
+                    ),
+                )
+                .await;
+            *sub_caches.write().await = loaded;
+        }
+    });
 }
 
 impl ForgeLsp {
@@ -132,6 +290,8 @@ impl ForgeLsp {
             settings_from_init: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             did_save_workers: Arc::new(RwLock::new(HashMap::new())),
             code_action_db: Arc::new(crate::code_actions::load()),
+            sub_caches: Arc::new(RwLock::new(Vec::new())),
+            sub_caches_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -167,6 +327,25 @@ impl ForgeLsp {
         Url::from_directory_path(root).ok().map(|u| u.to_string())
     }
 
+    /// Spawn a background task to discover and load existing caches from lib
+    /// sub-projects.
+    ///
+    /// Non-blocking: returns immediately.  The background task discovers
+    /// sub-projects with `.solidity-language-server/` cache dirs and loads
+    /// them into `self.sub_caches`.  The references handler reads whatever
+    /// sub-caches are available at query time — if loading hasn't finished
+    /// yet, the first query returns only root-project references.
+    fn spawn_load_lib_sub_caches(&self) {
+        let foundry_config = self.foundry_config.clone();
+        let sub_caches = self.sub_caches.clone();
+        let loading_flag = self.sub_caches_loading.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let cfg = foundry_config.read().await.clone();
+            spawn_load_lib_sub_caches_task(cfg, sub_caches, loading_flag, client);
+        });
+    }
+
     /// Ensure project-wide cached build is available for cross-file features.
     ///
     /// Fast path: return in-memory root build if present.
@@ -174,6 +353,8 @@ impl ForgeLsp {
     async fn ensure_project_cached_build(&self) -> Option<Arc<goto::CachedBuild>> {
         let root_key = self.project_cache_key().await?;
         if let Some(existing) = self.ast_cache.read().await.get(&root_key).cloned() {
+            // Kick off sub-cache loading in the background (no-op if already loaded).
+            self.spawn_load_lib_sub_caches();
             return Some(existing);
         }
 
@@ -222,6 +403,9 @@ impl ForgeLsp {
                 ),
             )
             .await;
+
+        // Kick off sub-cache loading in the background (no-op if already loaded).
+        self.spawn_load_lib_sub_caches();
 
         if complete {
             return Some(arc);
@@ -2326,6 +2510,8 @@ impl LanguageServer for ForgeLsp {
             let cache_key = self.project_cache_key().await;
             let ast_cache = self.ast_cache.clone();
             let client = self.client.clone();
+            let sub_caches_arc = self.sub_caches.clone();
+            let sub_caches_loading_flag = self.sub_caches_loading.clone();
 
             tokio::spawn(async move {
                 let Some(cache_key) = cache_key else {
@@ -2388,7 +2574,7 @@ impl LanguageServer for ForgeLsp {
                                 .log_message(
                                     MessageType::INFO,
                                     format!(
-                                        "project index (eager): cache load hit (sources={}, reused_files={}/{}, complete={}, duration={}ms)",
+                                         "project index (eager): cache load hit (sources={}, reused_files={}/{}, complete={}, duration={}ms)",
                                         source_count,
                                         report.file_count_reused,
                                         report.file_count_hashed,
@@ -2398,6 +2584,14 @@ impl LanguageServer for ForgeLsp {
                                 )
                                 .await;
                             if report.complete {
+                                // Pre-load lib sub-caches so references
+                                // include lib test files on the first call.
+                                spawn_load_lib_sub_caches_task(
+                                    foundry_config.clone(),
+                                    sub_caches_arc.clone(),
+                                    sub_caches_loading_flag.clone(),
+                                    client.clone(),
+                                );
                                 client
                                     .send_notification::<notification::Progress>(ProgressParams {
                                         token: token.clone(),
@@ -2462,6 +2656,14 @@ impl LanguageServer for ForgeLsp {
                                 ),
                             )
                             .await;
+
+                        // Pre-load lib sub-caches after full build too.
+                        spawn_load_lib_sub_caches_task(
+                            foundry_config.clone(),
+                            sub_caches_arc.clone(),
+                            sub_caches_loading_flag.clone(),
+                            client.clone(),
+                        );
 
                         let cfg_for_save = foundry_config.clone();
                         let client_for_save = client.clone();
@@ -3736,6 +3938,21 @@ impl LanguageServer for ForgeLsp {
                     params.context.include_declaration,
                 );
                 locations.extend(other_locations);
+            }
+
+            // Search sub-project caches for references in lib test files.
+            // Each sub-cache has its own node ID space; byte_to_id matches
+            // the target declaration by absolute file path + byte offset.
+            let sub_caches = self.sub_caches.read().await;
+            for sub_cache in sub_caches.iter() {
+                let sub_locations = references::goto_references_for_target(
+                    sub_cache,
+                    &def_abs_path,
+                    def_byte_offset,
+                    None,
+                    params.context.include_declaration,
+                );
+                locations.extend(sub_locations);
             }
         }
 

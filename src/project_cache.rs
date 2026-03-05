@@ -451,11 +451,138 @@ pub fn load_reference_cache(config: &FoundryConfig) -> Option<CachedBuild> {
     load_reference_cache_with_report(config, ProjectIndexCacheMode::Auto, false).build
 }
 
+/// Discover existing LSP caches in lib sub-projects.
+///
+/// Result of discovering lib sub-projects.
+pub struct DiscoveredLibs {
+    /// Sub-projects that already have a valid `.solidity-language-server/` cache.
+    pub cached: Vec<PathBuf>,
+    /// Sub-projects with `foundry.toml` but no existing cache.
+    pub uncached: Vec<PathBuf>,
+}
+
+/// Walks the configured `libs` directories looking for `foundry.toml` files.
+/// Returns sub-project roots partitioned into those with existing caches
+/// and those without.
+pub fn discover_lib_sub_projects(config: &FoundryConfig) -> DiscoveredLibs {
+    let mut cached = Vec::new();
+    let mut uncached = Vec::new();
+    for lib_dir_name in &config.libs {
+        let lib_dir = config.root.join(lib_dir_name);
+        if !lib_dir.is_dir() {
+            continue;
+        }
+        discover_lib_sub_projects_recursive(&lib_dir, &mut cached, &mut uncached);
+    }
+    DiscoveredLibs { cached, uncached }
+}
+
+/// Backwards-compatible wrapper: returns only sub-projects that have an
+/// existing cache on disk.
+pub fn discover_lib_caches(config: &FoundryConfig) -> Vec<PathBuf> {
+    discover_lib_sub_projects(config).cached
+}
+
+fn discover_lib_sub_projects_recursive(
+    dir: &Path,
+    cached: &mut Vec<PathBuf>,
+    uncached: &mut Vec<PathBuf>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip hidden dirs and build artifacts
+        if name.starts_with('.')
+            || matches!(name, "out" | "cache" | "artifacts" | "target" | "broadcast")
+        {
+            continue;
+        }
+        let has_config = path.join("foundry.toml").is_file();
+        if has_config {
+            let has_cache = path.join(CACHE_DIR).join(CACHE_FILE_V2).is_file();
+            if has_cache {
+                cached.push(path.clone());
+            } else {
+                uncached.push(path.clone());
+            }
+        }
+        // Always recurse deeper — nested libs (e.g. lib/v4-periphery/lib/v4-core/)
+        // can have their own caches too.
+        discover_lib_sub_projects_recursive(&path, cached, uncached);
+    }
+}
+
+/// Load a sub-project's cache as a [`CachedBuild`].
+///
+/// This is a simplified version of [`load_reference_cache_with_report`] that
+/// does not validate config fingerprints or file hashes — we just load
+/// whatever shards are on disk.  Sub-caches are used read-only for cross-file
+/// reference lookup; staleness is acceptable.
+pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
+    let cache_path = sub_root.join(CACHE_DIR).join(CACHE_FILE_V2);
+    let bytes = fs::read(&cache_path).ok()?;
+    let persisted: PersistedReferenceCacheV2 = serde_json::from_slice(&bytes).ok()?;
+
+    if persisted.schema_version != CACHE_SCHEMA_VERSION_V2 {
+        return None;
+    }
+
+    let shards_dir = sub_root.join(CACHE_DIR).join(CACHE_SHARDS_DIR_V2);
+    let mut nodes: HashMap<String, HashMap<NodeId, NodeInfo>> = HashMap::new();
+    let mut reused_decl_ids = std::collections::HashSet::new();
+
+    for (_rel_path, shard_name) in &persisted.node_shards {
+        let shard_path = shards_dir.join(shard_name);
+        let shard_bytes = match fs::read(&shard_path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let shard: PersistedFileShardV2 = match serde_json::from_slice(&shard_bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut file_nodes = HashMap::with_capacity(shard.entries.len());
+        for entry in shard.entries {
+            reused_decl_ids.insert(entry.id);
+            file_nodes.insert(NodeId(entry.id), entry.info);
+        }
+        nodes.insert(shard.abs_path, file_nodes);
+    }
+
+    if nodes.is_empty() {
+        return None;
+    }
+
+    let mut external_refs = HashMap::new();
+    for item in persisted.external_refs {
+        if reused_decl_ids.contains(&item.decl_id) {
+            external_refs.insert(item.src, NodeId(item.decl_id));
+        }
+    }
+
+    Some(CachedBuild::from_reference_index(
+        nodes,
+        persisted.path_to_abs,
+        external_refs,
+        persisted.id_to_path_map,
+        0,
+    ))
+}
+
 /// Return absolute paths of source files whose current hash differs from v2
 /// cache metadata (including newly-added files missing from metadata).
 pub fn changed_files_since_v2_cache(
     config: &FoundryConfig,
-    _include_libs: bool,
+    include_libs: bool,
 ) -> Result<Vec<PathBuf>, String> {
     if !config.root.is_dir() {
         return Err(format!("invalid project root: {}", config.root.display()));
@@ -497,9 +624,14 @@ pub fn changed_files_since_v2_cache(
     // Detect new files: walk the source dir to find .sol files that are not
     // in the cached file list.  This ensures newly-created files trigger a
     // scoped reindex instead of silently remaining invisible until a full
-    // rebuild.
+    // rebuild.  When include_libs is true (fullProjectScan), we also scan
+    // library directories so that newly-added lib files are picked up.
     let saved_rels: std::collections::HashSet<&String> = persisted.file_hashes.keys().collect();
-    let discovered = crate::solc::discover_source_files(config);
+    let discovered = if include_libs {
+        crate::solc::discover_source_files_with_libs(config)
+    } else {
+        crate::solc::discover_source_files(config)
+    };
     for path in &discovered {
         let rel = relative_to_root(&config.root, path);
         if !saved_rels.contains(&rel) {
