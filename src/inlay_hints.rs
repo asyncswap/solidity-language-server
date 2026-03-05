@@ -211,7 +211,7 @@ pub fn inlay_hints(
     };
 
     // Use the pre-cached hint lookup for this file
-    let lookup = match build.hint_index.get(&abs) {
+    let lookup = match build.hint_index.get(abs.as_str()) {
         Some(l) => l,
         None => return vec![],
     };

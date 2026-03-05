@@ -60,7 +60,7 @@ pub fn document_links(
 /// import statement. Used by both `document_links` (for clickable links)
 /// and `file_operations::rename_imports` (for path rewriting).
 pub fn import_path_range(node_info: &crate::goto::NodeInfo, source_bytes: &[u8]) -> Option<Range> {
-    let src_loc = SourceLoc::parse(&node_info.src)?;
+    let src_loc = SourceLoc::parse(node_info.src.as_str())?;
     let (start_byte, length) = (src_loc.offset, src_loc.length);
     let end_byte = start_byte + length;
 

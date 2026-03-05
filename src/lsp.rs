@@ -13,6 +13,7 @@ use crate::runner::{ForgeRunner, Runner};
 use crate::selection;
 use crate::semantic_tokens;
 use crate::symbols;
+use crate::types::DocumentUri;
 use crate::utils;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -22,18 +23,18 @@ use tokio::sync::RwLock;
 use tower_lsp::{Client, LanguageServer, lsp_types::*};
 
 /// Per-document semantic token cache: `result_id` + token list.
-type SemanticTokenCache = HashMap<String, (String, Vec<SemanticToken>)>;
+type SemanticTokenCache = HashMap<DocumentUri, (String, Vec<SemanticToken>)>;
 
 #[derive(Clone)]
 pub struct ForgeLsp {
     client: Client,
     compiler: Arc<dyn Runner>,
-    ast_cache: Arc<RwLock<HashMap<String, Arc<goto::CachedBuild>>>>,
+    ast_cache: Arc<RwLock<HashMap<DocumentUri, Arc<goto::CachedBuild>>>>,
     /// Text cache for opened documents
     ///
     /// The key is the file's URI converted to string, and the value is a tuple of (version, content).
-    text_cache: Arc<RwLock<HashMap<String, (i32, String)>>>,
-    completion_cache: Arc<RwLock<HashMap<String, Arc<completion::CompletionCache>>>>,
+    text_cache: Arc<RwLock<HashMap<DocumentUri, (i32, String)>>>,
+    completion_cache: Arc<RwLock<HashMap<DocumentUri, Arc<completion::CompletionCache>>>>,
     /// Cached lint configuration from `foundry.toml`.
     lint_config: Arc<RwLock<LintConfig>>,
     /// Cached project configuration from `foundry.toml`.
@@ -75,7 +76,7 @@ pub struct ForgeLsp {
     project_cache_upsert_files: Arc<RwLock<HashSet<String>>>,
     /// URIs recently scaffolded in willCreateFiles (used to avoid re-applying
     /// edits again in didCreateFiles for the same create operation).
-    pending_create_scaffold: Arc<RwLock<HashSet<String>>>,
+    pending_create_scaffold: Arc<RwLock<HashSet<DocumentUri>>>,
     /// Whether settings were loaded from `initializationOptions`.  When false,
     /// the server will pull settings via `workspace/configuration` during
     /// `initialized()`.
@@ -85,8 +86,9 @@ pub struct ForgeLsp {
     /// Each URI gets one long-lived worker task that always processes the
     /// *latest* save params.  Rapid saves collapse: the worker wakes once per
     /// compile cycle and picks up the newest params via `borrow_and_update`.
-    did_save_workers:
-        Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>>,
+    did_save_workers: Arc<
+        RwLock<HashMap<DocumentUri, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>,
+    >,
     /// JSON-driven code-action database loaded once at startup.
     code_action_db: Arc<HashMap<u32, crate::code_actions::CodeActionDef>>,
     /// Cached builds loaded from sub-project (lib) caches.
@@ -391,7 +393,7 @@ impl ForgeLsp {
         self.ast_cache
             .write()
             .await
-            .insert(root_key.clone(), arc.clone());
+            .insert(root_key.clone().into(), arc.clone());
         self.project_indexed
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.client
@@ -467,7 +469,7 @@ impl ForgeLsp {
                     } else {
                         scoped_build.clone()
                     };
-                    cache.insert(root_key.clone(), merged.clone());
+                    cache.insert(root_key.clone().into(), merged.clone());
                     merged
                 };
                 if let Some(e) = merge_error {
@@ -775,13 +777,16 @@ impl ForgeLsp {
                 cached_build.content_hash = content_hash;
                 let cached_build = Arc::new(cached_build);
                 let mut cache = self.ast_cache.write().await;
-                cache.insert(uri.to_string(), cached_build.clone());
+                cache.insert(uri.to_string().into(), cached_build.clone());
                 drop(cache);
 
                 // Insert pre-built completion cache (built during CachedBuild::new)
                 {
                     let mut cc = self.completion_cache.write().await;
-                    cc.insert(uri.to_string(), cached_build.completion_cache.clone());
+                    cc.insert(
+                        uri.to_string().into(),
+                        cached_build.completion_cache.clone(),
+                    );
                 }
                 self.client
                     .log_message(MessageType::INFO, "Build successful, AST cache updated")
@@ -807,7 +812,7 @@ impl ForgeLsp {
                 if let Some(existing) = cache.get(&uri_key).cloned() {
                     let mut updated = (*existing).clone();
                     updated.content_hash = content_hash;
-                    cache.insert(uri_key, Arc::new(updated));
+                    cache.insert(uri_key.into(), Arc::new(updated));
                 }
             }
             self.client
@@ -824,7 +829,7 @@ impl ForgeLsp {
             let uri_str = uri.to_string();
             let existing_version = text_cache.get(&uri_str).map(|(v, _)| *v).unwrap_or(-1);
             if version >= existing_version {
-                text_cache.insert(uri_str, (version, params.text));
+                text_cache.insert(uri_str.into(), (version, params.text));
             }
         }
 
@@ -982,7 +987,7 @@ impl ForgeLsp {
                             ast_cache
                                 .write()
                                 .await
-                                .insert(cache_key.clone(), Arc::new(cached_build));
+                                .insert(cache_key.clone().into(), Arc::new(cached_build));
                             client
                                 .log_message(
                                     MessageType::INFO,
@@ -1053,7 +1058,7 @@ impl ForgeLsp {
                         ast_cache
                             .write()
                             .await
-                            .insert(cache_key.clone(), cached_build);
+                            .insert(cache_key.clone().into(), cached_build);
                         client
                             .log_message(
                                 MessageType::INFO,
@@ -1189,7 +1194,7 @@ impl ForgeLsp {
                 // didSave/on_change will stamp the correct version.
                 let build = Arc::new(goto::CachedBuild::new(data, 0));
                 let mut cache = self.ast_cache.write().await;
-                cache.insert(uri_str.clone(), build.clone());
+                cache.insert(uri_str.clone().into(), build.clone());
                 Some(build)
             }
             Err(e) => {
@@ -1401,22 +1406,28 @@ fn src_file_id(src: &str) -> Option<&str> {
     src.rsplit(':').next().filter(|id| !id.is_empty())
 }
 
-fn remap_src_file_id(src: &str, id_remap: &HashMap<String, String>) -> String {
+fn remap_src_file_id(
+    src: &str,
+    id_remap: &HashMap<crate::types::SolcFileId, crate::types::SolcFileId>,
+) -> String {
     let Some(old_id) = src_file_id(src) else {
         return src.to_string();
     };
     let Some(new_id) = id_remap.get(old_id) else {
         return src.to_string();
     };
-    if new_id == old_id {
+    if new_id.as_str() == old_id {
         return src.to_string();
     }
     let prefix_len = src.len().saturating_sub(old_id.len());
     format!("{}{}", &src[..prefix_len], new_id)
 }
 
-fn remap_node_info_file_ids(info: &mut goto::NodeInfo, id_remap: &HashMap<String, String>) {
-    info.src = remap_src_file_id(&info.src, id_remap);
+fn remap_node_info_file_ids(
+    info: &mut goto::NodeInfo,
+    id_remap: &HashMap<crate::types::SolcFileId, crate::types::SolcFileId>,
+) {
+    info.src = crate::types::SrcLocation::new(remap_src_file_id(info.src.as_str(), id_remap));
     if let Some(loc) = info.name_location.as_mut() {
         *loc = remap_src_file_id(loc, id_remap);
     }
@@ -1441,11 +1452,12 @@ fn merge_scoped_cached_build(
     existing: &mut goto::CachedBuild,
     mut scoped: goto::CachedBuild,
 ) -> Result<usize, String> {
-    let affected_paths: HashSet<String> = scoped.nodes.keys().cloned().collect();
+    let affected_paths: HashSet<String> = scoped.nodes.keys().map(|p| p.to_string()).collect();
     if affected_paths.is_empty() {
         return Ok(0);
     }
-    let affected_abs_paths: HashSet<String> = scoped.path_to_abs.values().cloned().collect();
+    let affected_abs_paths: HashSet<String> =
+        scoped.path_to_abs.values().map(|p| p.to_string()).collect();
 
     // Safety guard: reject scoped merge when declaration IDs collide with
     // unaffected files in the existing cache.
@@ -1462,27 +1474,28 @@ fn merge_scoped_cached_build(
     }
 
     // Remap scoped local source IDs to existing/canonical IDs.
-    let mut path_to_existing_id: HashMap<String, String> = HashMap::new();
+    use crate::types::SolcFileId;
+    let mut path_to_existing_id: HashMap<String, SolcFileId> = HashMap::new();
     for (id, path) in &existing.id_to_path_map {
         path_to_existing_id
             .entry(path.clone())
             .or_insert_with(|| id.clone());
     }
-    let mut used_ids: HashSet<String> = existing.id_to_path_map.keys().cloned().collect();
+    let mut used_ids: HashSet<SolcFileId> = existing.id_to_path_map.keys().cloned().collect();
     let mut next_id = used_ids
         .iter()
-        .filter_map(|k| k.parse::<u64>().ok())
+        .filter_map(|k| k.as_str().parse::<u64>().ok())
         .max()
         .unwrap_or(0)
         .saturating_add(1);
 
-    let mut id_remap: HashMap<String, String> = HashMap::new();
+    let mut id_remap: HashMap<SolcFileId, SolcFileId> = HashMap::new();
     for (scoped_id, path) in &scoped.id_to_path_map {
         let canonical = if let Some(id) = path_to_existing_id.get(path) {
             id.clone()
         } else {
             let id = loop {
-                let candidate = next_id.to_string();
+                let candidate = SolcFileId::new(next_id.to_string());
                 next_id = next_id.saturating_add(1);
                 if used_ids.insert(candidate.clone()) {
                     break candidate;
@@ -1499,22 +1512,27 @@ fn merge_scoped_cached_build(
             remap_node_info_file_ids(info, &id_remap);
         }
     }
-    let scoped_external_refs: HashMap<String, crate::types::NodeId> = scoped
+    let scoped_external_refs: goto::ExternalRefs = scoped
         .external_refs
         .into_iter()
-        .map(|(src, decl_id)| (remap_src_file_id(&src, &id_remap), decl_id))
+        .map(|(src, decl_id)| {
+            (
+                crate::types::SrcLocation::new(remap_src_file_id(src.as_str(), &id_remap)),
+                decl_id,
+            )
+        })
         .collect();
 
     let old_id_to_path = existing.id_to_path_map.clone();
     existing.external_refs.retain(|src, _| {
-        src_file_id(src)
+        src_file_id(src.as_str())
             .and_then(|fid| old_id_to_path.get(fid))
             .map(|path| !affected_paths.contains(path))
             .unwrap_or(true)
     });
     existing
         .nodes
-        .retain(|path, _| !affected_paths.contains(path));
+        .retain(|path, _| !affected_paths.contains(path.as_str()));
     existing
         .path_to_abs
         .retain(|path, _| !affected_paths.contains(path));
@@ -1655,7 +1673,7 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                 this.text_cache
                     .write()
                     .await
-                    .insert(uri_str.clone(), (version, scaffold));
+                    .insert(uri_str.clone().into(), (version, scaffold));
                 this.pending_create_scaffold.write().await.remove(&uri_str);
                 this.client
                     .log_message(
@@ -1924,7 +1942,7 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                 ) {
                                                     Ok(affected_count) => {
                                                         cache.insert(
-                                                            cache_key.clone(),
+                                                            cache_key.clone().into(),
                                                             Arc::new(merged),
                                                         );
                                                         ScopedApply::Merged { affected_count }
@@ -1932,7 +1950,8 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                     Err(e) => ScopedApply::Failed(e),
                                                 }
                                             } else {
-                                                cache.insert(cache_key.clone(), scoped_build);
+                                                cache
+                                                    .insert(cache_key.clone().into(), scoped_build);
                                                 ScopedApply::Stored
                                             }
                                         };
@@ -2026,7 +2045,7 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                             ast_cache
                                 .write()
                                 .await
-                                .insert(cache_key.clone(), cached_build);
+                                .insert(cache_key.clone().into(), cached_build);
 
                             let cfg_for_save = foundry_config.clone();
                             let save_res = tokio::task::spawn_blocking(move || {
@@ -2569,7 +2588,7 @@ impl LanguageServer for ForgeLsp {
                             ast_cache
                                 .write()
                                 .await
-                                .insert(cache_key.clone(), Arc::new(cached_build));
+                                .insert(cache_key.clone().into(), Arc::new(cached_build));
                             client
                                 .log_message(
                                     MessageType::INFO,
@@ -2646,7 +2665,7 @@ impl LanguageServer for ForgeLsp {
                         ast_cache
                             .write()
                             .await
-                            .insert(cache_key.clone(), cached_build);
+                            .insert(cache_key.clone().into(), cached_build);
                         client
                             .log_message(
                                 MessageType::INFO,
@@ -2910,7 +2929,7 @@ impl LanguageServer for ForgeLsp {
                                     ast_cache
                                         .write()
                                         .await
-                                        .insert(cache_key.clone(), cached_build);
+                                        .insert(cache_key.clone().into(), cached_build);
 
                                     let cfg_for_save = foundry_config.clone();
                                     let save_res = tokio::task::spawn_blocking(move || {
@@ -3115,7 +3134,7 @@ impl LanguageServer for ForgeLsp {
             let has_substantive_content = change.text.chars().any(|ch| !ch.is_whitespace());
             let mut text_cache = self.text_cache.write().await;
             text_cache.insert(
-                params.text_document.uri.to_string(),
+                params.text_document.uri.to_string().into(),
                 (params.text_document.version, change.text),
             );
             drop(text_cache);
@@ -3151,7 +3170,10 @@ impl LanguageServer for ForgeLsp {
         // Slow path: first save for this URI (or worker died) — create channel
         // and spawn the worker.
         let (tx, mut rx) = tokio::sync::watch::channel(Some(params));
-        self.did_save_workers.write().await.insert(uri_key, tx);
+        self.did_save_workers
+            .write()
+            .await
+            .insert(uri_key.into(), tx);
 
         let this = self.clone();
         tokio::spawn(async move {
@@ -3252,7 +3274,7 @@ impl LanguageServer for ForgeLsp {
                     .get(&uri.to_string())
                     .map(|(v, _)| *v)
                     .unwrap_or(0);
-                text_cache.insert(uri.to_string(), (version, formatted_content.clone()));
+                text_cache.insert(uri.to_string().into(), (version, formatted_content.clone()));
             }
 
             let edit = TextEdit {
@@ -3435,7 +3457,7 @@ impl LanguageServer for ForgeLsp {
                 completion_cache
                     .write()
                     .await
-                    .insert(uri_string, cached_build.completion_cache.clone());
+                    .insert(uri_string.into(), cached_build.completion_cache.clone());
             });
         }
 
@@ -3843,7 +3865,7 @@ impl LanguageServer for ForgeLsp {
             && self.settings.read().await.project_index.full_project_scan
             && project_build
                 .as_ref()
-                .is_some_and(|b| !b.nodes.contains_key(&current_abs))
+                .is_some_and(|b| !b.nodes.contains_key(current_abs.as_str()))
         {
             let foundry_config = self.foundry_config_for_file(&file_path).await;
             let remappings = crate::solc::resolve_remappings(&foundry_config).await;
@@ -3886,7 +3908,7 @@ impl LanguageServer for ForgeLsp {
                             } else {
                                 scoped_build.clone()
                             };
-                            cache.insert(root_key, merged.clone());
+                            cache.insert(root_key.into(), merged.clone());
                             merged
                         };
                         project_build = Some(merged);
@@ -4089,7 +4111,7 @@ impl LanguageServer for ForgeLsp {
             let cache = self.ast_cache.read().await;
             cache
                 .iter()
-                .filter(|(key, _)| **key != uri.to_string())
+                .filter(|(key, _)| key.as_str() != uri.to_string())
                 .map(|(_, v)| v.clone())
                 .collect()
         };
@@ -4102,7 +4124,7 @@ impl LanguageServer for ForgeLsp {
             let text_cache = self.text_cache.read().await;
             text_cache
                 .iter()
-                .map(|(uri, (_, content))| (uri.clone(), content.as_bytes().to_vec()))
+                .map(|(uri, (_, content))| (uri.to_string(), content.as_bytes().to_vec()))
                 .collect()
         };
 
@@ -4463,7 +4485,7 @@ impl LanguageServer for ForgeLsp {
 
         {
             let mut cache = self.semantic_token_cache.write().await;
-            cache.insert(uri.to_string(), (result_id, tokens.data.clone()));
+            cache.insert(uri.to_string().into(), (result_id, tokens.data.clone()));
         }
 
         Ok(Some(SemanticTokensResult::Tokens(tokens)))
@@ -4561,7 +4583,10 @@ impl LanguageServer for ForgeLsp {
         // Update the cache with the new tokens
         {
             let mut cache = self.semantic_token_cache.write().await;
-            cache.insert(uri_str, (new_result_id.clone(), new_tokens.data.clone()));
+            cache.insert(
+                uri_str.into(),
+                (new_result_id.clone(), new_tokens.data.clone()),
+            );
         }
 
         match old_tokens {
@@ -5051,7 +5076,7 @@ impl LanguageServer for ForgeLsp {
 
             let mut tc = self.text_cache.write().await;
             for (uri_str, content) in loaded {
-                tc.entry(uri_str).or_insert((0, content));
+                tc.entry(uri_str.into()).or_insert((0, content));
             }
         }
 
@@ -5212,7 +5237,7 @@ impl LanguageServer for ForgeLsp {
             let mut tc = self.text_cache.write().await;
             for (old_key, new_key) in &file_renames {
                 if let Some(entry) = tc.remove(old_key) {
-                    tc.insert(new_key.clone(), entry);
+                    tc.insert(new_key.clone().into(), entry);
                 }
             }
         }
@@ -5258,7 +5283,10 @@ impl LanguageServer for ForgeLsp {
                 Ok(ast_data) => {
                     let cached_build = Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
                     let source_count = cached_build.nodes.len();
-                    ast_cache.write().await.insert(cache_key, cached_build);
+                    ast_cache
+                        .write()
+                        .await
+                        .insert(cache_key.into(), cached_build);
                     client
                         .log_message(
                             MessageType::INFO,
@@ -5372,7 +5400,7 @@ impl LanguageServer for ForgeLsp {
 
             let mut tc = self.text_cache.write().await;
             for (uri_str, content) in loaded {
-                tc.entry(uri_str).or_insert((0, content));
+                tc.entry(uri_str.into()).or_insert((0, content));
             }
         }
 
@@ -5612,7 +5640,10 @@ impl LanguageServer for ForgeLsp {
                 Ok(ast_data) => {
                     let cached_build = Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
                     let source_count = cached_build.nodes.len();
-                    ast_cache.write().await.insert(cache_key, cached_build);
+                    ast_cache
+                        .write()
+                        .await
+                        .insert(cache_key.into(), cached_build);
                     client
                         .log_message(
                             MessageType::INFO,
@@ -5788,7 +5819,7 @@ impl LanguageServer for ForgeLsp {
             {
                 let mut pending = self.pending_create_scaffold.write().await;
                 for uri in &created_uris {
-                    pending.insert(uri.clone());
+                    pending.insert(uri.clone().into());
                 }
             }
 
@@ -5812,7 +5843,7 @@ impl LanguageServer for ForgeLsp {
             if applied {
                 let mut tc = self.text_cache.write().await;
                 for (uri_str, content) in staged_content {
-                    tc.insert(uri_str, (0, content));
+                    tc.insert(uri_str.into(), (0, content));
                 }
             } else {
                 if let Ok(resp) = &apply_result {
@@ -5887,7 +5918,10 @@ impl LanguageServer for ForgeLsp {
                 Ok(ast_data) => {
                     let cached_build = Arc::new(crate::goto::CachedBuild::new(ast_data, 0));
                     let source_count = cached_build.nodes.len();
-                    ast_cache.write().await.insert(cache_key, cached_build);
+                    ast_cache
+                        .write()
+                        .await
+                        .insert(cache_key.into(), cached_build);
                     client
                         .log_message(
                             MessageType::INFO,

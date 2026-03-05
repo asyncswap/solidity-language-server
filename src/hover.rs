@@ -1450,7 +1450,7 @@ pub fn hover_info(
     // in a function call, show the @param doc from the called function's definition.
     // Uses tree-sitter on the live buffer to find the enclosing call and argument
     // index, then resolves via HintIndex for the param name and declaration id.
-    if let Some(hint_lookup) = hint_index.get(&abs_path) {
+    if let Some(hint_lookup) = hint_index.get(abs_path.as_str()) {
         let source_str = String::from_utf8_lossy(source_bytes);
         if let Some(tree) = crate::inlay_hints::ts_parse(&source_str)
             && let Some(ctx) =

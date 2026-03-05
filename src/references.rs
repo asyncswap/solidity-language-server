@@ -4,10 +4,10 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 use crate::goto::{
     CachedBuild, ExternalRefs, NodeInfo, bytes_to_pos, pos_to_bytes, src_to_location,
 };
-use crate::types::{NodeId, SourceLoc};
+use crate::types::{AbsPath, NodeId, SourceLoc};
 
 pub fn all_references(
-    nodes: &HashMap<String, HashMap<NodeId, NodeInfo>>,
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
 ) -> HashMap<NodeId, Vec<NodeId>> {
     let mut all_refs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for file_nodes in nodes.values() {
@@ -25,23 +25,21 @@ pub fn all_references(
 /// Returns the Solidity declaration id if so.
 pub fn byte_to_decl_via_external_refs(
     external_refs: &ExternalRefs,
-    id_to_path: &HashMap<String, String>,
+    id_to_path: &HashMap<crate::types::SolcFileId, String>,
     abs_path: &str,
     byte_position: usize,
 ) -> Option<NodeId> {
     // Build reverse map: file_path -> file_id
-    let path_to_file_id: HashMap<&str, &str> = id_to_path
-        .iter()
-        .map(|(id, p)| (p.as_str(), id.as_str()))
-        .collect();
+    let path_to_file_id: HashMap<&str, &crate::types::SolcFileId> =
+        id_to_path.iter().map(|(id, p)| (p.as_str(), id)).collect();
     let current_file_id = path_to_file_id.get(abs_path)?;
 
     for (src_str, decl_id) in external_refs {
-        let Some(src_loc) = SourceLoc::parse(src_str) else {
+        let Some(src_loc) = SourceLoc::parse(src_str.as_str()) else {
             continue;
         };
         // Only consider refs in the current file
-        if src_loc.file_id_str() != *current_file_id {
+        if src_loc.file_id_str() != **current_file_id {
             continue;
         }
         if src_loc.offset <= byte_position && byte_position < src_loc.end() {
@@ -52,14 +50,14 @@ pub fn byte_to_decl_via_external_refs(
 }
 
 pub fn byte_to_id(
-    nodes: &HashMap<String, HashMap<NodeId, NodeInfo>>,
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
     abs_path: &str,
     byte_position: usize,
 ) -> Option<NodeId> {
     let file_nodes = nodes.get(abs_path)?;
     let mut refs: HashMap<usize, (NodeId, bool)> = HashMap::new();
     for (id, node_info) in file_nodes {
-        let Some(src_loc) = SourceLoc::parse(&node_info.src) else {
+        let Some(src_loc) = SourceLoc::parse(node_info.src.as_str()) else {
             continue;
         };
 
@@ -87,16 +85,16 @@ pub fn byte_to_id(
 }
 
 pub fn id_to_location(
-    nodes: &HashMap<String, HashMap<NodeId, NodeInfo>>,
-    id_to_path: &HashMap<String, String>,
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    id_to_path: &HashMap<crate::types::SolcFileId, String>,
     node_id: NodeId,
 ) -> Option<Location> {
     id_to_location_with_index(nodes, id_to_path, node_id, None)
 }
 
 pub fn id_to_location_with_index(
-    nodes: &HashMap<String, HashMap<NodeId, NodeInfo>>,
-    id_to_path: &HashMap<String, String>,
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    id_to_path: &HashMap<crate::types::SolcFileId, String>,
     node_id: NodeId,
     name_location_index: Option<usize>,
 ) -> Option<Location> {
@@ -210,7 +208,7 @@ pub fn goto_references_cached(
     // Also add Yul external reference use sites
     for (src_str, decl_id) in &build.external_refs {
         if *decl_id == target_node_id
-            && let Some(location) = src_to_location(src_str, &build.id_to_path_map)
+            && let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map)
         {
             locations.push(location);
         }
@@ -275,9 +273,12 @@ pub fn resolve_target_location(
     // contaminating cross-file references with the type's references.
     for (file_abs_path, file_nodes) in &build.nodes {
         if let Some(node_info) = file_nodes.get(&target_node_id) {
-            let loc_str = node_info.name_location.as_deref().unwrap_or(&node_info.src);
+            let loc_str = node_info
+                .name_location
+                .as_deref()
+                .unwrap_or(node_info.src.as_str());
             if let Some(src_loc) = SourceLoc::parse(loc_str) {
-                return Some((file_abs_path.clone(), src_loc.offset));
+                return Some((file_abs_path.to_string(), src_loc.offset));
             }
         }
     }
@@ -337,7 +338,7 @@ pub fn goto_references_for_target(
     // Yul external reference use sites
     for (src_str, decl_id) in &build.external_refs {
         if *decl_id == target_node_id
-            && let Some(location) = src_to_location(src_str, &build.id_to_path_map)
+            && let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map)
         {
             locations.push(location);
         }

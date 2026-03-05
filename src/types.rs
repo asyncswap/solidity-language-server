@@ -54,10 +54,10 @@ impl SourceLoc {
         self.offset + self.length
     }
 
-    /// The file ID as a string, for use as a HashMap key when interacting
-    /// with the `source_id_to_path` map (which uses string keys).
-    pub fn file_id_str(&self) -> String {
-        self.file_id.0.to_string()
+    /// The file ID as a [`SolcFileId`], for use as a HashMap key when
+    /// interacting with the `id_to_path_map`.
+    pub fn file_id_str(&self) -> SolcFileId {
+        SolcFileId::new(self.file_id.0.to_string())
     }
 }
 
@@ -70,6 +70,291 @@ impl std::fmt::Display for NodeId {
 impl std::fmt::Display for FileId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+// ── Typed string wrappers ──────────────────────────────────────────────────
+//
+// These newtypes replace bare `String` keys in HashMaps so readers can
+// instantly tell what a value represents. They serialize as plain strings
+// for JSON cache backwards-compatibility.
+
+/// An absolute file path from the AST (`absolutePath` field) or filesystem.
+///
+/// Used as the key in [`CachedBuild::nodes`], values in
+/// [`CachedBuild::path_to_abs`], and keys in [`HintIndex`].
+///
+/// # Examples
+/// ```ignore
+/// AbsPath::new("src/PoolManager.sol")            // AST absolutePath
+/// AbsPath::new("/Users/me/project/src/Foo.sol")   // filesystem abs path
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AbsPath(String);
+
+impl AbsPath {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Consume and return the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for AbsPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for AbsPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for AbsPath {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for AbsPath {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.0)
+    }
+}
+
+impl From<String> for AbsPath {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for AbsPath {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::borrow::Borrow<str> for AbsPath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A solc source-file ID in string form (e.g. `"0"`, `"34"`, `"127"`).
+///
+/// The compiler assigns each input file a numeric ID that appears as the
+/// third component of `src` strings (`"offset:length:fileId"`). This
+/// newtype wraps the stringified form used as keys in
+/// [`CachedBuild::id_to_path_map`] and the `id_remap` table during
+/// incremental merges.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SolcFileId(String);
+
+impl SolcFileId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SolcFileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SolcFileId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SolcFileId {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for SolcFileId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SolcFileId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::borrow::Borrow<str> for SolcFileId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A raw `"offset:length:fileId"` source-location string from the AST.
+///
+/// This is the **unparsed** form stored on [`NodeInfo::src`] and used as
+/// keys in [`ExternalRefs`]. For the parsed representation with typed
+/// fields, see [`SourceLoc::parse`].
+///
+/// # Examples
+/// ```ignore
+/// SrcLocation::new("2068:10:33")
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SrcLocation(String);
+
+impl SrcLocation {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+    /// Parse into a structured [`SourceLoc`].
+    pub fn parse(&self) -> Option<SourceLoc> {
+        SourceLoc::parse(&self.0)
+    }
+}
+
+impl std::fmt::Display for SrcLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SrcLocation {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SrcLocation {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq<&str> for SrcLocation {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<SrcLocation> for &str {
+    fn eq(&self, other: &SrcLocation) -> bool {
+        *self == other.0
+    }
+}
+
+impl From<String> for SrcLocation {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SrcLocation {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::borrow::Borrow<str> for SrcLocation {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An LSP document URI string (e.g. `"file:///Users/me/project/src/Foo.sol"`).
+///
+/// Used as keys in [`ForgeLsp::ast_cache`], [`ForgeLsp::text_cache`],
+/// [`ForgeLsp::completion_cache`], [`SemanticTokenCache`], and
+/// [`ForgeLsp::did_save_workers`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DocumentUri(String);
+
+impl DocumentUri {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DocumentUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for DocumentUri {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for DocumentUri {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for DocumentUri {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for DocumentUri {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<&String> for DocumentUri {
+    fn from(s: &String) -> Self {
+        Self(s.clone())
+    }
+}
+
+impl std::borrow::Borrow<str> for DocumentUri {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<String> for DocumentUri {
+    fn borrow(&self) -> &String {
+        &self.0
     }
 }
 
@@ -236,7 +521,7 @@ mod tests {
         assert_eq!(loc.length, 50);
         assert_eq!(loc.file_id, FileId(3));
         assert_eq!(loc.end(), 150);
-        assert_eq!(loc.file_id_str(), "3");
+        assert_eq!(loc.file_id_str(), SolcFileId::new("3"));
     }
 
     #[test]

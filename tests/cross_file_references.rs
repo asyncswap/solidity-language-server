@@ -160,7 +160,7 @@ fn test_resolve_hooks_reference_from_pool_manager_node() {
     }
 
     let (def_path, def_offset) = def_location.expect("should find definition node 3530");
-    assert_eq!(def_path, hooks_key);
+    assert_eq!(def_path.as_str(), hooks_key);
     assert_eq!(def_offset, 1039);
 }
 
@@ -183,7 +183,10 @@ fn test_cross_file_scan_finds_pool_manager_references_to_hooks() {
     for (file_path, file_nodes) in &build.nodes {
         for (id, info) in file_nodes {
             if info.referenced_declaration == Some(final_target) {
-                refs_by_file.entry(file_path.clone()).or_default().push(*id);
+                refs_by_file
+                    .entry(file_path.to_string())
+                    .or_default()
+                    .push(*id);
             }
         }
     }
@@ -273,7 +276,7 @@ fn test_end_to_end_cross_file_flow() {
     for (file_path, file_nodes) in &build.nodes {
         if let Some(def_node) = file_nodes.get(&def_id) {
             let parts: Vec<&str> = def_node.src.split(':').collect();
-            def_abs_path = file_path.clone();
+            def_abs_path = file_path.to_string();
             def_byte_offset = parts[0].parse().unwrap();
             break;
         }
@@ -286,7 +289,7 @@ fn test_end_to_end_cross_file_flow() {
         .expect("byte_to_id should re-resolve the definition");
     let re_node = build
         .nodes
-        .get(&def_abs_path)
+        .get(def_abs_path.as_str())
         .unwrap()
         .get(&re_resolved_id)
         .unwrap();

@@ -17,9 +17,9 @@ If you are looking for import-string navigation (for example `import "./Pool.sol
 
 `CachedBuild` is a snapshot built from successful compiler output on disk. Internally it stores `HashMap`s such as:
 
-- `nodes: HashMap<abs_path, HashMap<node_id, NodeInfo>>`
-- `id_to_path_map: HashMap<source_id, path>`
-- `external_refs: HashMap<src_string, declaration_id>`
+- `nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>>`
+- `id_to_path_map: HashMap<SolcFileId, String>`
+- `external_refs: HashMap<SrcLocation, NodeId>`
 
 `NodeInfo` includes fields like `src`, `name_location`, and `referenced_declaration`.
 

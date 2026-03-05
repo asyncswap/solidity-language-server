@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::{Location, Position, Range, TextEdit, Url};
 use tree_sitter::{Node, Parser};
 
-use crate::types::{NodeId, SourceLoc};
+use crate::types::{AbsPath, NodeId, SourceLoc, SrcLocation};
 use crate::utils::push_if_node_or_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
-    pub src: String,
+    pub src: SrcLocation,
     pub name_location: Option<String>,
     pub name_locations: Vec<String>,
     pub referenced_declaration: Option<NodeId>,
@@ -83,7 +83,7 @@ pub const CHILD_KEYS: &[&str] = &[
 
 /// Maps `"offset:length:fileId"` src strings from Yul externalReferences
 /// to the Solidity declaration node id they refer to.
-pub type ExternalRefs = HashMap<String, NodeId>;
+pub type ExternalRefs = HashMap<SrcLocation, NodeId>;
 
 /// Pre-computed AST index. Built once when an AST enters the cache,
 /// then reused on every goto/references/rename/hover request.
@@ -92,10 +92,10 @@ pub type ExternalRefs = HashMap<String, NodeId>;
 /// pre-built indexes. The raw JSON is not retained.
 #[derive(Debug, Clone)]
 pub struct CachedBuild {
-    pub nodes: HashMap<String, HashMap<NodeId, NodeInfo>>,
-    pub path_to_abs: HashMap<String, String>,
+    pub nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    pub path_to_abs: HashMap<String, AbsPath>,
     pub external_refs: ExternalRefs,
-    pub id_to_path_map: HashMap<String, String>,
+    pub id_to_path_map: HashMap<crate::types::SolcFileId, String>,
     /// O(1) typed declaration node lookup by AST node ID.
     /// Built from the typed AST via visitor. Contains functions, variables,
     /// contracts, events, errors, structs, enums, modifiers, and UDVTs.
@@ -139,12 +139,17 @@ impl CachedBuild {
             (HashMap::new(), HashMap::new(), HashMap::new())
         };
 
-        let id_to_path_map = ast
+        let id_to_path_map: HashMap<crate::types::SolcFileId, String> = ast
             .get("source_id_to_path")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .map(|(k, v)| {
+                        (
+                            crate::types::SolcFileId::new(k.clone()),
+                            v.as_str().unwrap_or("").to_string(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -242,10 +247,10 @@ impl CachedBuild {
     /// This is used for fast startup warm-cache restores where we only need
     /// cross-file node/reference maps (not full gas/doc/hint indexes).
     pub fn from_reference_index(
-        nodes: HashMap<String, HashMap<NodeId, NodeInfo>>,
-        path_to_abs: HashMap<String, String>,
+        nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+        path_to_abs: HashMap<String, AbsPath>,
         external_refs: ExternalRefs,
-        id_to_path_map: HashMap<String, String>,
+        id_to_path_map: HashMap<crate::types::SolcFileId, String>,
         build_version: i32,
     ) -> Self {
         let completion_cache = std::sync::Arc::new(crate::completion::build_completion_cache(
@@ -272,8 +277,8 @@ impl CachedBuild {
 
 /// Return type of [`cache_ids`]: `(nodes, path_to_abs, external_refs)`.
 type CachedIds = (
-    HashMap<String, HashMap<NodeId, NodeInfo>>,
-    HashMap<String, String>,
+    HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    HashMap<String, AbsPath>,
     ExternalRefs,
 );
 
@@ -282,20 +287,21 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
 
     // Pre-size top-level maps based on source file count to avoid rehashing.
     // Typical project: ~200 nodes/file, ~10 external refs/file.
-    let mut nodes: HashMap<String, HashMap<NodeId, NodeInfo>> =
+    let mut nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>> =
         HashMap::with_capacity(source_count);
-    let mut path_to_abs: HashMap<String, String> = HashMap::with_capacity(source_count);
+    let mut path_to_abs: HashMap<String, AbsPath> = HashMap::with_capacity(source_count);
     let mut external_refs: ExternalRefs = HashMap::with_capacity(source_count * 10);
 
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
             if let Some(ast) = source_data.get("ast") {
                 // Get the absolute path for this file
-                let abs_path = ast
-                    .get("absolutePath")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(path)
-                    .to_string();
+                let abs_path = AbsPath::new(
+                    ast.get("absolutePath")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(path)
+                        .to_string(),
+                );
 
                 path_to_abs.insert(path.clone(), abs_path.clone());
 
@@ -317,7 +323,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                     nodes.get_mut(&abs_path).unwrap().insert(
                         NodeId(id),
                         NodeInfo {
-                            src: src.to_string(),
+                            src: SrcLocation::new(src),
                             name_location: None,
                             name_locations: vec![],
                             referenced_declaration: None,
@@ -386,7 +392,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                         }
 
                         let node_info = NodeInfo {
-                            src: src.to_string(),
+                            src: SrcLocation::new(src),
                             name_location: final_name_location,
                             name_locations,
                             referenced_declaration: tree
@@ -419,7 +425,8 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                                     && let Some(decl_id) =
                                         ext_ref.get("declaration").and_then(|v| v.as_i64())
                                 {
-                                    external_refs.insert(src_str.to_string(), NodeId(decl_id));
+                                    external_refs
+                                        .insert(SrcLocation::new(src_str), NodeId(decl_id));
                                 }
                             }
                         }
@@ -448,7 +455,10 @@ pub fn bytes_to_pos(source_bytes: &[u8], byte_offset: usize) -> Option<Position>
 }
 
 /// Convert a `"offset:length:fileId"` src string to an LSP Location.
-pub fn src_to_location(src: &str, id_to_path: &HashMap<String, String>) -> Option<Location> {
+pub fn src_to_location(
+    src: &str,
+    id_to_path: &HashMap<crate::types::SolcFileId, String>,
+) -> Option<Location> {
     let loc = SourceLoc::parse(src)?;
     let file_path = id_to_path.get(&loc.file_id_str())?;
 
@@ -473,9 +483,9 @@ pub fn src_to_location(src: &str, id_to_path: &HashMap<String, String>) -> Optio
 }
 
 pub fn goto_bytes(
-    nodes: &HashMap<String, HashMap<NodeId, NodeInfo>>,
-    path_to_abs: &HashMap<String, String>,
-    id_to_path: &HashMap<String, String>,
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    path_to_abs: &HashMap<String, AbsPath>,
+    id_to_path: &HashMap<crate::types::SolcFileId, String>,
     external_refs: &ExternalRefs,
     uri: &str,
     position: usize,
@@ -492,10 +502,8 @@ pub fn goto_bytes(
     let current_file_nodes = nodes.get(abs_path)?;
 
     // Build reverse map: file_path -> file_id for filtering external refs by current file
-    let path_to_file_id: HashMap<&str, &str> = id_to_path
-        .iter()
-        .map(|(id, p)| (p.as_str(), id.as_str()))
-        .collect();
+    let path_to_file_id: HashMap<&str, &crate::types::SolcFileId> =
+        id_to_path.iter().map(|(id, p)| (p.as_str(), id)).collect();
 
     // Determine the file id for the current file
     // path_to_abs maps filesystem path -> absolutePath (e.g. "src/libraries/SwapMath.sol")
@@ -504,13 +512,13 @@ pub fn goto_bytes(
 
     // Check if cursor is on a Yul external reference first
     for (src_str, decl_id) in external_refs {
-        let Some(src_loc) = SourceLoc::parse(src_str) else {
+        let Some(src_loc) = SourceLoc::parse(src_str.as_str()) else {
             continue;
         };
 
         // Only consider external refs in the current file
         if let Some(file_id) = current_file_id {
-            if src_loc.file_id_str() != *file_id {
+            if src_loc.file_id_str() != **file_id {
                 continue;
             }
         } else {
@@ -527,7 +535,7 @@ pub fn goto_bytes(
                 }
             }
             let node = target_node?;
-            let loc_str = node.name_location.as_deref().unwrap_or(&node.src);
+            let loc_str = node.name_location.as_deref().unwrap_or(node.src.as_str());
             let loc = SourceLoc::parse(loc_str)?;
             let file_path = id_to_path.get(&loc.file_id_str())?.clone();
             return Some((file_path, loc.offset, loc.length));
@@ -542,7 +550,7 @@ pub fn goto_bytes(
             continue;
         }
 
-        let Some(src_loc) = SourceLoc::parse(&content.src) else {
+        let Some(src_loc) = SourceLoc::parse(content.src.as_str()) else {
             continue;
         };
 
@@ -560,7 +568,7 @@ pub fn goto_bytes(
         let tmp = current_file_nodes.iter();
         for (_id, content) in tmp {
             if content.node_type == Some("ImportDirective".to_string()) {
-                let Some(src_loc) = SourceLoc::parse(&content.src) else {
+                let Some(src_loc) = SourceLoc::parse(content.src.as_str()) else {
                     continue;
                 };
 
@@ -592,7 +600,7 @@ pub fn goto_bytes(
     let node = target_node?;
 
     // Get location from nameLocation or src
-    let loc_str = node.name_location.as_deref().unwrap_or(&node.src);
+    let loc_str = node.name_location.as_deref().unwrap_or(node.src.as_str());
     let loc = SourceLoc::parse(loc_str)?;
     let file_path = id_to_path.get(&loc.file_id_str())?.clone();
 
@@ -690,7 +698,7 @@ pub fn goto_declaration_by_name(
         };
 
         // Parse the node's src to get the byte range in the built source
-        let Some(src_loc) = SourceLoc::parse(&node.src) else {
+        let Some(src_loc) = SourceLoc::parse(node.src.as_str()) else {
             continue;
         };
         let start = src_loc.offset;
@@ -741,7 +749,7 @@ pub fn goto_declaration_by_name(
     let node = target_node?;
 
     // Parse the target's nameLocation or src
-    let loc_str = node.name_location.as_deref().unwrap_or(&node.src);
+    let loc_str = node.name_location.as_deref().unwrap_or(node.src.as_str());
     let loc = SourceLoc::parse(loc_str)?;
 
     let file_path = cached_build.id_to_path_map.get(&loc.file_id_str())?;
@@ -1416,7 +1424,7 @@ pub fn goto_definition_ts(
     position: Position,
     file_uri: &Url,
     completion_cache: &crate::completion::CompletionCache,
-    text_cache: &HashMap<String, (i32, String)>,
+    text_cache: &HashMap<crate::types::DocumentUri, (i32, String)>,
 ) -> Option<Location> {
     let ctx = cursor_context(source, position)?;
 
@@ -1629,7 +1637,10 @@ fn find_file_for_contract(
 }
 
 /// Read source for a target file — prefer text_cache (open buffers), fallback to disk.
-fn read_target_source(path: &str, text_cache: &HashMap<String, (i32, String)>) -> Option<String> {
+fn read_target_source(
+    path: &str,
+    text_cache: &HashMap<crate::types::DocumentUri, (i32, String)>,
+) -> Option<String> {
     // Try text_cache by URI
     let uri = Url::from_file_path(path).ok()?;
     if let Some((_, content)) = text_cache.get(&uri.to_string()) {

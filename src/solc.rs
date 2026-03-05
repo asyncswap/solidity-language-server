@@ -1065,7 +1065,7 @@ pub fn build_batch_standard_json_input_with_cache(
     source_files: &[PathBuf],
     remappings: &[String],
     config: &FoundryConfig,
-    content_cache: Option<&HashMap<String, (i32, String)>>,
+    content_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
 ) -> Value {
     let mut contract_outputs = vec!["abi", "devdoc", "userdoc", "evm.methodIdentifiers"];
     if !config.via_ir {
@@ -1099,7 +1099,7 @@ pub fn build_batch_standard_json_input_with_cache(
         // Try to use cached content so solc doesn't need to read from disk.
         let cached_content = content_cache.and_then(|cache| {
             let uri = Url::from_file_path(file).ok()?;
-            cache.get(&uri.to_string()).map(|(_, c)| c.as_str())
+            cache.get(uri.as_str()).map(|(_, c)| c.as_str())
         });
 
         if let Some(content) = cached_content {
@@ -1175,7 +1175,7 @@ pub fn build_parse_only_json_input(
 pub async fn solc_project_index(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
 ) -> Result<Value, RunnerError> {
     // Resolve remappings first — needed for import tracing.
     let remappings = resolve_remappings(config).await;
@@ -1201,7 +1201,7 @@ pub async fn solc_project_index(
 pub async fn solc_project_index_scoped(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
     source_files: &[PathBuf],
 ) -> Result<Value, RunnerError> {
     if source_files.is_empty() {
@@ -1368,7 +1368,7 @@ fn merge_normalized_outputs(base: &mut Value, other: Value) {
 async fn solc_project_index_from_files(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
     source_files: &[PathBuf],
 ) -> Result<Value, RunnerError> {
     if source_files.is_empty() {

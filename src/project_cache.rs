@@ -1,7 +1,7 @@
 use crate::config::FoundryConfig;
 use crate::config::ProjectIndexCacheMode;
 use crate::goto::{CachedBuild, NodeInfo};
-use crate::types::NodeId;
+use crate::types::{AbsPath, NodeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -25,7 +25,7 @@ struct PersistedNodeEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedExternalRef {
-    src: String,
+    src: crate::types::SrcLocation,
     decl_id: i64,
 }
 
@@ -44,7 +44,7 @@ struct PersistedReferenceCacheV2 {
     #[serde(default)]
     file_hash_history: BTreeMap<String, Vec<String>>,
     path_to_abs: HashMap<String, String>,
-    id_to_path_map: HashMap<String, String>,
+    id_to_path_map: HashMap<crate::types::SolcFileId, String>,
     external_refs: Vec<PersistedExternalRef>,
     // relative-path -> shard file name
     node_shards: BTreeMap<String, String>,
@@ -298,7 +298,7 @@ pub fn upsert_reference_cache_v2_with_report(
         if !changed_set.contains(abs_path.as_str()) {
             continue;
         }
-        let abs = Path::new(abs_path);
+        let abs = Path::new(abs_path.as_str());
         let rel = relative_to_root(&config.root, abs);
         let shard_name = shard_file_name_for_rel_path(&rel);
         let shard_path = shards_dir.join(&shard_name);
@@ -311,7 +311,7 @@ pub fn upsert_reference_cache_v2_with_report(
             });
         }
         let shard = PersistedFileShardV2 {
-            abs_path: abs_path.clone(),
+            abs_path: abs_path.to_string(),
             entries,
         };
         let shard_payload =
@@ -329,7 +329,11 @@ pub fn upsert_reference_cache_v2_with_report(
     // Serialize global metadata from the authoritative merged build.
     // This replaces the buggy per-file merge that previously wrote
     // un-remapped file IDs and identity path_to_abs entries.
-    meta.path_to_abs = build.path_to_abs.clone();
+    meta.path_to_abs = build
+        .path_to_abs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_string()))
+        .collect();
     meta.id_to_path_map = build.id_to_path_map.clone();
     meta.external_refs = build
         .external_refs
@@ -365,7 +369,11 @@ pub fn save_reference_cache_with_report(
     let file_hashes = if let Some(files) = source_files {
         hash_file_list(config, files)?
     } else {
-        let build_paths: Vec<PathBuf> = build.nodes.keys().map(PathBuf::from).collect();
+        let build_paths: Vec<PathBuf> = build
+            .nodes
+            .keys()
+            .map(|p| PathBuf::from(p.as_str()))
+            .collect();
         if build_paths.is_empty() {
             current_file_hashes(config, true)?
         } else {
@@ -387,7 +395,7 @@ pub fn save_reference_cache_with_report(
     let mut node_shards: BTreeMap<String, String> = BTreeMap::new();
     let mut live_shards = std::collections::HashSet::new();
     for (abs_path, file_nodes) in &build.nodes {
-        let abs = Path::new(abs_path);
+        let abs = Path::new(abs_path.as_str());
         let rel = relative_to_root(&config.root, abs);
         let shard_name = shard_file_name_for_rel_path(&rel);
         let shard_path = shards_dir.join(&shard_name);
@@ -400,7 +408,7 @@ pub fn save_reference_cache_with_report(
             });
         }
         let shard = PersistedFileShardV2 {
-            abs_path: abs_path.clone(),
+            abs_path: abs_path.to_string(),
             entries,
         };
         let shard_payload =
@@ -432,7 +440,11 @@ pub fn save_reference_cache_with_report(
             }
             h
         },
-        path_to_abs: build.path_to_abs.clone(),
+        path_to_abs: build
+            .path_to_abs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect(),
         external_refs: external_refs.clone(),
         id_to_path_map: build.id_to_path_map.clone(),
         node_shards,
@@ -537,7 +549,7 @@ pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
     }
 
     let shards_dir = sub_root.join(CACHE_DIR).join(CACHE_SHARDS_DIR_V2);
-    let mut nodes: HashMap<String, HashMap<NodeId, NodeInfo>> = HashMap::new();
+    let mut nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>> = HashMap::new();
     let mut reused_decl_ids = std::collections::HashSet::new();
 
     for (_rel_path, shard_name) in &persisted.node_shards {
@@ -555,7 +567,7 @@ pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
             reused_decl_ids.insert(entry.id);
             file_nodes.insert(NodeId(entry.id), entry.info);
         }
-        nodes.insert(shard.abs_path, file_nodes);
+        nodes.insert(AbsPath::new(shard.abs_path), file_nodes);
     }
 
     if nodes.is_empty() {
@@ -571,7 +583,11 @@ pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
 
     Some(CachedBuild::from_reference_index(
         nodes,
-        persisted.path_to_abs,
+        persisted
+            .path_to_abs
+            .into_iter()
+            .map(|(k, v)| (k, AbsPath::new(v)))
+            .collect(),
         external_refs,
         persisted.id_to_path_map,
         0,
@@ -716,7 +732,7 @@ pub fn load_reference_cache_with_report(
         let file_count_hashed = current_hashes.len();
 
         let shards_dir = cache_shards_dir_v2(&config.root);
-        let mut nodes: HashMap<String, HashMap<NodeId, NodeInfo>> = HashMap::new();
+        let mut nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>> = HashMap::new();
         let mut file_count_reused = 0usize;
         let mut reused_decl_ids = std::collections::HashSet::new();
 
@@ -744,7 +760,7 @@ pub fn load_reference_cache_with_report(
                 reused_decl_ids.insert(entry.id);
                 file_nodes.insert(NodeId(entry.id), entry.info);
             }
-            nodes.insert(shard.abs_path, file_nodes);
+            nodes.insert(AbsPath::new(shard.abs_path), file_nodes);
             file_count_reused += 1;
         }
 
@@ -770,7 +786,11 @@ pub fn load_reference_cache_with_report(
         return CacheLoadReport {
             build: Some(CachedBuild::from_reference_index(
                 nodes,
-                persisted.path_to_abs,
+                persisted
+                    .path_to_abs
+                    .into_iter()
+                    .map(|(k, v)| (k, AbsPath::new(v)))
+                    .collect(),
                 external_refs,
                 persisted.id_to_path_map,
                 0,

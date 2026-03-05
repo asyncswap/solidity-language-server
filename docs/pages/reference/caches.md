@@ -17,32 +17,32 @@ All in-memory caches are fields on `ForgeLsp` in `src/lsp.rs`.
 
 ### `ast_cache` — the primary index
 
-`Arc<RwLock<HashMap<String, Arc<CachedBuild>>>>`
+`Arc<RwLock<HashMap<DocumentUri, Arc<CachedBuild>>>>`
 
 The central store. Two kinds of entries coexist using the same map:
 
-- **Per-file entries** — key is the file URI string (e.g. `file:///…/A.sol`). Created by `on_change()` after each successful single-file build.
-- **Project-level entry** — key is `project_cache_key()` (the workspace root URI). Created by the background project-index worker. Used for cross-file features (references, rename, goto across files).
+- **Per-file entries** — key is `DocumentUri("file:///…/A.sol")`. Created by `on_change()` after each successful single-file build.
+- **Project-level entry** — key is `DocumentUri(project_cache_key())` (the workspace root URI). Created by the background project-index worker. Used for cross-file features (references, rename, goto across files).
 
 Entries are never evicted by age. They are removed explicitly on `didDeleteFiles`, `solidity.clearCache`, `solidity.reindex`, and `initialized()` full-rebuild. A failed build leaves the previous entry intact.
 
 ### `text_cache`
 
-`Arc<RwLock<HashMap<String, (i32, String)>>>`
+`Arc<RwLock<HashMap<DocumentUri, (i32, String)>>>`
 
-Key = URI string. Value = `(version, content)`. Stores the live editor buffer text. Updated on `didOpen`, `didChange`, `didSave`. All LSP handlers read from here so they see unsaved edits without a disk read. Version guard: only updates when `incoming_version >= stored_version` to prevent older updates from overwriting newer ones.
+Key = `DocumentUri`. Value = `(version, content)`. Stores the live editor buffer text. Updated on `didOpen`, `didChange`, `didSave`. All LSP handlers read from here so they see unsaved edits without a disk read. Version guard: only updates when `incoming_version >= stored_version` to prevent older updates from overwriting newer ones.
 
 ### `completion_cache`
 
-`Arc<RwLock<HashMap<String, Arc<CompletionCache>>>>`
+`Arc<RwLock<HashMap<DocumentUri, Arc<CompletionCache>>>>`
 
-Key = URI string. Populated immediately after a successful build in `on_change()` by sharing the `Arc<CompletionCache>` that was already pre-built inside `CachedBuild::new()`. This is a convenience shortcut so the completion handler can access the completion index without locking the whole `ast_cache`. Evicted on `didDeleteFiles`.
+Key = `DocumentUri`. Populated immediately after a successful build in `on_change()` by sharing the `Arc<CompletionCache>` that was already pre-built inside `CachedBuild::new()`. This is a convenience shortcut so the completion handler can access the completion index without locking the whole `ast_cache`. Evicted on `didDeleteFiles`.
 
 ### `semantic_token_cache`
 
-`Arc<RwLock<HashMap<String, (String, Vec<SemanticToken>)>>>`
+`Arc<RwLock<HashMap<DocumentUri, (String, Vec<SemanticToken>)>>>`
 
-Key = URI string. Value = `(result_id, token_list)`. The `result_id` is a monotonically increasing string from `semantic_token_id: Arc<AtomicU64>`. Populated on `textDocument/semanticTokens/full`; used for delta computation on `textDocument/semanticTokens/full/delta`. Evicted on `didDeleteFiles`.
+Key = `DocumentUri`. Value = `(result_id, token_list)`. The `result_id` is a monotonically increasing string from `semantic_token_id: Arc<AtomicU64>`. Populated on `textDocument/semanticTokens/full`; used for delta computation on `textDocument/semanticTokens/full/delta`. Evicted on `didDeleteFiles`.
 
 ### Process-static: `INSTALLED_VERSIONS`
 
@@ -58,14 +58,14 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 
 | Field | Type | Built by | Purpose |
 |---|---|---|---|
-| `nodes` | `HashMap<String, HashMap<NodeId, NodeInfo>>` | `cache_ids()` in `goto.rs` | Two-level map: abs_path → node_id → `NodeInfo`. Core of goto-definition, references, rename. |
-| `path_to_abs` | `HashMap<String, String>` | `cache_ids()` | Maps solc-relative path → absolute path. Needed because solc outputs relative keys. |
-| `external_refs` | `HashMap<String, NodeId>` | `cache_ids()` | `"offset:length:fileId"` → declaration `NodeId` for Yul `externalReferences`. |
-| `id_to_path_map` | `HashMap<String, String>` | `CachedBuild::new()` | Integer source file id → relative path. Used to resolve `src` strings (`offset:length:fileId`). |
+| `nodes` | `HashMap<AbsPath, HashMap<NodeId, NodeInfo>>` | `cache_ids()` in `goto.rs` | Two-level map: abs_path → node_id → `NodeInfo`. `AbsPath` is a typed wrapper over path strings. Core of goto-definition, references, rename. |
+| `path_to_abs` | `HashMap<String, AbsPath>` | `cache_ids()` | Maps solc-relative path → absolute path. Needed because solc outputs relative keys. |
+| `external_refs` | `HashMap<SrcLocation, NodeId>` | `cache_ids()` | `SrcLocation("offset:length:fileId")` → declaration `NodeId` for Yul `externalReferences`. |
+| `id_to_path_map` | `HashMap<SolcFileId, String>` | `CachedBuild::new()` | Source file id → relative path. `SolcFileId` wraps the stringified solc id (`"0"`, `"34"`, …). |
 | `decl_index` | `HashMap<i64, DeclNode>` | `solc_ast::extract_decl_nodes()` | Typed declaration lookup: function, variable, contract, event, error, struct, enum, modifier, UDVT. Keyed by AST node id. |
 | `node_id_to_source_path` | `HashMap<i64, String>` | `solc_ast::extract_decl_nodes()` | O(1): declaration node id → source file absolute path. Avoids O(N) walk. |
 | `gas_index` | `HashMap<String, ContractGas>` | `gas::build_gas_index()` | Key `"path:ContractName"`. Creation costs and per-function gas by selector/signature. Used by hover and inlay hints. |
-| `hint_index` | `HashMap<String, HintLookup>` | `inlay_hints::build_hint_index()` | Keyed by abs path. Each `HintLookup` has by-offset and by-`(name, arg_count)` sub-indexes for resolving parameter names at call sites. |
+| `hint_index` | `HashMap<String, HintLookup>` | `inlay_hints::build_hint_index()` | Keyed by absolute path string. Each `HintLookup` has by-offset and by-`(name, arg_count)` sub-indexes for resolving parameter names at call sites. |
 | `doc_index` | `HashMap<DocKey, DocEntry>` | `hover::build_doc_index()` | Merged userdoc/devdoc. Keyed by 4-byte selector, 32-byte event topic, or `"path:Name"`. |
 | `completion_cache` | `Arc<CompletionCache>` | `completion::build_completion_cache()` | Full completion index (see below). Wrapped in `Arc` so it can be shared into `ForgeLsp.completion_cache` without cloning. |
 | `build_version` | `i32` | Set from LSP document version | The `didChange`/`didOpen` version that produced this build. Used to detect dirty files (`text_version > build_version`). |
@@ -73,7 +73,7 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 
 ### `NodeInfo` stored per-node
 
-- `src` — `"offset:length:fileId"` string
+- `src` — `SrcLocation` (`"offset:length:fileId"` string wrapper)
 - `name_location` — optional `nameLocation` src for declarations
 - `name_locations` — `Vec<String>` for `IdentifierPath`
 - `referenced_declaration` — optional declaration node id this node refers to
