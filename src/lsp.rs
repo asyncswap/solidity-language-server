@@ -165,7 +165,6 @@ fn spawn_load_lib_sub_caches_task(
 
         let mut loaded = Vec::new();
         for sub_root in &all_cached {
-            let load_start = std::time::Instant::now();
             let root = sub_root.clone();
             let build =
                 tokio::task::spawn_blocking(move || crate::project_cache::load_lib_cache(&root))
@@ -173,7 +172,6 @@ fn spawn_load_lib_sub_caches_task(
                     .ok()
                     .flatten();
             if let Some(build) = build {
-                let source_count = build.nodes.len();
                 // Register loaded paths in the project-wide interner so
                 // file IDs stay consistent when merging or replacing builds.
                 {
@@ -182,19 +180,6 @@ fn spawn_load_lib_sub_caches_task(
                         interner.intern(path);
                     }
                 }
-                let load_name = sub_root
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| sub_root.display().to_string());
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "sub-cache: {load_name} loaded (sources={source_count}, {:.0}ms)",
-                            load_start.elapsed().as_secs_f64() * 1000.0,
-                        ),
-                    )
-                    .await;
                 loaded.push(Arc::new(build));
             }
         }
@@ -223,6 +208,10 @@ fn spawn_load_lib_sub_caches_task(
 
 /// Spawn concurrent solc builds for a batch of sub-project roots, collect
 /// results, build `CachedBuild` for each, and persist to disk.
+///
+/// Concurrency is capped at the number of available CPU cores so that
+/// machines with fewer cores don't thrash from too many parallel solc
+/// processes.
 async fn spawn_and_collect_sub_cache_builds(
     roots: &[std::path::PathBuf],
     client: &Client,
@@ -231,6 +220,19 @@ async fn spawn_and_collect_sub_cache_builds(
     if roots.is_empty() {
         return;
     }
+    let max_parallel = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_parallel));
+    client
+        .log_message(
+            MessageType::INFO,
+            format!(
+                "sub-cache: building {} libs (max {max_parallel} parallel)",
+                roots.len()
+            ),
+        )
+        .await;
     let mut join_set = tokio::task::JoinSet::new();
     for sub_root in roots {
         let sub_name = sub_root
@@ -239,17 +241,11 @@ async fn spawn_and_collect_sub_cache_builds(
             .unwrap_or_else(|| sub_root.display().to_string());
         let sub_config =
             crate::config::load_foundry_config_from_toml(&sub_root.join("foundry.toml"));
-        let build_client = client.clone();
+        let sem = semaphore.clone();
         join_set.spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
             let sub_start = std::time::Instant::now();
-            build_client
-                .log_message(
-                    MessageType::INFO,
-                    format!("sub-cache: building {sub_name} ..."),
-                )
-                .await;
-            let result =
-                crate::solc::solc_project_index(&sub_config, Some(&build_client), None).await;
+            let result = crate::solc::solc_project_index_ast_only(&sub_config, None).await;
             let elapsed = sub_start.elapsed().as_secs_f64();
             (sub_name, sub_config, result, elapsed)
         });
@@ -284,14 +280,6 @@ async fn spawn_and_collect_sub_cache_builds(
                     )
                 })
                 .await;
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "sub-cache: {sub_name} built (sources={source_count}, {elapsed:.1}s)",
-                        ),
-                    )
-                    .await;
             }
             Err(e) => {
                 client
@@ -753,12 +741,6 @@ impl ForgeLsp {
                 );
                 match solc {
                     Ok(data) => {
-                        self.client
-                            .log_message(
-                                MessageType::INFO,
-                                "solc: AST + diagnostics from single run",
-                            )
-                            .await;
                         // Extract diagnostics from the same solc output
                         let content = tokio::fs::read_to_string(&file_path)
                             .await
@@ -794,12 +776,6 @@ impl ForgeLsp {
                     .await;
                 match solc_future.await {
                     Ok(data) => {
-                        self.client
-                            .log_message(
-                                MessageType::INFO,
-                                "solc: AST + diagnostics from single run",
-                            )
-                            .await;
                         let content = tokio::fs::read_to_string(&file_path)
                             .await
                             .unwrap_or_default();
@@ -883,9 +859,6 @@ impl ForgeLsp {
                         cached_build.completion_cache.clone(),
                     );
                 }
-                self.client
-                    .log_message(MessageType::INFO, "Build successful, AST cache updated")
-                    .await;
             } else if let Err(e) = ast_result {
                 self.client
                     .log_message(
@@ -964,12 +937,14 @@ impl ForgeLsp {
 
         match build_result {
             Ok(mut builds) => {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("found {} build diagnostics", builds.len()),
-                    )
-                    .await;
+                if !builds.is_empty() {
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("found {} build diagnostics", builds.len()),
+                        )
+                        .await;
+                }
                 all_diagnostics.append(&mut builds);
             }
             Err(e) => {
@@ -2604,12 +2579,6 @@ impl LanguageServer for ForgeLsp {
                             interner.intern(path_str);
                         }
                     }
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("path interner: pre-registered {} file IDs", interner.len()),
-                        )
-                        .await;
                 }
 
                 // Try persisted reference index first (fast warm start).
@@ -2635,11 +2604,7 @@ impl LanguageServer for ForgeLsp {
                                 .log_message(
                                     MessageType::INFO,
                                     format!(
-                                         "project index (eager): cache load hit (sources={}, reused_files={}/{}, complete={}, duration={}ms)",
-                                        source_count,
-                                        report.file_count_reused,
-                                        report.file_count_hashed,
-                                        report.complete,
+                                        "loaded {source_count} sources from cache ({}ms)",
                                         report.duration_ms
                                     ),
                                 )
@@ -2674,24 +2639,13 @@ impl LanguageServer for ForgeLsp {
                         client
                             .log_message(
                                 MessageType::INFO,
-                                format!(
-                                    "project index (eager): cache load miss/partial (reason={}, reused_files={}/{}, duration={}ms)",
-                                    report
-                                        .miss_reason
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    report.file_count_reused,
-                                    report.file_count_hashed,
-                                    report.duration_ms
-                                ),
+                                "no cached index found, building from source",
                             )
                             .await;
                     }
                     Err(e) => {
                         client
-                            .log_message(
-                                MessageType::WARNING,
-                                format!("project index (eager): cache load task failed: {e}"),
-                            )
+                            .log_message(MessageType::WARNING, format!("cache load failed: {e}"))
                             .await;
                     }
                 }
@@ -2732,15 +2686,6 @@ impl LanguageServer for ForgeLsp {
 
                 let src_count = src_files.len();
                 let full_count = full_files.len();
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "project index: src-closure={} files, full-closure={} files",
-                            src_count, full_count,
-                        ),
-                    )
-                    .await;
 
                 // ── Phase 1: src-only compile ──
                 let phase1_start = std::time::Instant::now();
@@ -2919,17 +2864,7 @@ impl LanguageServer for ForgeLsp {
                                 })
                                 .await;
                                 match res {
-                                    Ok(Ok(report)) => {
-                                        client_for_save
-                                            .log_message(
-                                                MessageType::INFO,
-                                                format!(
-                                                    "project index: cache saved (files={}, duration={}ms)",
-                                                    report.file_count_hashed, report.duration_ms
-                                                ),
-                                            )
-                                            .await;
-                                    }
+                                    Ok(Ok(_report)) => {}
                                     Ok(Err(e)) => {
                                         client_for_save
                                             .log_message(

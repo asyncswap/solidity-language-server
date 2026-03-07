@@ -71,10 +71,7 @@ pub async fn resolve_solc_binary(
             if let Some(c) = client {
                 c.log_message(
                     tower_lsp::lsp_types::MessageType::INFO,
-                    format!(
-                        "solc: foundry.toml {config_ver} satisfies pragma {constraint:?} → {}",
-                        path.display()
-                    ),
+                    format!("using solc {config_ver} (pragma {constraint})"),
                 )
                 .await;
             }
@@ -238,6 +235,17 @@ pub enum PragmaConstraint {
     Gte(SemVer),
     /// `>=0.6.2 <0.9.0` — range
     Range(SemVer, SemVer),
+}
+
+impl std::fmt::Display for PragmaConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PragmaConstraint::Exact(v) => write!(f, "={v}"),
+            PragmaConstraint::Caret(v) => write!(f, "^{v}"),
+            PragmaConstraint::Gte(v) => write!(f, ">={v}"),
+            PragmaConstraint::Range(lo, hi) => write!(f, ">={lo} <{hi}"),
+        }
+    }
 }
 
 /// Resolve a Solidity import path to an absolute filesystem path.
@@ -1183,6 +1191,45 @@ pub fn build_batch_standard_json_input_with_cache(
     })
 }
 
+/// Build an AST-only batch standard-json input for sub-cache builds.
+///
+/// Unlike the full batch input, this omits all codegen-affecting settings
+/// (`viaIR`, `evmVersion`, optimizer) and only requests the AST — no
+/// `devdoc`, `userdoc`, or `evm.methodIdentifiers`.  This is significantly
+/// faster because solc skips type-checking contract outputs and codegen.
+///
+/// Sub-caches only need the AST for cross-file reference lookup (node IDs,
+/// `referencedDeclaration`, source locations).
+pub fn build_batch_standard_json_input_ast_only(
+    source_files: &[PathBuf],
+    remappings: &[String],
+    root: &Path,
+) -> Value {
+    let settings = json!({
+        "remappings": remappings,
+        "outputSelection": {
+            "*": {
+                "": ["ast"]
+            }
+        }
+    });
+
+    let mut sources = serde_json::Map::new();
+    for file in source_files {
+        let rel_path = file
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.to_string_lossy().into_owned());
+        sources.insert(rel_path.clone(), json!({ "urls": [rel_path] }));
+    }
+
+    json!({
+        "language": "Solidity",
+        "sources": sources,
+        "settings": settings
+    })
+}
+
 /// Build a parse-only standard-json input (``stopAfter: "parsing"``).
 ///
 /// Unlike the full batch input this mode stops before import resolution and
@@ -1259,6 +1306,145 @@ pub async fn solc_project_index(
     }
 
     solc_project_index_from_files(config, client, text_cache, &source_files).await
+}
+
+/// AST-only project index for sub-cache builds.
+///
+/// Identical to [`solc_project_index`] but requests only AST output —
+/// no `devdoc`, `userdoc`, or `evm.methodIdentifiers`.  Also omits
+/// `viaIR`, `evmVersion`, and optimizer settings since they only affect
+/// codegen (which is skipped when no contract outputs are requested).
+///
+/// This is significantly faster because solc skips all codegen work.
+/// "Stack too deep" errors cannot occur in AST-only mode.
+pub async fn solc_project_index_ast_only(
+    config: &FoundryConfig,
+    client: Option<&tower_lsp::Client>,
+) -> Result<Value, RunnerError> {
+    let remappings = resolve_remappings(config).await;
+    let source_files = discover_compilation_closure(config, &remappings);
+    if source_files.is_empty() {
+        return Err(RunnerError::CommandError(std::io::Error::other(
+            "no source files found for project index",
+        )));
+    }
+    solc_project_index_from_files_ast_only(config, client, &source_files).await
+}
+
+/// AST-only compile over a list of source files.
+///
+/// Like [`solc_project_index_from_files`] but uses
+/// [`build_batch_standard_json_input_ast_only`] — no codegen settings,
+/// no contract outputs.
+async fn solc_project_index_from_files_ast_only(
+    config: &FoundryConfig,
+    client: Option<&tower_lsp::Client>,
+    source_files: &[PathBuf],
+) -> Result<Value, RunnerError> {
+    if source_files.is_empty() {
+        return Err(RunnerError::CommandError(std::io::Error::other(
+            "no source files found for AST-only project index",
+        )));
+    }
+
+    let remappings = resolve_remappings(config).await;
+
+    let project_version: Option<SemVer> =
+        config.solc_version.as_ref().and_then(|v| SemVer::parse(v));
+    let constraint: Option<PragmaConstraint> = if let Some(ref v) = project_version {
+        Some(PragmaConstraint::Exact(v.clone()))
+    } else {
+        source_files.iter().find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|src| parse_pragma(&src))
+        })
+    };
+    let solc_binary = resolve_solc_binary(config, constraint.as_ref(), client).await;
+
+    // Pre-scan pragmas to separate compatible vs incompatible files.
+    let (compatible_files, incompatible_files) = if let Some(ref ver) = project_version {
+        let mut compat = Vec::with_capacity(source_files.len());
+        let mut incompat = Vec::new();
+        for file in source_files {
+            let is_compatible = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|src| parse_pragma(&src))
+                .map(|pragma| version_satisfies(ver, &pragma))
+                .unwrap_or(true);
+            if is_compatible {
+                compat.push(file.clone());
+            } else {
+                incompat.push(file.clone());
+            }
+        }
+        (compat, incompat)
+    } else {
+        (source_files.to_vec(), Vec::new())
+    };
+
+    if !incompatible_files.is_empty() {
+        if let Some(c) = client {
+            c.log_message(
+                tower_lsp::lsp_types::MessageType::INFO,
+                format!(
+                    "project index: {} compatible, {} incompatible with solc {}",
+                    compatible_files.len(),
+                    incompatible_files.len(),
+                    project_version
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                ),
+            )
+            .await;
+        }
+    }
+
+    let mut result = if compatible_files.is_empty() {
+        json!({"sources": {}, "contracts": {}, "errors": [], "source_id_to_path": {}})
+    } else {
+        let input =
+            build_batch_standard_json_input_ast_only(&compatible_files, &remappings, &config.root);
+        let raw = run_solc(&solc_binary, &input, &config.root).await?;
+        normalize_solc_output(raw, Some(&config.root))
+    };
+
+    if incompatible_files.is_empty() {
+        return Ok(result);
+    }
+
+    // Compile incompatible files individually with their own solc versions.
+    for file in &incompatible_files {
+        let pragma = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|src| parse_pragma(&src));
+        let file_binary = resolve_solc_binary(config, pragma.as_ref(), client).await;
+        let input =
+            build_batch_standard_json_input_ast_only(&[file.clone()], &remappings, &config.root);
+        if let Ok(raw) = run_solc(&file_binary, &input, &config.root).await {
+            let normalized = normalize_solc_output(raw, Some(&config.root));
+            merge_normalized_outputs(&mut result, normalized);
+        }
+    }
+
+    if let Some(c) = client {
+        let total = result
+            .get("sources")
+            .and_then(|s| s.as_object())
+            .map_or(0, |obj| obj.len());
+        c.log_message(
+            tower_lsp::lsp_types::MessageType::INFO,
+            format!(
+                "project index: compiled {} files ({} needed different solc version)",
+                total,
+                incompatible_files.len(),
+            ),
+        )
+        .await;
+    }
+
+    Ok(result)
 }
 
 /// Run a scoped project-index compile over a selected file list.
@@ -1445,17 +1631,6 @@ async fn solc_project_index_from_files(
         )));
     }
 
-    if let Some(c) = client {
-        c.log_message(
-            tower_lsp::lsp_types::MessageType::INFO,
-            format!(
-                "project index: discovered {} source files",
-                source_files.len()
-            ),
-        )
-        .await;
-    }
-
     let remappings = resolve_remappings(config).await;
 
     // Resolve the project's solc version from foundry.toml.
@@ -1546,16 +1721,6 @@ async fn solc_project_index_from_files(
         .map_or(0, |obj| obj.len());
 
     if incompatible_files.is_empty() {
-        if let Some(c) = client {
-            c.log_message(
-                tower_lsp::lsp_types::MessageType::INFO,
-                format!(
-                    "project index: compiled {} files with no version mismatches",
-                    source_files.len(),
-                ),
-            )
-            .await;
-        }
         return Ok(result);
     }
 
