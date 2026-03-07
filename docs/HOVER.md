@@ -511,15 +511,14 @@ struct PoolKey {
 }
 ```
 
-### Free functions have no gas estimates or devdoc
+### Free functions have no devdoc
 
 Free functions (defined at file level, outside any contract/library) exist in the AST but produce no `contracts` entry in solc output. This means:
 
-- **No gas estimates** — solc only generates gas estimates for contract/library members
 - **No devdoc/userdoc** — these are per-contract, so free functions get none
 - **No ABI or method identifiers**
 
-Hover still works for free functions via the raw AST `documentation.text` fallback (Path B), but gas info and structured doc formatting are unavailable.
+Hover still works for free functions via the raw AST `documentation.text` fallback (Path B), but structured doc formatting is unavailable.
 
 **Example:** `src/math/twamm.sol` in EkuboProtocol defines 7 free functions (`computeSaleRate`, `addSaleRateDelta`, etc.). Solc returns `contracts` output only for imported libraries (e.g. `FixedPointMathLib`), not for the free functions themselves.
 
@@ -532,7 +531,7 @@ cat solc-output.json | jq '.contracts["src/math/twamm.sol"]'
 ## Performance
 
 - Uses `ast_cache` (Arc-based) — no forge calls on hover
-- `DocIndex` and `GasIndex` are built once at `CachedBuild::new()` time
+- `DocIndex` is built once at `CachedBuild::new()` time
 - `find_node_by_id` walks the AST once per hover request
 - `lookup_doc_entry` is a HashMap lookup by selector — O(1)
 - `lookup_param_doc` does one `find_node_by_id` for the parent + one `lookup_doc_entry`
@@ -544,7 +543,6 @@ cat solc-output.json | jq '.contracts["src/math/twamm.sol"]'
 |------|---------|
 | `src/hover.rs` | `hover_info()`, `find_node_by_id()`, `extract_documentation()`, `extract_selector()`, `resolve_inheritdoc()`, `format_natspec()`, `build_function_signature()`, `build_doc_index()`, `lookup_doc_entry()`, `lookup_param_doc()`, `format_doc_entry()`, `compute_selector()`, `compute_event_topic()` |
 | `src/types.rs` | `FuncSelector`, `EventSelector`, `Selector`, `MethodId` |
-| `src/gas.rs` | `ContractGas` (uses `FuncSelector` and `MethodId`), `gas_by_selector()` |
 | `src/goto.rs` | `CachedBuild` — stores `doc_index` field |
 | `src/lsp.rs` | `hover` handler, passes `doc_index` to `hover_info()` |
 | `src/completion.rs` | Uses `FuncSelector::to_prefixed()` for selector display |

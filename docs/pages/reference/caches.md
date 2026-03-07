@@ -77,7 +77,6 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 | `id_to_path_map` | `HashMap<SolcFileId, String>` | `CachedBuild::new()` | Source file id → relative path. `SolcFileId` wraps the stringified solc id (`"0"`, `"34"`, …). |
 | `decl_index` | `HashMap<NodeId, DeclNode>` | `solc_ast::extract_decl_nodes()` | Typed declaration lookup: function, variable, contract, event, error, struct, enum, modifier, UDVT. Keyed by `NodeId`. |
 | `node_id_to_source_path` | `HashMap<NodeId, AbsPath>` | `solc_ast::extract_decl_nodes()` | O(1): declaration node id → source file absolute path. Avoids O(N) walk. |
-| `gas_index` | `HashMap<GasKey, ContractGas>` | `gas::build_gas_index()` | Key `GasKey("path:ContractName")`. Creation costs and per-function gas by selector/signature. Used by hover and inlay hints. |
 | `hint_index` | `HashMap<AbsPath, HintLookup>` | `inlay_hints::build_hint_index()` | Keyed by `AbsPath`. Each `HintLookup` has by-offset and by-`(name, arg_count)` sub-indexes for resolving parameter names at call sites. |
 | `doc_index` | `HashMap<DocKey, DocEntry>` | `hover::build_doc_index()` | Merged userdoc/devdoc. Keyed by 4-byte selector, 32-byte event topic, or `"path:Name"`. |
 | `completion_cache` | `Arc<CompletionCache>` | `completion::build_completion_cache()` | Full completion index (see below). Wrapped in `Arc` so it can be shared into `ForgeLsp.completion_cache` without cloning. |
@@ -98,9 +97,9 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 
 ### Warm-loaded cache limitation
 
-When a `CachedBuild` is reconstructed from the on-disk v2 cache via `from_reference_index()`, only `nodes`, `path_to_abs`, `external_refs`, `id_to_path_map`, and `qualifier_refs` are populated. `decl_index`, `gas_index`, `hint_index`, `doc_index`, and `completion_cache` are all empty.
+When a `CachedBuild` is reconstructed from the on-disk v2 cache via `from_reference_index()`, only `nodes`, `path_to_abs`, `external_refs`, `id_to_path_map`, and `qualifier_refs` are populated. `decl_index`, `hint_index`, `doc_index`, and `completion_cache` are all empty.
 
-This means after a warm-load, only cross-file goto-definition and references work immediately. Hover docs, parameter inlay hints, gas estimates, and completions are not available until the first full `solc_project_index()` run completes. This is logged at startup and is by design: the warm-load prioritizes low latency for navigation features.
+This means after a warm-load, only cross-file goto-definition and references work immediately. Hover docs, parameter inlay hints, and completions are not available until the first full `solc_project_index()` run completes. This is logged at startup and is by design: the warm-load prioritizes low latency for navigation features.
 
 ---
 
@@ -224,7 +223,7 @@ flowchart TD
   D --> O["CachedBuild::new() + save to disk"]
 ```
 
-The warm-load `CachedBuild` (from `from_reference_index()`) has only navigation data. After the scoped or full recompile, `decl_index`, `hint_index`, `gas_index`, `doc_index`, and `completion_cache` become available.
+The warm-load `CachedBuild` (from `from_reference_index()`) has only navigation data. After the scoped or full recompile, `decl_index`, `hint_index`, `doc_index`, and `completion_cache` become available.
 
 ---
 
@@ -330,6 +329,5 @@ See the setup schema in [Setup Overview](/setup).
 | `src/completion.rs` | `CompletionCache`, `build_completion_cache()` |
 | `src/inlay_hints.rs` | `HintIndex`, `HintLookup`, `build_hint_index()` |
 | `src/hover.rs` | `DocIndex`, `DocEntry`, `build_doc_index()` |
-| `src/gas.rs` | `GasIndex`, `ContractGas`, `build_gas_index()` |
 | `src/types.rs` | `PathInterner`, `NodeId`, `FileId`, `SrcLocation`, `AbsPath`, `RelPath` newtypes |
 | `src/solc.rs` | `INSTALLED_VERSIONS` static cache; `solc_ast()`, `solc_project_index()` |

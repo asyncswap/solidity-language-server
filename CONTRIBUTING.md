@@ -27,7 +27,6 @@ src/
 ├── completion.rs        # Completion engine, chain resolution, using-for
 ├── file_operations.rs   # willCreate/willRename/willDelete file ops
 ├── folding.rs           # textDocument/foldingRange
-├── gas.rs               # gas estimate hint extraction
 ├── goto.rs              # goto-definition, goto-declaration, AST node caching
 ├── highlight.rs         # textDocument/documentHighlight
 ├── hover.rs             # textDocument/hover, NatSpec, selectors, @inheritdoc

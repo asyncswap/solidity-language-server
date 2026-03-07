@@ -24,8 +24,7 @@ Hover needs to work for multiple cases with one response:
 - declaration hover (signature + docs),
 - parameter hover (show matching `@param` text),
 - argument-at-callsite hover (show docs for the parameter at that call position),
-- Yul-linked declarations,
-- optional gas estimate display.
+- Yul-linked declarations.
 
 A single source is not enough for all of these. The implementation combines typed AST declarations (`decl_index`), doc metadata (`doc_index`), and call-site mapping (`hint_index`).
 
@@ -110,20 +109,6 @@ Hover also adds parameter doc when the cursor is on an argument at a call site:
 
 This allows hover to show meaningful parameter descriptions directly at usage sites.
 
-## Gas estimates in hover
-
-Gas text is added only when all conditions are true:
-
-- gas index is non-empty,
-- hovered declaration matches function/contract gas lookup,
-- source includes the gas sentinel comment near the declaration region.
-
-The sentinel is a substring match on `"lsp-enable gas-estimates"` (`GAS_SENTINEL` in `src/gas.rs`). Two forms both work:
-- `/// @custom:lsp-enable gas-estimates` — canonical NatSpec-compliant form (recommended)
-- `/// lsp-enable gas-estimates` — shorter form, also matched
-
-This is intentional to keep hover lightweight unless explicitly enabled.
-
 ## Output shape
 
 Hover markdown is assembled from parts in this order:
@@ -131,7 +116,6 @@ Hover markdown is assembled from parts in this order:
 - Signature block (or type fallback).
 - Selector line when available.
 - NodeId line for debugging (always shown).
-- Optional gas section when enabled and resolvable.
 - Documentation section from doc index or NatSpec fallback.
 - Optional call-site `@param` detail when applicable.
 

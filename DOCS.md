@@ -40,9 +40,6 @@ return {
       inlayHints = {
         -- Show parameter name hints on function/event/struct calls.
         parameters = true,
-        -- Show gas cost hints on functions annotated with
-        -- `/// @custom:lsp-enable gas-estimates`.
-        gasEstimates = true,
       },
       lint = {
         -- Master toggle for forge lint diagnostics.
@@ -127,9 +124,6 @@ return {
       inlayHints = {
         -- Show parameter name hints on function/event/struct calls.
         parameters = true,
-        -- Show gas cost hints on functions annotated with
-        -- `/// @custom:lsp-enable gas-estimates`.
-        gasEstimates = true,
       },
       lint = {
         -- Master toggle for forge lint diagnostics.
@@ -177,7 +171,6 @@ return {
 # languages.toml
 [language-server.solidity-language-server.config]
 inlayHints.parameters = true
-inlayHints.gasEstimates = true
 lint.enabled = true
 lint.severity = ["high", "med"]
 lint.exclude = ["pascal-case-struct"]
@@ -194,7 +187,6 @@ projectIndex.incrementalEditReindex = false
 ```json
 {
   "solidity-language-server.inlayHints.parameters": true,
-  "solidity-language-server.inlayHints.gasEstimates": true,
   "solidity-language-server.lint.enabled": true,
   "solidity-language-server.lint.severity": ["high", "med"],
   "solidity-language-server.lint.only": [],
@@ -219,8 +211,7 @@ projectIndex.incrementalEditReindex = false
       },
       "settings": {
         "inlayHints": {
-          "parameters": true,
-          "gasEstimates": true
+          "parameters": true
         },
         "lint": {
           "enabled": true,

@@ -10,7 +10,7 @@
 - **Formatting** — via `forge fmt`
 - **Diagnostics** — from `solc` and `forge lint`
 - **Signature Help** — parameter info on function calls, event emits, and mapping access
-- **Inlay Hints** — parameter names and gas estimates
+- **Inlay Hints** — parameter names at call sites
 - **File Operations** — `workspace/willCreateFiles` scaffolding + `workspace/willRenameFiles`/`workspace/willDeleteFiles` import edits + `workspace/didCreateFiles`/`workspace/didRenameFiles`/`workspace/didDeleteFiles` cache migration/re-index (`fileOperations.templateOnCreate`, `fileOperations.updateImportsOnRename`, `fileOperations.updateImportsOnDelete`)
 - **Code Actions** — `textDocument/codeAction` quickfix engine; handles `unused-import` forge-lint diagnostic with "Remove unused import" action; JSON-driven rule table in `data/error_codes.json`
 - **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + in-memory AST, force clean rebuild) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
@@ -64,7 +64,7 @@ See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
 - [ ] `textDocument/onTypeFormatting` - On-type formatting
 - [x] `textDocument/foldingRange` - Folding ranges (contracts, functions, structs, enums, blocks, comments, imports)
 - [x] `textDocument/selectionRange` - Selection ranges
-- [x] `textDocument/inlayHint` - Inlay hints (parameter names, gas estimates)
+- [x] `textDocument/inlayHint` - Inlay hints (parameter names)
 - [x] `textDocument/semanticTokens` - Semantic tokens
 - [x] `textDocument/semanticTokens/full` - Full semantic tokens
 - [x] `textDocument/semanticTokens/range` - Range semantic tokens

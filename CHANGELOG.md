@@ -11,16 +11,31 @@
 - `CachedBuild` gains `qualifier_refs` field (`HashMap<NodeId, Vec<NodeId>>`) — maps container declaration IDs to `IdentifierPath` node IDs used as qualifiers; built at cache time by `build_qualifier_refs()` and merged across builds via `merge_missing_from()` (#187)
 - `NodeInfo` gains `scope` field — the containing declaration's node ID from the AST `scope` property; used to resolve qualified type path containers (#187)
 - `dedup_locations()` removes both exact and contained-range duplicates from reference results, preventing qualified type paths from producing duplicate entries (#187)
+- Two-phase project index — phase 1 compiles src-closure for fast time-to-first-reference, phase 2 compiles full closure (src + test + script) in background (#189)
+- Parallel sub-cache compilation — library sub-projects now build concurrently via `JoinSet` instead of sequentially; Asyncswap benchmark: 53.5s to 15.8s (3.4x speedup) (#190)
+- `solidity/subCachesLoaded` progress token — emitted when all library sub-caches are built and loaded, allowing benchmarks and editors to detect full pipeline completion (#190)
+
+### Performance
+
+- Remove `evm.gasEstimates` from solc output selection — gas estimation consumed 88% of compile time (SmarDex 510-file project: 56s to 6s). Removed `gas.rs`, `GasKey`, `gas_index`, gas inlay hints, gas hover, and `gasEstimates` setting (#189, #190)
 
 ### Fixes
 
 - Fix stale-offset duplicate references after editing — "Find All References" no longer produces bogus duplicates (e.g. 734 instead of 729 results) when the project cache has stale byte offsets for the current file; `goto_references_for_target()` now excludes the current file from the project-cache scan since the fresh file-level build already covers it (#185)
 - `CompletionCache` file IDs are now canonicalized through the `PathInterner` remap, preventing scope-range mismatches across compilations (#185)
 - Removed dead `remap_src_file_id` and `remap_node_info_file_ids` functions; simplified `merge_scoped_cached_build()` by removing ~50 lines of `id_remap` machinery (#185)
+- Sub-cache loading flag was never reset to `false` after completion — now correctly cleared (#190)
 
 ### Tests
 
-- 450 total tests (318 unit + 132 integration), 0 failures
+- 302 tests, 0 failures, 0 warnings
+
+### Benchmarks
+
+| Project | Files | Before | After | Speedup |
+|---|---|---|---|---|
+| SmarDex | 510 | ~56s | 14.1s | 4x |
+| Asyncswap | 108 + 1108 lib | ~57s | 21.1s | 2.7x |
 
 ## v0.1.29
 

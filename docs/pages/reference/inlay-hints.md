@@ -5,7 +5,6 @@
 This page documents the current inlay-hint implementation:
 
 - parameter hints for calls and emits,
-- gas hints for functions/contracts,
 - how live-buffer positions are kept accurate,
 - how settings filter hint kinds at request time.
 
@@ -38,7 +37,7 @@ In `src/lsp.rs::inlay_hint`:
 - Read source bytes for the requested URI.
 - Load the cached build snapshot.
 - Generate raw hints.
-- Filter parameter hints (`InlayHintKind::PARAMETER`) and gas hints (`InlayHintKind::TYPE`) based on settings.
+- Filter parameter hints (`InlayHintKind::PARAMETER`) based on settings.
 - Return hints, or `None` if empty.
 
 Inside `inlay_hints(...)`:
@@ -51,10 +50,8 @@ flowchart TD
   D --> E["walk call_expression / emit_statement in requested range"]
   E --> F["lookup callsite: by_offset then by_name(arg_count)"]
   F --> G["emit parameter hints at live argument positions"]
-  D --> H["collect gas hints from tree-sitter nodes (if gas index exists)"]
   G --> I["return raw hints"]
-  H --> I
-  I --> J["lsp.rs filters by settings (parameters / gas estimates)"]
+  I --> J["lsp.rs filters by settings (parameters)"]
 ```
 
 ## How callsite mapping is built
@@ -88,15 +85,6 @@ Special cases handled:
 - **named-arg struct constructors**: skipped (names are already visible at call site).
 - **stale offsets**: fallback to `(name, arg_count)` map.
 
-## Gas hint behavior
-
-Gas hints are generated inside `inlay_hints()` from tree-sitter node positions and gas index data. Generation is gated on:
-
-- gas index is non-empty,
-- source-level gas sentinel is present near the declaration (`/// @custom:lsp-enable gas-estimates` or the shorter `/// lsp-enable gas-estimates` — both match via substring on `GAS_SENTINEL = "lsp-enable gas-estimates"`).
-
-After generation, hints are **filtered in `lsp.rs`** at request time by `InlayHintKind`. Gas hints use `InlayHintKind::TYPE`; parameter hints use `InlayHintKind::PARAMETER`. The `settings.inlay_hints.gas_estimates` toggle is applied in this filter step — not during generation. This means `inlay_hints()` may produce gas hints that are suppressed before the response is returned.
-
 ## Refresh behavior
 
 Inlay hint refresh is triggered asynchronously (`tokio::spawn`) in two places:
@@ -119,8 +107,7 @@ This avoids blocking request/diagnostic flow while still asking the client to re
 - tree-sitter call/event/name extraction,
 - call argument indexing and byte-position mapping,
 - `new` expression handling,
-- `resolve_callsite_param` behavior (including skip and bounds),
-- gas sentinel detection helpers.
+- `resolve_callsite_param` behavior (including skip and bounds).
 
 This gives good confidence in the core extraction and lookup mechanics.
 
