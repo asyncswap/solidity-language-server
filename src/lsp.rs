@@ -916,12 +916,14 @@ impl ForgeLsp {
                             }
                         });
                     }
-                    self.client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("found {} lint diagnostics", lints.len()),
-                        )
-                        .await;
+                    if !lints.is_empty() {
+                        self.client
+                            .log_message(
+                                MessageType::INFO,
+                                format!("found {} lint diagnostics", lints.len()),
+                            )
+                            .await;
+                    }
                     all_diagnostics.append(&mut lints);
                 }
                 Err(e) => {
