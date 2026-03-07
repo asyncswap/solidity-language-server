@@ -35,7 +35,7 @@ With the LSP tool enabled, the AI agent can call:
 ### Example: hover
 
 ```sh
-opencode run "use the lsp tool to hover on src/Pool.sol at line 102 col 15"
+OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode run "use the lsp tool to hover on src/Pool.sol at line 102 col 15"
 ```
 
 The AI will invoke the LSP hover method and get back type signatures, NatSpec documentation, and function selectors from the Solidity language server.
@@ -43,7 +43,7 @@ The AI will invoke the LSP hover method and get back type signatures, NatSpec do
 ### Example: find references
 
 ```sh
-opencode run "use the lsp tool to find all references to the initialize function in src/PoolManager.sol"
+OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode run "use the lsp tool to find all references to the initialize function in src/PoolManager.sol"
 ```
 
 ## Configure
@@ -52,11 +52,7 @@ Add to your global config (`~/.config/opencode/opencode.json`) or project-level 
 
 :::code-group
 
-```jsonc [Minimal]
-// [!include ~/snippets/setup/opencode.jsonc]
-```
-
-```jsonc [With Server Settings]
+```jsonc [Default]
 {
   "$schema": "https://opencode.ai/config.json",
   "lsp": {
@@ -84,6 +80,10 @@ Add to your global config (`~/.config/opencode/opencode.json`) or project-level 
     }
   }
 }
+```
+
+```jsonc [Minimal]
+// [!include ~/snippets/setup/opencode.jsonc]
 ```
 
 :::
