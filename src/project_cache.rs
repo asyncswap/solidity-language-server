@@ -87,6 +87,22 @@ fn cache_solc_input_path(root: &Path) -> PathBuf {
     root.join(CACHE_DIR).join(CACHE_SOLC_INPUT_FILE)
 }
 
+/// Persist the last solc standard-JSON input to the cache directory so it can
+/// be inspected for debugging.
+pub fn save_last_solc_input(root: &Path, input: &Value) -> Result<(), String> {
+    let cache_root = root.join(CACHE_DIR);
+    fs::create_dir_all(&cache_root)
+        .map_err(|e| format!("failed to create cache dir {}: {e}", cache_root.display()))?;
+    let path = cache_solc_input_path(root);
+    let bytes = serde_json::to_vec_pretty(input)
+        .map_err(|e| format!("failed to serialize solc input: {e}"))?;
+    let mut file =
+        fs::File::create(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    Ok(())
+}
+
 fn ensure_cache_dir_layout(root: &Path) -> Result<(PathBuf, PathBuf), String> {
     let cache_root = root.join(CACHE_DIR);
     fs::create_dir_all(&cache_root)
