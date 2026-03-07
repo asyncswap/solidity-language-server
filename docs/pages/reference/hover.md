@@ -46,7 +46,7 @@ flowchart TD
   E --> F["build markdown parts"]
   F --> G["signature / type fallback"]
   F --> H["selector"]
-  F --> H2["node ID (always)"]
+  F --> H2["NodeId (always)"]
   F --> I["optional gas block (sentinel gated)"]
   F --> J["docs from doc_index or NatSpec fallback"]
   F --> K["call-site @param doc via hint_index"]
@@ -130,19 +130,19 @@ Hover markdown is assembled from parts in this order:
 
 - Signature block (or type fallback).
 - Selector line when available.
-- Node ID line for debugging (always shown).
+- NodeId line for debugging (always shown).
 - Optional gas section when enabled and resolvable.
 - Documentation section from doc index or NatSpec fallback.
 - Optional call-site `@param` detail when applicable.
 
 Parts are separated with blank lines for readability.
 
-## Node ID in hover
+## NodeId in hover
 
-Hover always includes a `Node:` line showing the AST node ID for debugging purposes. Two formats:
+Hover always includes a `NodeId:` line showing the AST node ID for debugging purposes. Two formats:
 
-- **Declaration hover:** ``Node: `<id>` `` — shows the node's own ID.
-- **Reference hover:** ``Node: `<ref_id>` -> `<decl_id>` `` — shows the reference node's ID and the declaration it points to (via `referencedDeclaration`).
+- **Declaration hover:** ``NodeId: `2941` `` — shows the node's own ID.
+- **Reference hover:** ``NodeId: `569` referencedDeclaration: `2941` `` — shows the cursor-hit node's ID and the declaration it resolves to.
 
 This is useful for debugging cross-file resolution, verifying that PathInterner canonical IDs are correct, and understanding which AST node the server resolved from a cursor position.
 

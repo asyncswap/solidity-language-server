@@ -1402,12 +1402,15 @@ pub fn hover_info(
         parts.push(format!("Selector: `{}`", selector.to_prefixed()));
     }
 
-    // Node ID for debugging: show both the cursor-hit node and the resolved
+    // Node ID for debugging: show the cursor-hit node and the resolved
     // declaration (if different, e.g. when hovering a reference).
     if node_id == decl_id {
-        parts.push(format!("Node: `{}`", decl_id.0));
+        parts.push(format!("NodeId: `{}`", decl_id.0));
     } else {
-        parts.push(format!("Node: `{}` -> `{}`", node_id.0, decl_id.0));
+        parts.push(format!(
+            "NodeId: `{}` referencedDeclaration: `{}`",
+            node_id.0, decl_id.0
+        ));
     }
 
     let di = &cached_build.decl_index;

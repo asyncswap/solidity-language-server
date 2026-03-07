@@ -7,7 +7,7 @@
 ### Features
 
 - Project-wide `PathInterner` for canonical file IDs — solc assigns file IDs sequentially based on input order, causing cross-compilation reference bugs; the interner assigns deterministic IDs so all builds share the same ID space (#185)
-- `textDocument/hover` — show AST node ID (``Node: `<id>` ``) in hover tooltips for debugging; references show ``Node: `<ref_id>` -> `<decl_id>` ``
+- `textDocument/hover` — show AST node ID (``NodeId: `<id>` ``) in hover tooltips for debugging; references show ``NodeId: `<id>` referencedDeclaration: `<decl_id>` ``
 
 ### Fixes
 
