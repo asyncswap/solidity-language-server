@@ -10,7 +10,7 @@ fn load_cached_build() -> CachedBuild {
     let raw: Value =
         serde_json::from_str(&fs::read_to_string("poolmanager.json").unwrap()).unwrap();
     let ast_data = solidity_language_server::solc::normalize_solc_output(raw, None);
-    CachedBuild::new(ast_data, 0)
+    CachedBuild::new(ast_data, 0, None)
 }
 
 /// Find the abs-path key that ends with the given suffix.

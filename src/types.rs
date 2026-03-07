@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Type wrapper for AST node IDs.
 ///
@@ -772,6 +773,110 @@ impl std::fmt::Display for MethodId {
     }
 }
 
+// ── Path interner ──────────────────────────────────────────────────────────
+//
+// Project-wide, append-only table that assigns canonical [`FileId`] values
+// from file paths.  Every [`CachedBuild`] translates solc's arbitrary
+// per-compilation file IDs into canonical IDs at construction time, so all
+// builds share the same ID space and merges never produce file-ID conflicts.
+
+/// Project-wide path interner.
+///
+/// Assigns deterministic [`FileId`] values based on file paths.  Once a
+/// path is interned it keeps its ID for the lifetime of the session.
+///
+/// The interner is append-only: new paths get monotonically increasing IDs
+/// and existing paths keep theirs.  This means canonical IDs are stable
+/// across compilations — a property that solc's own file IDs lack.
+///
+/// Lives on `ForgeLsp` behind `Arc<RwLock<PathInterner>>` so every
+/// `CachedBuild` (per-file or project-wide) can share it.
+#[derive(Debug, Clone)]
+pub struct PathInterner {
+    /// Canonical ID → file path.
+    paths: Vec<String>,
+    /// File path → canonical ID (reverse lookup).
+    path_to_id: HashMap<String, u64>,
+}
+
+impl PathInterner {
+    /// Create an empty interner.
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            path_to_id: HashMap::new(),
+        }
+    }
+
+    /// Get or assign a canonical [`FileId`] for `path`.
+    ///
+    /// If `path` was interned before, the same ID is returned.
+    /// Otherwise a new ID is allocated (one higher than the current max).
+    pub fn intern(&mut self, path: &str) -> FileId {
+        if let Some(&id) = self.path_to_id.get(path) {
+            return FileId(id);
+        }
+        let id = self.paths.len() as u64;
+        self.paths.push(path.to_owned());
+        self.path_to_id.insert(path.to_owned(), id);
+        FileId(id)
+    }
+
+    /// Look up the file path for a canonical ID.
+    pub fn resolve(&self, id: FileId) -> Option<&str> {
+        self.paths.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    /// Number of interned paths.
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// Whether the interner is empty.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Build a [`SolcFileId`]-keyed remap table that translates solc's
+    /// per-compilation file IDs into canonical IDs.
+    ///
+    /// `solc_id_to_path` is the `source_id_to_path` map from a single
+    /// solc invocation (e.g. `{ "0": "/abs/src/Foo.sol", "3": "/abs/lib/Bar.sol" }`).
+    ///
+    /// Returns a map from solc file ID → canonical [`FileId`] that can be
+    /// used to rewrite `src` strings during [`CachedBuild::new()`].
+    pub fn build_remap(
+        &mut self,
+        solc_id_to_path: &HashMap<SolcFileId, String>,
+    ) -> HashMap<u64, FileId> {
+        let mut remap = HashMap::with_capacity(solc_id_to_path.len());
+        for (solc_id, path) in solc_id_to_path {
+            let solc_num: u64 = solc_id.as_str().parse().unwrap_or(u64::MAX);
+            let canonical = self.intern(path);
+            remap.insert(solc_num, canonical);
+        }
+        remap
+    }
+
+    /// Build a canonical `id_to_path_map` from the interner's current state.
+    ///
+    /// Returns `HashMap<SolcFileId, String>` in the same shape as the
+    /// existing `CachedBuild.id_to_path_map`, but using canonical IDs.
+    pub fn to_id_to_path_map(&self) -> HashMap<SolcFileId, String> {
+        self.paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| (SolcFileId::new(i.to_string()), path.clone()))
+            .collect()
+    }
+}
+
+impl Default for PathInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,5 +994,72 @@ mod tests {
         map.insert(FuncSelector::new("8da5cb5b"), "owner");
         assert_eq!(map.get(&FuncSelector::new("f3cd914c")), Some(&"swap"));
         assert_eq!(map.get(&FuncSelector::new("8da5cb5b")), Some(&"owner"));
+    }
+
+    // ── PathInterner tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_path_interner_basic() {
+        let mut interner = PathInterner::new();
+        assert!(interner.is_empty());
+
+        let id_a = interner.intern("src/Foo.sol");
+        let id_b = interner.intern("src/Bar.sol");
+        assert_ne!(id_a, id_b);
+        assert_eq!(interner.len(), 2);
+
+        // Same path returns the same ID.
+        let id_a2 = interner.intern("src/Foo.sol");
+        assert_eq!(id_a, id_a2);
+        assert_eq!(interner.len(), 2);
+    }
+
+    #[test]
+    fn test_path_interner_resolve() {
+        let mut interner = PathInterner::new();
+        let id = interner.intern("/abs/src/Pool.sol");
+        assert_eq!(interner.resolve(id), Some("/abs/src/Pool.sol"));
+        assert_eq!(interner.resolve(FileId(999)), None);
+    }
+
+    #[test]
+    fn test_path_interner_monotonic_ids() {
+        let mut interner = PathInterner::new();
+        let a = interner.intern("a.sol");
+        let b = interner.intern("b.sol");
+        let c = interner.intern("c.sol");
+        assert_eq!(a, FileId(0));
+        assert_eq!(b, FileId(1));
+        assert_eq!(c, FileId(2));
+    }
+
+    #[test]
+    fn test_path_interner_build_remap() {
+        let mut interner = PathInterner::new();
+        // Pre-intern one path from a previous compilation.
+        interner.intern("/abs/src/Foo.sol");
+
+        // Simulate solc output where file IDs are different.
+        let mut solc_map = HashMap::new();
+        solc_map.insert(SolcFileId::new("0"), "/abs/src/Bar.sol".to_string());
+        solc_map.insert(SolcFileId::new("1"), "/abs/src/Foo.sol".to_string());
+
+        let remap = interner.build_remap(&solc_map);
+
+        // Foo.sol was already interned as canonical 0.
+        assert_eq!(remap[&1], FileId(0));
+        // Bar.sol is new, gets canonical 1.
+        assert_eq!(remap[&0], FileId(1));
+    }
+
+    #[test]
+    fn test_path_interner_to_id_to_path_map() {
+        let mut interner = PathInterner::new();
+        interner.intern("src/A.sol");
+        interner.intern("src/B.sol");
+
+        let map = interner.to_id_to_path_map();
+        assert_eq!(map.get("0").map(|s| s.as_str()), Some("src/A.sol"));
+        assert_eq!(map.get("1").map(|s| s.as_str()), Some("src/B.sol"));
     }
 }

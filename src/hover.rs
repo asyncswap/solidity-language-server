@@ -1402,6 +1402,14 @@ pub fn hover_info(
         parts.push(format!("Selector: `{}`", selector.to_prefixed()));
     }
 
+    // Node ID for debugging: show both the cursor-hit node and the resolved
+    // declaration (if different, e.g. when hovering a reference).
+    if node_id == decl_id {
+        parts.push(format!("Node: `{}`", decl_id.0));
+    } else {
+        parts.push(format!("Node: `{}` -> `{}`", node_id.0, decl_id.0));
+    }
+
     let di = &cached_build.decl_index;
     let id_to_path = &cached_build.node_id_to_source_path;
 
@@ -1781,7 +1789,7 @@ mod tests {
     #[test]
     fn test_resolve_inheritdoc_swap() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         // PoolManager.swap (id=616) has "@inheritdoc IPoolManager"
         let decl = build.decl_index.get(&NodeId(616)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
@@ -1795,7 +1803,7 @@ mod tests {
     #[test]
     fn test_resolve_inheritdoc_initialize() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         // PoolManager.initialize (id=330) has "@inheritdoc IPoolManager"
         let decl = build.decl_index.get(&NodeId(330)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
@@ -1808,7 +1816,7 @@ mod tests {
     #[test]
     fn test_resolve_inheritdoc_extsload_overload() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // extsload(bytes32) — id=1306, selector "1e2eaeaf"
         let decl = build.decl_index.get(&NodeId(1306)).unwrap();
@@ -1833,7 +1841,7 @@ mod tests {
     #[test]
     fn test_resolve_inheritdoc_formats_in_hover() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         // PoolManager.swap with @inheritdoc — verify format_natspec resolves it
         let decl = build.decl_index.get(&NodeId(616)).unwrap();
         let doc_text = decl.extract_doc_text().unwrap();
@@ -1849,7 +1857,7 @@ mod tests {
     #[test]
     fn test_param_doc_error_parameter() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // PriceLimitAlreadyExceeded.sqrtPriceCurrentX96 (id=3821)
         let decl = build.decl_index.get(&NodeId(3821)).unwrap();
@@ -1871,7 +1879,7 @@ mod tests {
     #[test]
     fn test_param_doc_error_second_parameter() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // PriceLimitAlreadyExceeded.sqrtPriceLimitX96 (id=3823)
         let decl = build.decl_index.get(&NodeId(3823)).unwrap();
@@ -1891,7 +1899,7 @@ mod tests {
     #[test]
     fn test_param_doc_function_return_value() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // Pool.modifyLiquidity return param "delta" (id=4055)
         let decl = build.decl_index.get(&NodeId(4055)).unwrap();
@@ -1913,7 +1921,7 @@ mod tests {
     #[test]
     fn test_param_doc_function_input_parameter() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // Pool.modifyLiquidity input param "params" — find by scanning decl_index
         // The function id=4371 has a parameter named "params"
@@ -1939,7 +1947,7 @@ mod tests {
     #[test]
     fn test_param_doc_inherited_function_via_docindex() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // PoolManager.swap `key` param (id=478) — parent has @inheritdoc IPoolManager
         let decl = build.decl_index.get(&NodeId(478)).unwrap();
@@ -1961,7 +1969,7 @@ mod tests {
     #[test]
     fn test_param_doc_non_parameter_returns_none() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
 
         // PoolManager contract (id=1216) is not a parameter
         let decl = build.decl_index.get(&NodeId(1216)).unwrap();
@@ -2427,7 +2435,7 @@ mod tests {
     #[test]
     fn find_mapping_decl_typed_pools() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         let decl = find_mapping_decl_typed(&build.decl_index, "_pools").unwrap();
         assert_eq!(decl.name, "_pools");
         assert!(matches!(
@@ -2439,14 +2447,14 @@ mod tests {
     #[test]
     fn find_mapping_decl_typed_not_found() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         assert!(find_mapping_decl_typed(&build.decl_index, "nonexistent").is_none());
     }
 
     #[test]
     fn mapping_signature_help_typed_pools() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         let help = mapping_signature_help_typed(&build.decl_index, "_pools").unwrap();
         assert!(help.signatures[0].label.contains("_pools"));
         let params = help.signatures[0].parameters.as_ref().unwrap();
@@ -2456,7 +2464,7 @@ mod tests {
     #[test]
     fn mapping_signature_help_typed_protocol_fees() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         let help = mapping_signature_help_typed(&build.decl_index, "protocolFeesAccrued").unwrap();
         assert!(help.signatures[0].label.contains("protocolFeesAccrued"));
     }
@@ -2464,7 +2472,7 @@ mod tests {
     #[test]
     fn mapping_signature_help_typed_non_mapping() {
         let ast = load_test_ast();
-        let build = crate::goto::CachedBuild::new(ast, 0);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
         assert!(mapping_signature_help_typed(&build.decl_index, "owner").is_none());
     }
 }

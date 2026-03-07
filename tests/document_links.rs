@@ -10,7 +10,7 @@ fn load_fixture() -> (Value, CachedBuild) {
     let raw: Value =
         serde_json::from_str(&fs::read_to_string("poolmanager.json").unwrap()).unwrap();
     let ast = solidity_language_server::solc::normalize_solc_output(raw, None);
-    let build = CachedBuild::new(ast.clone(), 0);
+    let build = CachedBuild::new(ast.clone(), 0, None);
     (ast, build)
 }
 
@@ -319,7 +319,7 @@ fn test_reference_links_have_no_tooltip() {
 
 #[test]
 fn test_empty_sources() {
-    let build = CachedBuild::new(serde_json::json!({}), 0);
+    let build = CachedBuild::new(serde_json::json!({}), 0, None);
     let source_bytes = b"";
     let uri = Url::from_file_path("/tmp/Empty.sol").unwrap();
 

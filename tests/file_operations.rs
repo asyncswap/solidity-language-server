@@ -90,7 +90,7 @@ async fn test_rename_a_to_aa_via_solc_project_index() {
         .await
         .expect("solc_project_index should succeed for example project");
 
-    let _build = CachedBuild::new(ast_data, 0);
+    let _build = CachedBuild::new(ast_data, 0, None);
     let source_files: Vec<String> = fs::read_dir(&example_dir)
         .unwrap()
         .filter_map(|e| e.ok())

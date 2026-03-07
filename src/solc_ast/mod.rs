@@ -1023,7 +1023,7 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        let build = crate::goto::CachedBuild::new(raw, 0);
+        let build = crate::goto::CachedBuild::new(raw, 0, None);
 
         assert!(
             !build.decl_index.is_empty(),
@@ -1064,7 +1064,7 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        let build = crate::goto::CachedBuild::new(raw, 0);
+        let build = crate::goto::CachedBuild::new(raw, 0, None);
 
         assert!(
             !build.node_id_to_source_path.is_empty(),

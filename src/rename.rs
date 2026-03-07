@@ -353,7 +353,13 @@ pub fn rename_symbol(
         true, // rename always includes the declaration
     );
 
-    // Cross-file: scan other cached ASTs for the same target definition
+    // Cross-file: scan other cached ASTs for the same target definition.
+    // Exclude the current file — it was already covered by the file-level
+    // build above (which has fresh byte offsets from the editor buffer).
+    let current_abs = file_uri
+        .to_file_path()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
     if let Some((def_abs_path, def_byte_offset)) =
         references::resolve_target_location(build, file_uri, position, source_bytes)
     {
@@ -364,6 +370,7 @@ pub fn rename_symbol(
                 def_byte_offset,
                 name_location_index,
                 true, // rename always includes the declaration
+                current_abs.as_deref(),
             );
             locations.extend(other_locations);
         }

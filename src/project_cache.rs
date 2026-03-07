@@ -613,6 +613,7 @@ pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
         external_refs,
         persisted.id_to_path_map,
         0,
+        None,
     ))
 }
 
@@ -816,6 +817,7 @@ pub fn load_reference_cache_with_report(
                 external_refs,
                 persisted.id_to_path_map,
                 0,
+                None,
             )),
             hit: true,
             miss_reason: if complete {

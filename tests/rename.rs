@@ -23,7 +23,7 @@ async fn build_example(filename: &str) -> (CachedBuild, String) {
         .await
         .expect("forge build failed");
     (
-        CachedBuild::new(ast, 0),
+        CachedBuild::new(ast, 0, None),
         example_dir.to_string_lossy().to_string(),
     )
 }

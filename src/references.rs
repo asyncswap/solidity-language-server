@@ -289,12 +289,19 @@ pub fn resolve_target_location(
 /// the definition's file path + byte offset (stable across builds).
 /// Uses byte_to_id to find this build's node ID for the same definition,
 /// then scans for referenced_declaration matches.
+///
+/// When `exclude_abs_path` is provided, results whose resolved file path
+/// matches that path are skipped.  This prevents stale AST byte offsets
+/// from producing bogus locations when the caller already has correct
+/// results for that file from a fresher build (e.g. the per-file build
+/// compiled from the current editor buffer).
 pub fn goto_references_for_target(
     build: &CachedBuild,
     def_abs_path: &str,
     def_byte_offset: usize,
     name_location_index: Option<usize>,
     include_declaration: bool,
+    exclude_abs_path: Option<&str>,
 ) -> Vec<Location> {
     // Find this build's node ID for the definition using byte offset
     let target_node_id = match byte_to_id(&build.nodes, def_abs_path, def_byte_offset) {
@@ -313,6 +320,18 @@ pub fn goto_references_for_target(
         None => return vec![],
     };
 
+    // Build a set of node IDs that live in the excluded file so we can
+    // skip them cheaply during the id_to_location loop.
+    let excluded_ids: HashSet<NodeId> = if let Some(excl) = exclude_abs_path {
+        build
+            .nodes
+            .get(excl)
+            .map(|file_nodes| file_nodes.keys().copied().collect())
+            .unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+
     // Collect the definition node + all nodes whose referenced_declaration matches
     let mut results: HashSet<NodeId> = HashSet::new();
     if include_declaration {
@@ -328,6 +347,9 @@ pub fn goto_references_for_target(
 
     let mut locations = Vec::new();
     for id in results {
+        if excluded_ids.contains(&id) {
+            continue;
+        }
         if let Some(location) =
             id_to_location_with_index(&build.nodes, &build.id_to_path_map, id, name_location_index)
         {
@@ -337,10 +359,20 @@ pub fn goto_references_for_target(
 
     // Yul external reference use sites
     for (src_str, decl_id) in &build.external_refs {
-        if *decl_id == target_node_id
-            && let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map)
-        {
-            locations.push(location);
+        if *decl_id == target_node_id {
+            // Skip external refs in the excluded file.
+            if let Some(excl) = exclude_abs_path {
+                if let Some(src_loc) = SourceLoc::parse(src_str.as_str()) {
+                    if let Some(ref_path) = build.id_to_path_map.get(&src_loc.file_id_str()) {
+                        if ref_path == excl {
+                            continue;
+                        }
+                    }
+                }
+            }
+            if let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map) {
+                locations.push(location);
+            }
         }
     }
 

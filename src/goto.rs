@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::{Location, Position, Range, TextEdit, Url};
 use tree_sitter::{Node, Parser};
 
-use crate::types::{AbsPath, NodeId, RelPath, SourceLoc, SrcLocation};
+use crate::types::{
+    AbsPath, FileId, NodeId, PathInterner, RelPath, SolcFileId, SourceLoc, SrcLocation,
+};
 use crate::utils::push_if_node_or_array;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,27 +134,62 @@ impl CachedBuild {
     /// - `sources[path] = { id, ast }`
     /// - `contracts[path][name] = { abi, evm, ... }`
     /// - `source_id_to_path = { "0": "path", ... }`
-    pub fn new(ast: Value, build_version: i32) -> Self {
-        let (nodes, path_to_abs, external_refs) = if let Some(sources) = ast.get("sources") {
+    ///
+    /// When `interner` is provided, solc's per-compilation file IDs in all
+    /// `src` strings are translated into canonical IDs from the project-wide
+    /// [`PathInterner`].  This ensures all `CachedBuild` instances share the
+    /// same file-ID space regardless of which solc invocation produced them.
+    pub fn new(ast: Value, build_version: i32, interner: Option<&mut PathInterner>) -> Self {
+        let (mut nodes, path_to_abs, mut external_refs) = if let Some(sources) = ast.get("sources")
+        {
             cache_ids(sources)
         } else {
             (HashMap::new(), HashMap::new(), HashMap::new())
         };
 
-        let id_to_path_map: HashMap<crate::types::SolcFileId, String> = ast
+        // Parse solc's source_id_to_path from the AST output.
+        let solc_id_to_path: HashMap<SolcFileId, String> = ast
             .get("source_id_to_path")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
                     .map(|(k, v)| {
                         (
-                            crate::types::SolcFileId::new(k.clone()),
+                            SolcFileId::new(k.clone()),
                             v.as_str().unwrap_or("").to_string(),
                         )
                     })
                     .collect()
             })
             .unwrap_or_default();
+
+        // When an interner is available, canonicalize file IDs in all src
+        // strings so that merges across different compilations are safe.
+        // `canonical_remap` is kept around so that `build_completion_cache`
+        // can translate its own file IDs in the same way.
+        let (id_to_path_map, canonical_remap) = if let Some(interner) = interner {
+            let remap = interner.build_remap(&solc_id_to_path);
+
+            // Rewrite all NodeInfo src strings.
+            for file_nodes in nodes.values_mut() {
+                for info in file_nodes.values_mut() {
+                    canonicalize_node_info(info, &remap);
+                }
+            }
+
+            // Rewrite external ref src strings.
+            let old_refs = std::mem::take(&mut external_refs);
+            for (src, decl_id) in old_refs {
+                let new_src = SrcLocation::new(remap_src_canonical(src.as_str(), &remap));
+                external_refs.insert(new_src, decl_id);
+            }
+
+            // Build id_to_path_map from canonical IDs.
+            (interner.to_id_to_path_map(), Some(remap))
+        } else {
+            // No interner — use solc's original mapping (legacy path).
+            (solc_id_to_path, None)
+        };
 
         let gas_index = crate::gas::build_gas_index(&ast);
 
@@ -197,11 +234,12 @@ impl CachedBuild {
             let sources = ast.get("sources");
             let contracts = ast.get("contracts");
             let cc = if let Some(s) = sources {
-                crate::completion::build_completion_cache(s, contracts)
+                crate::completion::build_completion_cache(s, contracts, canonical_remap.as_ref())
             } else {
                 crate::completion::build_completion_cache(
                     &serde_json::Value::Object(Default::default()),
                     contracts,
+                    canonical_remap.as_ref(),
                 )
             };
             std::sync::Arc::new(cc)
@@ -257,15 +295,29 @@ impl CachedBuild {
     ///
     /// This is used for fast startup warm-cache restores where we only need
     /// cross-file node/reference maps (not full gas/doc/hint indexes).
+    ///
+    /// When `interner` is provided, the `id_to_path_map` entries are
+    /// registered in the interner so that subsequent compilations will
+    /// assign the same canonical IDs to the same paths.
     pub fn from_reference_index(
         nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
         path_to_abs: HashMap<RelPath, AbsPath>,
         external_refs: ExternalRefs,
-        id_to_path_map: HashMap<crate::types::SolcFileId, String>,
+        id_to_path_map: HashMap<SolcFileId, String>,
         build_version: i32,
+        interner: Option<&mut PathInterner>,
     ) -> Self {
+        // Seed the interner with paths from the persisted cache so that
+        // canonical IDs remain consistent across restart.
+        if let Some(interner) = interner {
+            for path in id_to_path_map.values() {
+                interner.intern(path);
+            }
+        }
+
         let completion_cache = std::sync::Arc::new(crate::completion::build_completion_cache(
             &serde_json::Value::Object(Default::default()),
+            None,
             None,
         ));
 
@@ -292,6 +344,41 @@ type CachedIds = (
     HashMap<RelPath, AbsPath>,
     ExternalRefs,
 );
+
+/// Rewrite the file-ID component of a `"offset:length:fileId"` string using
+/// a canonical remap table.  Returns the original string unchanged if the
+/// file ID is not in the remap or if the format is invalid.
+fn remap_src_canonical(src: &str, remap: &HashMap<u64, FileId>) -> String {
+    let Some(last_colon) = src.rfind(':') else {
+        return src.to_owned();
+    };
+    let old_id_str = &src[last_colon + 1..];
+    let Ok(old_id) = old_id_str.parse::<u64>() else {
+        return src.to_owned();
+    };
+    let Some(canonical) = remap.get(&old_id) else {
+        return src.to_owned();
+    };
+    if canonical.0 == old_id {
+        return src.to_owned();
+    }
+    format!("{}{}", &src[..=last_colon], canonical.0)
+}
+
+/// Rewrite all file-ID references in a [`NodeInfo`] using the canonical
+/// remap table.
+fn canonicalize_node_info(info: &mut NodeInfo, remap: &HashMap<u64, FileId>) {
+    info.src = SrcLocation::new(remap_src_canonical(info.src.as_str(), remap));
+    if let Some(loc) = info.name_location.as_mut() {
+        *loc = remap_src_canonical(loc, remap);
+    }
+    for loc in &mut info.name_locations {
+        *loc = remap_src_canonical(loc, remap);
+    }
+    if let Some(loc) = info.member_location.as_mut() {
+        *loc = remap_src_canonical(loc, remap);
+    }
+}
 
 pub fn cache_ids(sources: &Value) -> CachedIds {
     let source_count = sources.as_object().map_or(0, |obj| obj.len());

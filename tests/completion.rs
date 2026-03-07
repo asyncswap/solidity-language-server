@@ -18,7 +18,7 @@ fn load_cache() -> solidity_language_server::completion::CompletionCache {
     let ast_data = load_ast();
     let sources = ast_data.get("sources").unwrap();
     let contracts = ast_data.get("contracts");
-    build_completion_cache(sources, contracts)
+    build_completion_cache(sources, contracts, None)
 }
 
 // --- extract_node_id_from_type ---
@@ -903,7 +903,7 @@ fn test_dot_completion_supplements_method_identifiers_with_node_members() {
 fn test_cache_without_contracts_has_empty_method_identifiers() {
     let ast_data = load_ast();
     let sources = ast_data.get("sources").unwrap();
-    let cache = build_completion_cache(sources, None);
+    let cache = build_completion_cache(sources, None, None);
 
     assert!(
         cache.method_identifiers.is_empty(),

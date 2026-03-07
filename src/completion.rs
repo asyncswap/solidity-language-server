@@ -360,7 +360,16 @@ impl CompletionCache {
 
 /// Build a CompletionCache from AST sources and contracts.
 /// `contracts` is the `.contracts` section of the compiler output (optional).
-pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> CompletionCache {
+///
+/// When `file_id_remap` is provided, every solc-assigned file ID (both in
+/// `path_to_file_id` and in `ScopeRange.file_id`) is translated into a
+/// canonical ID from the project-wide [`PathInterner`].  Pass `None` in
+/// tests or when canonical IDs are not needed.
+pub fn build_completion_cache(
+    sources: &Value,
+    contracts: Option<&Value>,
+    file_id_remap: Option<&HashMap<u64, FileId>>,
+) -> CompletionCache {
     let source_count = sources.as_object().map_or(0, |obj| obj.len());
     // Pre-size collections based on source count to reduce rehash churn.
     // Estimates: ~20 names/file, ~5 contracts/file, ~10 functions/file.
@@ -411,9 +420,14 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
             if let Some(ast) = source_data.get("ast") {
-                // Map file path → source file id for scope resolution
+                // Map file path → source file id for scope resolution.
+                // When a canonical remap is available, translate solc's raw
+                // file ID into the project-wide canonical ID.
                 if let Some(fid) = source_data.get("id").and_then(|v| v.as_u64()) {
-                    path_to_file_id.insert(RelPath::new(path), FileId(fid));
+                    let canonical_fid = file_id_remap
+                        .and_then(|r| r.get(&fid).copied())
+                        .unwrap_or(FileId(fid));
+                    path_to_file_id.insert(RelPath::new(path), canonical_fid);
                 }
                 let file_importables = extract_top_level_importables_for_file(path, ast);
                 if !file_importables.is_empty() {
@@ -441,11 +455,14 @@ pub fn build_completion_cache(sources: &Value, contracts: Option<&Value>) -> Com
                     );
                     if is_scope_node && let Some(nid) = node_id {
                         if let Some(src_loc) = parse_src(tree) {
+                            let canonical_fid = file_id_remap
+                                .and_then(|r| r.get(&src_loc.file_id.0).copied())
+                                .unwrap_or(src_loc.file_id);
                             scope_ranges.push(ScopeRange {
                                 node_id: nid,
                                 start: src_loc.offset,
                                 end: src_loc.end(),
-                                file_id: src_loc.file_id,
+                                file_id: canonical_fid,
                             });
                         }
                         // Record parent link: this node's scope → its parent
@@ -2266,7 +2283,7 @@ mod tests {
             }
         });
 
-        let cache = build_completion_cache(&sources, None);
+        let cache = build_completion_cache(&sources, None, None);
         let map = &cache.top_level_importables_by_name;
         let by_file = &cache.top_level_importables_by_file;
 
@@ -2315,7 +2332,7 @@ mod tests {
             }
         });
 
-        let cache = build_completion_cache(&sources, None);
+        let cache = build_completion_cache(&sources, None, None);
         let entries = cache.top_level_importables_by_name.get("dup").unwrap();
         assert_eq!(entries.len(), 2);
     }
@@ -2367,7 +2384,7 @@ mod tests {
             }
         });
 
-        let mut cache = build_completion_cache(&sources, None);
+        let mut cache = build_completion_cache(&sources, None, None);
         assert_eq!(cache.top_level_importables_by_name["dup"].len(), 2);
 
         cache.replace_top_level_importables_for_path(
