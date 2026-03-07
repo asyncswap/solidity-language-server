@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "./A.sol";
-import {} from "./B.sol";
+
 
 contract StringCompletions {
     function noCompletionRevert() public pure {

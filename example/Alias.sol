@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {Test as MyTest} from "./A.sol";
 import "./A.sol" as AFile;
+import "./A.sol";
 
 contract AliasUser {
     MyTest public myTest;
