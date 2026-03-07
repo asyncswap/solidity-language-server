@@ -4,34 +4,6 @@
 
 For the full settings schema, see [Setup Overview](/setup).
 
-## Install
-
-```sh
-# macOS / Linux
-curl -fsSL https://opencode.ai/install | bash
-```
-
-See [opencode.ai](https://opencode.ai) for other install methods.
-
-## Configure
-
-Add to your global config (`~/.config/opencode/opencode.json`) or project-level `opencode.json`:
-
-```jsonc [opencode.json]
-// [!include ~/snippets/setup/opencode.jsonc]
-```
-
-The `solidity-language-server` binary must be in your `$PATH` (installed via `cargo install solidity-language-server`).
-
-## How it works
-
-When OpenCode encounters a `.sol` file, it automatically:
-
-1. Starts the Solidity language server
-2. Sends `textDocument/didOpen` to index the file
-3. Collects diagnostics (errors, warnings, lint) and feeds them to the AI agent
-4. The AI uses diagnostics to detect and fix issues in code it writes
-
 ## LSP tool (experimental)
 
 OpenCode has an experimental `lsp` tool that gives the AI direct access to LSP methods. Enable it with:
@@ -74,11 +46,17 @@ The AI will invoke the LSP hover method and get back type signatures, NatSpec do
 opencode run "use the lsp tool to find all references to the initialize function in src/PoolManager.sol"
 ```
 
-## Server settings
+## Configure
 
-Pass initialization options to configure server behavior:
+Add to your global config (`~/.config/opencode/opencode.json`) or project-level `opencode.json`. The `solidity-language-server` binary must be in your `$PATH` (installed via `cargo install solidity-language-server`).
 
-```jsonc [opencode.json]
+:::code-group
+
+```jsonc [Minimal]
+// [!include ~/snippets/setup/opencode.jsonc]
+```
+
+```jsonc [With Server Settings]
 {
   "$schema": "https://opencode.ai/config.json",
   "lsp": {
@@ -107,6 +85,17 @@ Pass initialization options to configure server behavior:
   }
 }
 ```
+
+:::
+
+## How it works
+
+When OpenCode encounters a `.sol` file, it automatically:
+
+1. Starts the Solidity language server
+2. Sends `textDocument/didOpen` to index the file
+3. Collects diagnostics (errors, warnings, lint) and feeds them to the AI agent
+4. The AI uses diagnostics to detect and fix issues in code it writes
 
 ## Lint options reference
 
