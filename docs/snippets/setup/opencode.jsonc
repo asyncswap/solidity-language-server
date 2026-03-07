@@ -1,0 +1,9 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "solidity": {
+      "command": ["solidity-language-server", "--stdio"],
+      "extensions": [".sol"]
+    }
+  }
+}

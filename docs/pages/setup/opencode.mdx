@@ -1,0 +1,113 @@
+# OpenCode
+
+[OpenCode](https://opencode.ai) is a terminal-based AI coding agent. It integrates with LSP servers to give the AI access to diagnostics, go-to-definition, references, hover, and more.
+
+For the full settings schema, see [Setup Overview](/setup).
+
+## Install
+
+```sh
+# macOS / Linux
+curl -fsSL https://opencode.ai/install | bash
+```
+
+See [opencode.ai](https://opencode.ai) for other install methods.
+
+## Configure
+
+Add to your global config (`~/.config/opencode/opencode.json`) or project-level `opencode.json`:
+
+```jsonc [opencode.json]
+// [!include ~/snippets/setup/opencode.jsonc]
+```
+
+The `solidity-language-server` binary must be in your `$PATH` (installed via `cargo install solidity-language-server`).
+
+## How it works
+
+When OpenCode encounters a `.sol` file, it automatically:
+
+1. Starts the Solidity language server
+2. Sends `textDocument/didOpen` to index the file
+3. Collects diagnostics (errors, warnings, lint) and feeds them to the AI agent
+4. The AI uses diagnostics to detect and fix issues in code it writes
+
+## LSP tool (experimental)
+
+OpenCode has an experimental `lsp` tool that gives the AI direct access to LSP methods. Enable it with:
+
+```sh
+OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode
+```
+
+Or set it in your environment permanently:
+
+```sh
+export OPENCODE_EXPERIMENTAL_LSP_TOOL=true
+```
+
+With the LSP tool enabled, the AI agent can call:
+
+| Operation | LSP Method | Description |
+|-----------|-----------|-------------|
+| `hover` | `textDocument/hover` | Type info, NatSpec docs, selectors |
+| `goToDefinition` | `textDocument/definition` | Jump to symbol definition |
+| `findReferences` | `textDocument/references` | Find all references to a symbol |
+| `goToImplementation` | `textDocument/implementation` | Find implementations |
+| `documentSymbol` | `textDocument/documentSymbol` | Browse file structure |
+| `workspaceSymbol` | `workspace/symbol` | Search symbols across project |
+| `prepareCallHierarchy` | `callHierarchy/prepare` | Trace call graphs |
+| `incomingCalls` | `callHierarchy/incomingCalls` | Who calls this function |
+| `outgoingCalls` | `callHierarchy/outgoingCalls` | What this function calls |
+
+### Example: hover
+
+```sh
+opencode run "use the lsp tool to hover on src/Pool.sol at line 102 col 15"
+```
+
+The AI will invoke the LSP hover method and get back type signatures, NatSpec documentation, and function selectors from the Solidity language server.
+
+### Example: find references
+
+```sh
+opencode run "use the lsp tool to find all references to the initialize function in src/PoolManager.sol"
+```
+
+## Server settings
+
+Pass initialization options to configure server behavior:
+
+```jsonc [opencode.json]
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "solidity": {
+      "command": ["solidity-language-server", "--stdio"],
+      "extensions": [".sol"],
+      "initialization": {
+        "solidity-language-server": {
+          "inlayHints": {
+            "parameters": true
+          },
+          "lint": {
+            "enabled": true
+          },
+          "fileOperations": {
+            "templateOnCreate": true,
+            "updateImportsOnRename": true,
+            "updateImportsOnDelete": true
+          },
+          "projectIndex": {
+            "fullProjectScan": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## Lint options reference
+
+Lint options (severity, rule IDs, `only`, `exclude`) are documented in [Setup Overview - Lint values](/setup#lint-values).

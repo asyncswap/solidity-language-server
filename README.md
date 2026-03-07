@@ -69,6 +69,7 @@ Use the docs for complete editor-specific setup and config examples:
 - [Helix](https://solidity-language-server-docs.pages.dev/setup/helix)
 - [Zed](https://solidity-language-server-docs.pages.dev/setup/zed)
 - [VS Code / Cursor](https://solidity-language-server-docs.pages.dev/setup/vscode)
+- [OpenCode](https://solidity-language-server-docs.pages.dev/setup/opencode)
 - [Vim](https://solidity-language-server-docs.pages.dev/setup/vim)
 - [Emacs](https://solidity-language-server-docs.pages.dev/setup/emacs)
 
