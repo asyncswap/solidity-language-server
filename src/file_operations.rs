@@ -550,14 +550,14 @@ pub fn rename_imports_single(
 /// Returns the number of files patched (for logging).
 pub fn apply_edits_to_cache(
     edits: &HashMap<Url, Vec<TextEdit>>,
-    cache: &mut HashMap<String, (i32, String)>,
+    cache: &mut HashMap<crate::types::DocumentUri, (i32, String)>,
 ) -> usize {
     let mut patched = 0;
     for (uri, text_edits) in edits {
         let uri_str = uri.to_string();
-        if let Some((version, content)) = cache.get(&uri_str).cloned() {
+        if let Some((version, content)) = cache.get(uri_str.as_str()).cloned() {
             let new_content = apply_text_edits(&content, text_edits);
-            cache.insert(uri_str, (version, new_content));
+            cache.insert(uri_str.into(), (version, new_content));
             patched += 1;
         }
     }

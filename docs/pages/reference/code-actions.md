@@ -15,7 +15,7 @@ This page describes the `textDocument/codeAction` implementation:
 - **`CodeActionDef`**: a typed quick-fix definition loaded from `data/error_codes.json` at startup.
 - **`FixKind`**: the Rust enum that describes how a fix is applied (insert, replace token, delete node, etc.).
 - **`code_action_edit`**: the function in `goto.rs` that takes a `FixKind` + source text + diagnostic range and produces a `TextEdit` by walking the tree-sitter parse tree.
-- **`code_action_db`**: the server-wide `Arc<HashMap<u32, CodeActionDef>>` loaded once at startup and shared across requests.
+- **`code_action_db`**: the server-wide `Arc<HashMap<ErrorCode, CodeActionDef>>` loaded once at startup and shared across requests.
 - **forge-lint string code**: a string identifier used by `forge lint` diagnostics (e.g. `"unused-import"`) — distinct from numeric solc error codes.
 
 ## Database design
@@ -35,7 +35,7 @@ Each entry may carry an optional `"action"` object:
 }
 ```
 
-If `"action"` is `null`, no quick-fix is available for that code. At startup, `code_actions::load()` parses the JSON into `HashMap<u32, CodeActionDef>`, omitting entries with `null` actions.
+If `"action"` is `null`, no quick-fix is available for that code. At startup, `code_actions::load()` parses the JSON into `HashMap<ErrorCode, CodeActionDef>`, omitting entries with `null` actions.
 
 ### Supported `kind` values
 

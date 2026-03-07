@@ -35,13 +35,14 @@
 /// hand-written match arms in `lsp.rs`.
 use std::collections::HashMap;
 
+use crate::types::ErrorCode;
 use serde::Deserialize;
 
 // ── JSON types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct RawEntry {
-    code: u32,
+    code: ErrorCode,
     action: Option<RawAction>,
 }
 
@@ -136,7 +137,7 @@ static ERROR_CODES_JSON: &str = include_str!(concat!(
 /// Parse the embedded JSON once and return a map from error code → action.
 /// Entries whose `action` is `null` are omitted from the map.
 /// Call this once at server startup and store the result.
-pub fn load() -> HashMap<u32, CodeActionDef> {
+pub fn load() -> HashMap<ErrorCode, CodeActionDef> {
     let raw: Vec<RawEntry> =
         serde_json::from_str(ERROR_CODES_JSON).expect("data/error_codes.json is malformed");
 

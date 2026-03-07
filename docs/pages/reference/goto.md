@@ -97,9 +97,9 @@ A separate race was fixed so goto/hover read correct text after formatting:
 | `scope_declarations` | completion.rs | Declaration → scope node mappings |
 | `scope_parent` | completion.rs | Upward scope walk |
 | `scope_ranges` | completion.rs | Innermost scope at cursor position |
-| `name_to_type` | completion.rs | Symbol name → type identifier for resolution |
+| `name_to_type` | completion.rs | `SymbolName` → `TypeIdentifier` for resolution |
 | `linearized_base_contracts` | completion.rs | C3 inheritance resolution |
-| `name_to_node_id` | completion.rs | Contract name → scope ID |
+| `name_to_node_id` | completion.rs | `SymbolName` (contract name) → scope ID |
 | `text_cache` | lsp.rs | Live buffer content |
 | `CachedBuild.content_hash` | lsp.rs / goto.rs | Skip rebuild when saved text is identical to last build |
 | tree-sitter parser | goto.rs | Parse live buffer and find declaration ranges |

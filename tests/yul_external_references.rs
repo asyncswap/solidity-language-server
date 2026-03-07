@@ -1,12 +1,12 @@
 use serde_json::Value;
 use solidity_language_server::goto;
-use solidity_language_server::types::NodeId;
+use solidity_language_server::types::{AbsPath, NodeId, RelPath, SolcFileId};
 use std::collections::HashMap;
 use std::fs;
 
 type CachedIds = (
-    HashMap<String, HashMap<NodeId, goto::NodeInfo>>,
-    HashMap<String, String>,
+    HashMap<AbsPath, HashMap<NodeId, goto::NodeInfo>>,
+    HashMap<RelPath, AbsPath>,
     goto::ExternalRefs,
 );
 
@@ -186,13 +186,18 @@ fn test_goto_bytes_resolves_yul_identifier() {
         serde_json::from_str(&fs::read_to_string("poolmanager.json").unwrap()).unwrap();
     let ast_data = solidity_language_server::solc::normalize_solc_output(raw, None);
     let sources = ast_data.get("sources").unwrap();
-    let id_to_path: HashMap<String, String> = ast_data
+    let id_to_path: HashMap<SolcFileId, String> = ast_data
         .get("source_id_to_path")
         .unwrap()
         .as_object()
         .unwrap()
         .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+        .map(|(k, v)| {
+            (
+                SolcFileId::new(k.clone()),
+                v.as_str().unwrap_or("").to_string(),
+            )
+        })
         .collect();
 
     let (nodes, path_to_abs, external_refs) = goto::cache_ids(sources);
@@ -253,9 +258,9 @@ fn test_goto_bytes_resolves_yul_identifier() {
 // =============================================================================
 
 struct SetupGotoResult(
-    HashMap<String, HashMap<NodeId, goto::NodeInfo>>,
-    HashMap<String, String>,
-    HashMap<String, String>,
+    HashMap<AbsPath, HashMap<NodeId, goto::NodeInfo>>,
+    HashMap<RelPath, AbsPath>,
+    HashMap<SolcFileId, String>,
     goto::ExternalRefs,
 );
 
@@ -265,13 +270,18 @@ fn setup_goto() -> SetupGotoResult {
         serde_json::from_str(&fs::read_to_string("poolmanager.json").unwrap()).unwrap();
     let ast_data = solidity_language_server::solc::normalize_solc_output(raw, None);
     let sources = ast_data.get("sources").unwrap();
-    let id_to_path: HashMap<String, String> = ast_data
+    let id_to_path: HashMap<SolcFileId, String> = ast_data
         .get("source_id_to_path")
         .unwrap()
         .as_object()
         .unwrap()
         .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+        .map(|(k, v)| {
+            (
+                SolcFileId::new(k.clone()),
+                v.as_str().unwrap_or("").to_string(),
+            )
+        })
         .collect();
     let (nodes, path_to_abs, external_refs) = goto::cache_ids(sources);
     SetupGotoResult(nodes, path_to_abs, id_to_path, external_refs)

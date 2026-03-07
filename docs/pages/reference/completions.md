@@ -39,16 +39,16 @@ Important behavior:
 
 `CompletionCache` is intentionally map-heavy so request-time work is mostly lookups:
 
-- `name_to_type`: symbol name -> `typeIdentifier`
-- `type_to_node`: `typeIdentifier` -> declaration node id
+- `name_to_type`: `SymbolName` -> `TypeIdentifier`
+- `type_to_node`: `TypeIdentifier` -> declaration node id
 - `node_members`: declaration node id -> member completion items
 - `method_identifiers`: contract node id -> method signature completions (+ selector label details)
 - `function_return_types`: `(contract_node_id, fn_name)` -> return `typeIdentifier` (for `foo().`)
-- `using_for`: `typeIdentifier` -> extension methods
+- `using_for`: `TypeIdentifier` -> extension methods
 - `using_for_wildcard`: methods from `using X for *`
 - `scope_declarations`, `scope_parent`, `scope_ranges`: scope-aware lookup context
 - `linearized_base_contracts`: inheritance traversal for scope resolution
-- `top_level_importables_by_name`, `top_level_importables_by_file`: import-on-completion support
+- `top_level_importables_by_name`, `top_level_importables_by_file`: import-on-completion support (`SymbolName` / `RelPath` keyed)
 
 This is built in `build_completion_cache(...)` from `.sources` AST and optional `.contracts` method identifiers.
 

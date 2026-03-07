@@ -23,11 +23,39 @@ exclude:
   - textDocument/onTypeFormatting
 
 methods:
+  textDocument/definition:
+    line: 136
+    col: 40
+    expect:
+      file: Shop.sol
+      line: 41
+
+  textDocument/declaration:
+    line: 136
+    col: 40
+    expect:
+      file: Shop.sol
+      line: 41
+
+  textDocument/hover:
+    line: 136
+    col: 40
+
+  textDocument/references:
+    line: 136
+    col: 40
+    expect:
+      minCount: 2
+
   textDocument/completion:
-    line: 72
-    col: 34
+    line: 136
+    col: 38
     trigger: "."
-    # Transaction. — member access on library type, returns Order/addTax/getRefund
+    expect:
+      containsItems:
+        - label: addTax
+        - label: getRefund
+    # PRICE.| — member access on uint256 via `using Transaction for uint256`
 
   textDocument/signatureHelp:
     line: 136
@@ -35,16 +63,28 @@ methods:
     # Inside PRICE.addTax(TAX, TAX_BASE) — parameter info on first arg
 
   textDocument/documentHighlight:
-    line: 130
-    col: 26
-    # owner — used across constructor, checkOwner, transferOwnership
+    line: 136
+    col: 40
+    expect:
+      minCount: 2
+    # addTax — declaration + callsite highlights
 
   textDocument/inlayHint:
     line: 135
     col: 0
     endLine: 147
     endCol: 0
+    expect:
+      minCount: 1
     # buy() function body — parameter names + gas estimates
+
+  textDocument/documentLink:
+    expect:
+      minCount: 1
+
+  workspace/symbol:
+    expect:
+      minCount: 1
 
   textDocument/semanticTokens/range:
     startLine: 0
@@ -58,6 +98,16 @@ methods:
     col: 8
     expect:
       titleContains: "Remove unused import"
+
+  textDocument/prepareRename:
+    line: 136
+    col: 40
+    expect:
+      line: 136
+
+  textDocument/rename:
+    line: 136
+    col: 40
 
   textDocument/formatting:
     didChange:

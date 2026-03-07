@@ -418,11 +418,11 @@ fn test_dot_completion_on_struct() {
     // PoolKey is a struct with members: currency0, currency1, fee, tickSpacing, hooks
     // We need a variable that has type PoolKey — check name_to_type for one
     // "key" is commonly used as a PoolKey parameter name
-    let pool_key_vars: Vec<&String> = cache
+    let pool_key_vars: Vec<&str> = cache
         .name_to_type
         .iter()
         .filter(|(_, tid)| tid.contains("PoolKey"))
-        .map(|(name, _)| name)
+        .map(|(name, _)| name.as_str())
         .collect();
 
     // There should be at least one variable with PoolKey type
@@ -1988,11 +1988,11 @@ fn test_ast_struct_definitions_with_scope() {
 // --- Scope target types: what nodeType do scope IDs point to ---
 
 /// Build a map of id -> nodeType for the entire AST.
-fn build_id_to_node_type(nodes: &[&Value]) -> std::collections::HashMap<u64, String> {
+fn build_id_to_node_type(nodes: &[&Value]) -> std::collections::HashMap<i64, String> {
     let mut map = std::collections::HashMap::new();
     for n in nodes {
         if let (Some(id), Some(nt)) = (
-            n.get("id").and_then(|v| v.as_u64()),
+            n.get("id").and_then(|v| v.as_i64()),
             n.get("nodeType").and_then(|v| v.as_str()),
         ) {
             map.insert(id, nt.to_string());
@@ -2004,12 +2004,12 @@ fn build_id_to_node_type(nodes: &[&Value]) -> std::collections::HashMap<u64, Str
 /// Count how many unique scope IDs point to a given nodeType.
 fn count_unique_scope_targets(
     nodes: &[&Value],
-    id_to_type: &std::collections::HashMap<u64, String>,
+    id_to_type: &std::collections::HashMap<i64, String>,
     target_type: &str,
 ) -> usize {
-    let mut scope_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut scope_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for n in nodes.iter() {
-        if let Some(scope_id) = n.get("scope").and_then(|v| v.as_u64())
+        if let Some(scope_id) = n.get("scope").and_then(|v| v.as_i64())
             && id_to_type.get(&scope_id).map(|s| s.as_str()) == Some(target_type)
         {
             scope_ids.insert(scope_id);
@@ -2219,7 +2219,7 @@ fn test_ast_scope_nodes_without_scope_field() {
 /// Count children of a given nodeType whose scope points to a specific parent nodeType.
 fn count_children_scoped_to(
     nodes: &[&Value],
-    id_to_type: &std::collections::HashMap<u64, String>,
+    id_to_type: &std::collections::HashMap<i64, String>,
     child_type: &str,
     parent_type: &str,
 ) -> usize {
@@ -2228,7 +2228,7 @@ fn count_children_scoped_to(
         .filter(|n| {
             n.get("nodeType").and_then(|v| v.as_str()) == Some(child_type)
                 && n.get("scope")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|v| v.as_i64())
                     .and_then(|id| id_to_type.get(&id))
                     .map(|s| s.as_str())
                     == Some(parent_type)
@@ -2398,12 +2398,12 @@ fn test_ast_structs_scoped_to_source_unit() {
 fn test_ast_all_contract_definitions() {
     let ast = load_ast();
     let nodes = collect_all_nodes(&ast);
-    let contracts: Vec<(String, u64)> = nodes
+    let contracts: Vec<(String, i64)> = nodes
         .iter()
         .filter_map(|n| {
             if n.get("nodeType").and_then(|v| v.as_str()) == Some("ContractDefinition") {
                 let name = n.get("name").and_then(|v| v.as_str())?.to_string();
-                let id = n.get("id").and_then(|v| v.as_u64())?;
+                let id = n.get("id").and_then(|v| v.as_i64())?;
                 Some((name, id))
             } else {
                 None
@@ -2411,7 +2411,7 @@ fn test_ast_all_contract_definitions() {
         })
         .collect();
 
-    let expected: Vec<(&str, u64)> = vec![
+    let expected: Vec<(&str, i64)> = vec![
         ("Owned", 7455),
         ("ERC6909", 7191),
         ("ERC6909Claims", 1289),
@@ -2575,11 +2575,11 @@ fn test_cache_blocks_have_no_parent_link() {
     let nodes = collect_all_nodes(&ast);
 
     // Collect all Block node IDs
-    let block_ids: Vec<u64> = nodes
+    let block_ids: Vec<i64> = nodes
         .iter()
         .filter_map(|n| {
             if n.get("nodeType").and_then(|v| v.as_str()) == Some("Block") {
-                n.get("id").and_then(|v| v.as_u64())
+                n.get("id").and_then(|v| v.as_i64())
             } else {
                 None
             }
@@ -2605,11 +2605,11 @@ fn test_cache_unchecked_blocks_have_no_parent_link() {
     let ast = load_ast();
     let nodes = collect_all_nodes(&ast);
 
-    let ub_ids: Vec<u64> = nodes
+    let ub_ids: Vec<i64> = nodes
         .iter()
         .filter_map(|n| {
             if n.get("nodeType").and_then(|v| v.as_str()) == Some("UncheckedBlock") {
-                n.get("id").and_then(|v| v.as_u64())
+                n.get("id").and_then(|v| v.as_i64())
             } else {
                 None
             }
@@ -2694,7 +2694,7 @@ fn test_ast_pool_key_struct_fields() {
         .iter()
         .filter_map(|n| {
             if n.get("nodeType").and_then(|v| v.as_str()) == Some("VariableDeclaration")
-                && n.get("scope").and_then(|v| v.as_u64()) == Some(6871)
+                && n.get("scope").and_then(|v| v.as_i64()) == Some(6871)
                 && id_map.get(&6871).map(|s| s.as_str()) == Some("StructDefinition")
             {
                 n.get("name")
@@ -2722,7 +2722,7 @@ fn test_ast_pool_state_struct_fields() {
         .iter()
         .filter_map(|n| {
             if n.get("nodeType").and_then(|v| v.as_str()) == Some("VariableDeclaration")
-                && n.get("scope").and_then(|v| v.as_u64()) == Some(3870)
+                && n.get("scope").and_then(|v| v.as_i64()) == Some(3870)
             {
                 n.get("name")
                     .and_then(|v| v.as_str())

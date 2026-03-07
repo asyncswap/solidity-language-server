@@ -1065,7 +1065,7 @@ pub fn build_batch_standard_json_input_with_cache(
     source_files: &[PathBuf],
     remappings: &[String],
     config: &FoundryConfig,
-    content_cache: Option<&HashMap<String, (i32, String)>>,
+    content_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
 ) -> Value {
     let mut contract_outputs = vec!["abi", "devdoc", "userdoc", "evm.methodIdentifiers"];
     if !config.via_ir {
@@ -1099,7 +1099,7 @@ pub fn build_batch_standard_json_input_with_cache(
         // Try to use cached content so solc doesn't need to read from disk.
         let cached_content = content_cache.and_then(|cache| {
             let uri = Url::from_file_path(file).ok()?;
-            cache.get(&uri.to_string()).map(|(_, c)| c.as_str())
+            cache.get(uri.as_str()).map(|(_, c)| c.as_str())
         });
 
         if let Some(content) = cached_content {
@@ -1175,7 +1175,7 @@ pub fn build_parse_only_json_input(
 pub async fn solc_project_index(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
 ) -> Result<Value, RunnerError> {
     // Resolve remappings first — needed for import tracing.
     let remappings = resolve_remappings(config).await;
@@ -1201,7 +1201,7 @@ pub async fn solc_project_index(
 pub async fn solc_project_index_scoped(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
     source_files: &[PathBuf],
 ) -> Result<Value, RunnerError> {
     if source_files.is_empty() {
@@ -1223,6 +1223,28 @@ fn extract_version_error_files(solc_output: &Value) -> HashSet<String> {
         for err in errors {
             let is_5333 = err.get("errorCode").and_then(|c| c.as_str()) == Some("5333");
             if is_5333
+                && let Some(file) = err
+                    .get("sourceLocation")
+                    .and_then(|sl| sl.get("file"))
+                    .and_then(|f| f.as_str())
+            {
+                files.insert(file.to_string());
+            }
+        }
+    }
+    files
+}
+
+/// Extract source file paths from solc error code 6275 ("Source not found")
+/// errors.  Returns the relative paths of source files whose imports failed.
+#[cfg(test)]
+#[allow(dead_code)]
+fn extract_import_error_files(solc_output: &Value) -> HashSet<String> {
+    let mut files = HashSet::new();
+    if let Some(errors) = solc_output.get("errors").and_then(|e| e.as_array()) {
+        for err in errors {
+            let is_6275 = err.get("errorCode").and_then(|c| c.as_str()) == Some("6275");
+            if is_6275
                 && let Some(file) = err
                     .get("sourceLocation")
                     .and_then(|sl| sl.get("file"))
@@ -1347,7 +1369,7 @@ fn merge_normalized_outputs(base: &mut Value, other: Value) {
 async fn solc_project_index_from_files(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
-    text_cache: Option<&HashMap<String, (i32, String)>>,
+    text_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
     source_files: &[PathBuf],
 ) -> Result<Value, RunnerError> {
     if source_files.is_empty() {

@@ -7,7 +7,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::types::{FuncSelector, MethodId};
+use crate::types::{FuncSelector, GasKey, MethodId};
 
 /// Sentinel comment to enable gas estimates for a function.
 /// Place `/// @custom:lsp-enable gas-estimates` above a function definition.
@@ -28,7 +28,7 @@ pub struct ContractGas {
 }
 
 /// All gas estimates indexed by (source_path, contract_name).
-pub type GasIndex = HashMap<String, ContractGas>;
+pub type GasIndex = HashMap<GasKey, ContractGas>;
 
 /// Build a gas index from normalized AST output.
 ///
@@ -108,7 +108,7 @@ pub fn build_gas_index(ast_data: &Value) -> GasIndex {
                 }
             }
 
-            let key = format!("{path}:{name}");
+            let key = GasKey::from_parts(path, name);
             index.insert(key, contract_gas);
         }
     }
@@ -151,7 +151,7 @@ pub fn gas_for_contract<'a>(
     path: &str,
     name: &str,
 ) -> Option<&'a ContractGas> {
-    let key = format!("{path}:{name}");
+    let key = GasKey::from_parts(path, name);
     index.get(&key)
 }
 
@@ -164,23 +164,26 @@ pub fn gas_for_contract<'a>(
 pub fn resolve_contract_key_typed(
     decl: &crate::solc_ast::DeclNode,
     index: &GasIndex,
-    decl_index: &HashMap<i64, crate::solc_ast::DeclNode>,
-    node_id_to_source_path: &HashMap<i64, String>,
-) -> Option<String> {
+    decl_index: &HashMap<crate::types::NodeId, crate::solc_ast::DeclNode>,
+    node_id_to_source_path: &HashMap<crate::types::NodeId, crate::types::AbsPath>,
+) -> Option<GasKey> {
     use crate::solc_ast::DeclNode;
 
     // Get the contract name and source unit scope
     let (contract_name, source_unit_scope) = match decl {
-        DeclNode::ContractDefinition(c) => (c.name.as_str(), c.scope?),
+        DeclNode::ContractDefinition(c) => (c.name.as_str(), crate::types::NodeId(c.scope?)),
         _ => {
             // Walk up to containing contract via scope
-            let scope_id = decl.scope()?;
+            let scope_id = crate::types::NodeId(decl.scope()?);
             let scope_decl = decl_index.get(&scope_id)?;
             let contract = match scope_decl {
                 DeclNode::ContractDefinition(c) => c,
                 _ => return None,
             };
-            (contract.name.as_str(), contract.scope?)
+            (
+                contract.name.as_str(),
+                crate::types::NodeId(contract.scope?),
+            )
         }
     };
 
@@ -188,7 +191,7 @@ pub fn resolve_contract_key_typed(
     let abs_path = node_id_to_source_path.get(&source_unit_scope)?;
 
     // Build the exact key
-    let exact_key = format!("{abs_path}:{contract_name}");
+    let exact_key = GasKey::from_parts(abs_path.as_str(), contract_name);
     if index.contains_key(&exact_key) {
         return Some(exact_key);
     }
@@ -198,7 +201,10 @@ pub fn resolve_contract_key_typed(
         .file_name()?
         .to_str()?;
     let suffix = format!("{file_name}:{contract_name}");
-    index.keys().find(|k| k.ends_with(&suffix)).cloned()
+    index
+        .keys()
+        .find(|k| k.as_str().ends_with(&suffix))
+        .cloned()
 }
 
 /// Format a gas cost for display.
