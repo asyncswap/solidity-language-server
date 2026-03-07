@@ -26,6 +26,15 @@ export default defineConfig({
       ]
     },
     {
+      text: "AI Agents",
+      items: [
+        { text: "Overview", link: "/agents" },
+        { text: "OpenCode", link: "/agents/opencode" },
+        { text: "Claude Code", link: "/agents/claude" },
+        { text: "Codex", link: "/agents/codex" }
+      ]
+    },
+    {
       text: "Reference",
       items: [
         { text: "Index", link: "/reference" },

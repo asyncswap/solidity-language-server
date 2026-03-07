@@ -1,0 +1,27 @@
+# AI Agents
+
+The Solidity language server works with AI coding agents. Each agent integrates differently — some connect directly to the LSP, others rely on configuration files and tool access.
+
+## Comparison
+
+| Agent | LSP Integration | Config File | Diagnostics | Code Intelligence |
+|-------|----------------|-------------|-------------|-------------------|
+| [OpenCode](/agents/opencode) | Direct (built-in) | `opencode.json` | Automatic via LSP | Hover, definition, references, symbols, call hierarchy |
+| [Claude Code](/agents/claude) | None | `CLAUDE.md` | Via `forge build` / shell | File read/write/edit, bash, MCP servers |
+| [Codex](/agents/codex) | None | `AGENTS.md` | Via `forge build` / shell | Terminal commands, test harnesses |
+
+## How it works
+
+### With LSP (OpenCode)
+
+OpenCode connects directly to `solidity-language-server` over stdio. The AI agent receives real-time diagnostics, can query hover info for type signatures and NatSpec docs, jump to definitions, find references, and trace call hierarchies — all through standard LSP methods.
+
+### Without LSP (Claude Code, Codex)
+
+Claude Code and Codex don't have built-in LSP support. Instead, they rely on:
+
+- **Instruction files** (`CLAUDE.md` / `AGENTS.md`) that tell the AI how to work with your Solidity project
+- **Shell commands** (`forge build`, `forge test`) to get compiler diagnostics
+- **File tools** to read and edit source code directly
+
+The instruction files should describe your project structure, how to build and test, and any conventions the AI should follow.
