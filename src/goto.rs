@@ -18,6 +18,12 @@ pub struct NodeInfo {
     pub node_type: Option<String>,
     pub member_location: Option<String>,
     pub absolute_path: Option<String>,
+    /// The AST `scope` field — the node ID of the containing declaration
+    /// (contract, library, interface, function, etc.). Used to resolve the
+    /// qualifier in qualified type paths like `Pool.State` where `scope`
+    /// on the `State` struct points to the `Pool` library.
+    #[serde(default)]
+    pub scope: Option<NodeId>,
 }
 
 /// All AST child keys to traverse (Solidity + Yul).
@@ -125,6 +131,14 @@ pub struct CachedBuild {
     /// Used to skip redundant rebuilds when content has not changed
     /// (e.g. format-on-save loops that re-trigger didSave with identical text).
     pub content_hash: u64,
+    /// Qualifier reference index: maps a container declaration ID
+    /// (contract/library/interface) to `IdentifierPath` node IDs that use
+    /// it as a qualifier prefix in qualified type paths (e.g., `Pool.State`).
+    ///
+    /// Built at cache time by following `referencedDeclaration` on multi-segment
+    /// `IdentifierPath` nodes to their declaration, then reading the declaration's
+    /// `scope` field to find the container.
+    pub qualifier_refs: HashMap<NodeId, Vec<NodeId>>,
 }
 
 impl CachedBuild {
@@ -245,6 +259,12 @@ impl CachedBuild {
             std::sync::Arc::new(cc)
         };
 
+        // Build the qualifier reference index: for each multi-segment
+        // IdentifierPath (e.g., `Pool.State`), follow referencedDeclaration
+        // to the declaration node, then read its `scope` to find the
+        // container (contract/library/interface). Map container_id → [node_id].
+        let qualifier_refs = build_qualifier_refs(&nodes);
+
         // The raw AST JSON is fully consumed — all data has been extracted
         // into the pre-built indexes above. `ast` is dropped here.
 
@@ -261,6 +281,7 @@ impl CachedBuild {
             completion_cache,
             build_version,
             content_hash: 0,
+            qualifier_refs,
         }
     }
 
@@ -288,6 +309,16 @@ impl CachedBuild {
             self.id_to_path_map
                 .entry(k.clone())
                 .or_insert_with(|| v.clone());
+        }
+        // Merge qualifier_refs: for each container, add any qualifier node
+        // IDs from `other` that aren't already present in `self`.
+        for (container_id, other_qrefs) in &other.qualifier_refs {
+            let entry = self.qualifier_refs.entry(*container_id).or_default();
+            for &qnode_id in other_qrefs {
+                if !entry.contains(&qnode_id) {
+                    entry.push(qnode_id);
+                }
+            }
         }
     }
 
@@ -321,6 +352,9 @@ impl CachedBuild {
             None,
         ));
 
+        // Build qualifier refs from the warm-loaded nodes.
+        let qualifier_refs = build_qualifier_refs(&nodes);
+
         Self {
             nodes,
             path_to_abs,
@@ -334,8 +368,51 @@ impl CachedBuild {
             completion_cache,
             build_version,
             content_hash: 0,
+            qualifier_refs,
         }
     }
+}
+
+/// Build the qualifier reference index from the cached node maps.
+///
+/// For each `IdentifierPath` node with `nameLocations.len() > 1` (i.e., a
+/// qualified path like `Pool.State`), follows `referencedDeclaration` to the
+/// declaration node, reads its `scope` field (the containing contract /
+/// library / interface), and records `scope_id → [identifierpath_node_id]`.
+///
+/// This allows "Find All References" on a container to include qualified
+/// type references where the container appears as a prefix.
+fn build_qualifier_refs(
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+) -> HashMap<NodeId, Vec<NodeId>> {
+    // First pass: collect all nodes' scope fields into a lookup table.
+    // We need this to look up the scope of a referencedDeclaration target.
+    let mut node_scope: HashMap<NodeId, NodeId> = HashMap::new();
+    for file_nodes in nodes.values() {
+        for (id, info) in file_nodes {
+            if let Some(scope_id) = info.scope {
+                node_scope.insert(*id, scope_id);
+            }
+        }
+    }
+
+    // Second pass: for each multi-segment IdentifierPath, resolve the
+    // container via referencedDeclaration → scope.
+    let mut qualifier_refs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for file_nodes in nodes.values() {
+        for (id, info) in file_nodes {
+            if info.name_locations.len() > 1 && info.node_type.as_deref() == Some("IdentifierPath")
+            {
+                if let Some(ref_decl) = info.referenced_declaration
+                    && let Some(&scope_id) = node_scope.get(&ref_decl)
+                {
+                    qualifier_refs.entry(scope_id).or_default().push(*id);
+                }
+            }
+        }
+    }
+
+    qualifier_refs
 }
 
 /// Return type of [`cache_ids`]: `(nodes, path_to_abs, external_refs)`.
@@ -434,6 +511,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                                 .get("absolutePath")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
+                            scope: ast.get("scope").and_then(|v| v.as_i64()).map(NodeId),
                         },
                     );
                 }
@@ -509,6 +587,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                                 .get("absolutePath")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
+                            scope: tree.get("scope").and_then(|v| v.as_i64()).map(NodeId),
                         };
 
                         nodes.get_mut(&abs_path).unwrap().insert(id, node_info);
@@ -705,6 +784,85 @@ pub fn goto_bytes(
     Some((file_path, loc.offset, loc.length))
 }
 
+/// Check if cursor is on the qualifier segment (first `nameLocations` entry)
+/// of a multi-segment `IdentifierPath` (e.g., `Pool` in `Pool.State`).
+/// If so, resolve the container declaration via `referencedDeclaration → scope`
+/// and return a Location pointing to the container's name.
+fn resolve_qualifier_goto(
+    build: &CachedBuild,
+    file_uri: &Url,
+    byte_position: usize,
+) -> Option<Location> {
+    let path = file_uri.to_file_path().ok()?;
+    let path_str = path.to_str()?;
+    let abs_path = build.path_to_abs.get(path_str)?;
+    let file_nodes = build.nodes.get(abs_path)?;
+
+    // Find the IdentifierPath node under the cursor.
+    let node_id = crate::references::byte_to_id(&build.nodes, abs_path, byte_position)?;
+    let node_info = file_nodes.get(&node_id)?;
+
+    // Must be a multi-segment IdentifierPath.
+    if node_info.node_type.as_deref() != Some("IdentifierPath")
+        || node_info.name_locations.len() <= 1
+    {
+        return None;
+    }
+
+    // Check if cursor is on the first segment (the qualifier).
+    let first_loc = SourceLoc::parse(&node_info.name_locations[0])?;
+    if byte_position < first_loc.offset || byte_position >= first_loc.end() {
+        return None;
+    }
+
+    // Follow referencedDeclaration to the declaration node, then read scope.
+    let ref_decl_id = node_info.referenced_declaration?;
+    // Find the declaration node to get its scope.
+    let decl_node = find_node_info(&build.nodes, ref_decl_id)?;
+    let scope_id = decl_node.scope?;
+
+    // Resolve the container declaration's location.
+    let container_node = find_node_info(&build.nodes, scope_id)?;
+    let loc_str = container_node
+        .name_location
+        .as_deref()
+        .unwrap_or(container_node.src.as_str());
+    let loc = SourceLoc::parse(loc_str)?;
+    let file_path = build.id_to_path_map.get(&loc.file_id_str())?;
+
+    let absolute_path = if std::path::Path::new(file_path).is_absolute() {
+        std::path::PathBuf::from(file_path)
+    } else {
+        std::env::current_dir().ok()?.join(file_path)
+    };
+
+    let target_bytes = std::fs::read(&absolute_path).ok()?;
+    let start_pos = bytes_to_pos(&target_bytes, loc.offset)?;
+    let end_pos = bytes_to_pos(&target_bytes, loc.end())?;
+    let target_uri = Url::from_file_path(&absolute_path).ok()?;
+
+    Some(Location {
+        uri: target_uri,
+        range: Range {
+            start: start_pos,
+            end: end_pos,
+        },
+    })
+}
+
+/// Find a `NodeInfo` by node ID across all files.
+fn find_node_info<'a>(
+    nodes: &'a HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    node_id: NodeId,
+) -> Option<&'a NodeInfo> {
+    for file_nodes in nodes.values() {
+        if let Some(node) = file_nodes.get(&node_id) {
+            return Some(node);
+        }
+    }
+    None
+}
+
 /// Go-to-declaration using pre-built `CachedBuild` indices.
 /// Avoids redundant O(N) AST traversal by reusing cached node maps.
 pub fn goto_declaration_cached(
@@ -714,6 +872,14 @@ pub fn goto_declaration_cached(
     source_bytes: &[u8],
 ) -> Option<Location> {
     let byte_position = pos_to_bytes(source_bytes, position);
+
+    // Check if cursor is on the qualifier segment of a multi-segment
+    // IdentifierPath (e.g., cursor on `Pool` in `Pool.State`).
+    // If so, navigate to the container declaration (via scope) instead
+    // of the struct/enum that referencedDeclaration points to.
+    if let Some(location) = resolve_qualifier_goto(build, file_uri, byte_position) {
+        return Some(location);
+    }
 
     if let Some((file_path, location_bytes, length)) = goto_bytes(
         &build.nodes,

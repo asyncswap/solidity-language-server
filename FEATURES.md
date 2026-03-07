@@ -1,8 +1,8 @@
 ## Features
 
-- **Go to Definition** / **Go to Declaration** — jump to any symbol across files
-- **Find References** — all usages of a symbol across the project
-- **Rename** — project-wide symbol rename with prepare support
+- **Go to Definition** / **Go to Declaration** — jump to any symbol across files, including qualifier segments in qualified type paths (e.g., `Pool` in `Pool.State` navigates to the contract/library)
+- **Find References** — all usages of a symbol across the project, including qualified type path references (e.g., `Pool` in `Pool.State`)
+- **Rename** — project-wide symbol rename with prepare support, including qualifier usages in qualified type paths
 - **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution, AST node ID for debugging
 - **Completions** — scope-aware with two modes (fast cache vs full recomputation)
 - **Document Links** — clickable imports, type names, function calls

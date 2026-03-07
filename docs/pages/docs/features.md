@@ -1,4 +1,24 @@
-## LSP Methods
+## Features
+
+- **Go to Definition** / **Go to Declaration** — jump to any symbol across files, including qualifier segments in qualified type paths (e.g., `Pool` in `Pool.State` navigates to the contract/library)
+- **Find References** — all usages of a symbol across the project, including qualified type path references (e.g., `Pool` in `Pool.State`)
+- **Rename** — project-wide symbol rename with prepare support, including qualifier usages in qualified type paths
+- **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution, AST node ID for debugging
+- **Completions** — scope-aware with two modes (fast cache vs full recomputation)
+- **Document Links** — clickable imports, type names, function calls
+- **Document Symbols** / **Workspace Symbols** — outline and search
+- **Formatting** — via `forge fmt`
+- **Diagnostics** — from `solc` and `forge lint`
+- **Signature Help** — parameter info on function calls, event emits, and mapping access
+- **Inlay Hints** — parameter names and gas estimates
+- **File Operations** — `workspace/willCreateFiles` scaffolding + `workspace/willRenameFiles`/`workspace/willDeleteFiles` import edits + `workspace/didCreateFiles`/`workspace/didRenameFiles`/`workspace/didDeleteFiles` cache migration/re-index (`fileOperations.templateOnCreate`, `fileOperations.updateImportsOnRename`, `fileOperations.updateImportsOnDelete`)
+- **Code Actions** — `textDocument/codeAction` quickfix engine; handles `unused-import` forge-lint diagnostic with "Remove unused import" action; JSON-driven rule table in `data/error_codes.json`
+- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + in-memory AST, force clean rebuild) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
+- **Save Performance** — content hash check skips redundant solc rebuilds when file is unchanged; `collect_import_pragmas` runs on blocking thread pool to avoid stalling the async runtime on large projects
+
+See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
+
+### LSP Methods
 
 **General**
 

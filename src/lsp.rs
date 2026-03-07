@@ -3948,17 +3948,10 @@ impl LanguageServer for ForgeLsp {
             }
         }
 
-        // Deduplicate across all caches
-        let mut seen = std::collections::HashSet::new();
-        locations.retain(|loc| {
-            seen.insert((
-                loc.uri.clone(),
-                loc.range.start.line,
-                loc.range.start.character,
-                loc.range.end.line,
-                loc.range.end.character,
-            ))
-        });
+        // Deduplicate across all caches — removes exact duplicates and
+        // contained-range duplicates (e.g., UserDefinedTypeName full-span
+        // vs IdentifierPath name-only span for qualified type paths).
+        locations = references::dedup_locations(locations);
 
         if locations.is_empty() {
             self.client

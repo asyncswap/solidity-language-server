@@ -21,7 +21,7 @@ If you are looking for import-string navigation (for example `import "./Pool.sol
 - `id_to_path_map: HashMap<SolcFileId, String>`
 - `external_refs: HashMap<SrcLocation, NodeId>`
 
-`NodeInfo` includes fields like `src`, `name_location`, and `referenced_declaration`.
+`NodeInfo` includes fields like `src`, `name_location`, `referenced_declaration`, and `scope`.
 
 At request time, the server uses this snapshot to resolve references quickly, then merges results from other cached builds to get cross-file coverage.
 
@@ -51,7 +51,7 @@ In `src/lsp.rs`, the `references` handler does the following:
 - Collect current-build references.
 - Derive stable target location `(def_abs_path, def_byte_offset)`.
 - Scan other cached builds for cross-file references to the same target.
-- Deduplicate by `(uri, start, end)` and return.
+- Deduplicate via `dedup_locations()` — removes exact `(uri, start, end)` duplicates and contained-range duplicates (when one range strictly contains another on the same URI, keep only the narrower range). This prevents qualified type paths like `IPoolManager.ModifyLiquidityParams` from producing two entries per usage site.
 
 This is why you get both local and cross-file references in one response when caches are available.
 
@@ -59,6 +59,7 @@ This is why you get both local and cross-file references in one response when ca
 
 Inside `references.rs`, resolution follows this order:
 
+- Check for qualifier cursor: if the cursor is on the first segment of a multi-segment `IdentifierPath` (e.g., `Pool` in `Pool.State`), `resolve_qualifier_target()` resolves the container via `referencedDeclaration → scope` and dispatches to `collect_qualifier_references()`.
 - Try Yul resolution first (`externalReferences` mapping).
 - Fall back to AST span match (smallest containing node).
 - Normalize to declaration target: follow `referencedDeclaration` when present, else use the node id directly.
@@ -75,6 +76,24 @@ During references:
 - Yul usage locations are also appended back into the result set by matching `decl_id`.
 
 This is why references work inside inline assembly rather than only in high-level Solidity syntax.
+
+## Qualifier references
+
+When the cursor is on the qualifier segment of a qualified type path (e.g., `Pool` in `Pool.State`), the server resolves references for the container (contract/library/interface) rather than the struct/enum member.
+
+**Detection:** `resolve_qualifier_target()` checks that the node is an `IdentifierPath` with `name_locations.len() > 1` and that the cursor falls within `name_locations[0]` (the first segment).
+
+**Resolution chain:** The function follows `referencedDeclaration` (which points to the struct/enum) to find that declaration node, then reads its `scope` field to get the container's node ID.
+
+**Collection:** `collect_qualifier_references()` merges two sources:
+- Direct references to the container (imports, expression-position usages) via the normal `all_references` index.
+- Qualifier references from the `qualifier_refs` index — `IdentifierPath` nodes where the container appears as the first segment. These are emitted using `nameLocations[0]` to produce the correct narrow range.
+
+**Index:** `CachedBuild.qualifier_refs` (`HashMap<NodeId, Vec<NodeId>>`) is built at cache time by `build_qualifier_refs()`. It scans all multi-segment `IdentifierPath` nodes, follows `referencedDeclaration → scope`, and maps the container ID to the `IdentifierPath` node ID.
+
+**Cross-file:** `goto_references_for_target()` also checks the `qualifier_refs` index when the target is a container, so cross-file scans (used by both the references handler and the rename handler) include qualifier usages from other builds.
+
+**Merge:** `merge_missing_from()` merges `qualifier_refs` entries from other builds so the combined index is complete.
 
 ## Canonical file IDs via PathInterner
 

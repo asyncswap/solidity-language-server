@@ -5,7 +5,12 @@
 ### Features
 
 - Project-wide `PathInterner` for canonical file IDs — solc assigns file IDs sequentially based on input order, causing cross-compilation reference bugs; the interner assigns deterministic IDs so all builds share the same ID space (#185)
-- `textDocument/hover` — show AST node ID (`NodeId: \`<id>\``) in hover tooltips for debugging; references show `NodeId: \`<id>\` referencedDeclaration: \`<decl_id>\``
+- `textDocument/hover` — show AST node ID (`NodeId: \`<id>\``) in hover tooltips for debugging; references show ``NodeId: \`<id>\` referencedDeclaration: \`<decl_id>\` ``
+- `textDocument/references` — qualifier-aware reference resolution; "Find All References" on a container (contract/library/interface) now includes qualified type paths where the container appears as a prefix (e.g., `Pool` in `Pool.State`) (#187)
+- `textDocument/definition` — qualifier segment goto; clicking the qualifier in a qualified type path (e.g., `Pool` in `Pool.State`) navigates to the container declaration instead of the struct/enum (#187)
+- `CachedBuild` gains `qualifier_refs` field (`HashMap<NodeId, Vec<NodeId>>`) — maps container declaration IDs to `IdentifierPath` node IDs used as qualifiers; built at cache time by `build_qualifier_refs()` and merged across builds via `merge_missing_from()` (#187)
+- `NodeInfo` gains `scope` field — the containing declaration's node ID from the AST `scope` property; used to resolve qualified type path containers (#187)
+- `dedup_locations()` removes both exact and contained-range duplicates from reference results, preventing qualified type paths from producing duplicate entries (#187)
 
 ### Fixes
 

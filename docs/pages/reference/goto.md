@@ -89,6 +89,18 @@ A separate race was fixed so goto/hover read correct text after formatting:
 - **Parameter and local declaration navigation** is supported by tree-sitter declaration scanning.
 - **Content hash guard:** `on_change` skips a rebuild entirely when the saved text hash matches `CachedBuild.content_hash` from the last successful build. This prevents stale `build_version` drift in format-on-save loops.
 
+## Qualifier goto
+
+When the cursor is on the qualifier segment of a qualified type path (e.g., `Pool` in `Pool.State`), `resolve_qualifier_goto()` intercepts before the normal `goto_bytes()` path and navigates to the container declaration (the contract/library/interface).
+
+**How it works:**
+- Detects the cursor is on a multi-segment `IdentifierPath`'s first `nameLocations` entry.
+- Follows `referencedDeclaration` to the declaration node (e.g., the struct).
+- Reads the declaration's `scope` field to find the container's node ID.
+- Emits a `Location` pointing to the container's `name_location`.
+
+**Helper:** `find_node_info()` is a reusable utility that looks up a `NodeInfo` by `NodeId` across all files in the nodes map.
+
 ## Reused Infrastructure
 
 | Component | From | Used For |

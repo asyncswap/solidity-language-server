@@ -83,6 +83,7 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 | `completion_cache` | `Arc<CompletionCache>` | `completion::build_completion_cache()` | Full completion index (see below). Wrapped in `Arc` so it can be shared into `ForgeLsp.completion_cache` without cloning. |
 | `build_version` | `i32` | Set from LSP document version | The `didChange`/`didOpen` version that produced this build. Used to detect dirty files (`text_version > build_version`). |
 | `content_hash` | `u64` | `DefaultHasher` on source text | Hash of the source text at compile time. Compared in `on_change()` to skip rebuilds when content is identical (format-on-save guard). `0` for project-index builds. |
+| `qualifier_refs` | `HashMap<NodeId, Vec<NodeId>>` | `build_qualifier_refs()` in `goto.rs` | Maps container declaration ID (contract/library/interface) to `IdentifierPath` node IDs that use it as a qualifier prefix in qualified type paths (e.g., `Pool` in `Pool.State`). Used by references and rename to include qualifier usages. |
 
 ### `NodeInfo` stored per-node
 
@@ -93,10 +94,11 @@ Caches the list of solc versions installed by svm-rs. Populated lazily on first 
 - `node_type` — e.g. `"FunctionDefinition"`
 - `member_location` — for `MemberAccess` expressions
 - `absolute_path` — for `ImportDirective` nodes
+- `scope` — optional `NodeId`; the AST `scope` field pointing to the containing declaration (contract, library, interface, function). Used by `build_qualifier_refs()` to resolve the container in qualified type paths like `Pool.State`.
 
 ### Warm-loaded cache limitation
 
-When a `CachedBuild` is reconstructed from the on-disk v2 cache via `from_reference_index()`, only `nodes`, `path_to_abs`, `external_refs`, and `id_to_path_map` are populated. `decl_index`, `gas_index`, `hint_index`, `doc_index`, and `completion_cache` are all empty.
+When a `CachedBuild` is reconstructed from the on-disk v2 cache via `from_reference_index()`, only `nodes`, `path_to_abs`, `external_refs`, `id_to_path_map`, and `qualifier_refs` are populated. `decl_index`, `gas_index`, `hint_index`, `doc_index`, and `completion_cache` are all empty.
 
 This means after a warm-load, only cross-file goto-definition and references work immediately. Hover docs, parameter inlay hints, gas estimates, and completions are not available until the first full `solc_project_index()` run completes. This is logged at startup and is by design: the warm-load prioritizes low latency for navigation features.
 
@@ -321,7 +323,8 @@ See the setup schema in [Setup Overview](/setup).
 
 | File | Role |
 |---|---|
-| `src/goto.rs` | `CachedBuild`, `NodeInfo`, `cache_ids()`, `from_reference_index()`, `remap_src_canonical()`, `canonicalize_node_info()` |
+| `src/goto.rs` | `CachedBuild`, `NodeInfo`, `cache_ids()`, `from_reference_index()`, `remap_src_canonical()`, `canonicalize_node_info()`, `build_qualifier_refs()`, `resolve_qualifier_goto()`, `find_node_info()` |
+| `src/references.rs` | `dedup_locations()`, `resolve_qualifier_target()`, `collect_qualifier_references()`, `goto_references_for_target()`, `resolve_target_location()` |
 | `src/project_cache.rs` | All on-disk v2 persistence: save, load, upsert, shard logic |
 | `src/lsp.rs` | Owns all in-memory caches; drives lifecycle via LSP events; both async workers |
 | `src/completion.rs` | `CompletionCache`, `build_completion_cache()` |

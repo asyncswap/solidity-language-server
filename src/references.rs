@@ -6,6 +6,85 @@ use crate::goto::{
 };
 use crate::types::{AbsPath, NodeId, SourceLoc};
 
+/// Deduplicate locations: remove exact duplicates and contained-range
+/// duplicates. When two locations share the same URI and one range contains
+/// the other (e.g., `IPoolManager.ModifyLiquidityParams` col 9-43 and
+/// `ModifyLiquidityParams` col 22-43), keep only the narrower range.
+/// This prevents qualified type paths from producing two result entries
+/// per usage site.
+pub fn dedup_locations(locations: Vec<Location>) -> Vec<Location> {
+    if locations.len() <= 1 {
+        return locations;
+    }
+
+    // First pass: exact dedup by (uri, start, end).
+    let mut unique_locations = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for location in locations {
+        let key = (
+            location.uri.clone(),
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        );
+        if seen.insert(key) {
+            unique_locations.push(location);
+        }
+    }
+
+    // Second pass: remove locations whose range contains another location's
+    // range on the same URI (keep the narrower one).
+    // For each location, check if any other location on the same URI has a
+    // range strictly contained within it. If so, the wider location is
+    // a `UserDefinedTypeName` full-span duplicate of the narrower
+    // `IdentifierPath` name location.
+    let mut to_remove = vec![false; unique_locations.len()];
+    for i in 0..unique_locations.len() {
+        if to_remove[i] {
+            continue;
+        }
+        for j in (i + 1)..unique_locations.len() {
+            if to_remove[j] {
+                continue;
+            }
+            if unique_locations[i].uri != unique_locations[j].uri {
+                continue;
+            }
+            let ri = unique_locations[i].range;
+            let rj = unique_locations[j].range;
+            // Check if ri contains rj (ri is wider)
+            if range_contains(ri, rj) {
+                to_remove[i] = true;
+            }
+            // Check if rj contains ri (rj is wider)
+            if range_contains(rj, ri) {
+                to_remove[j] = true;
+            }
+        }
+    }
+
+    unique_locations
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !to_remove[*i])
+        .map(|(_, loc)| loc)
+        .collect()
+}
+
+/// Check if range `outer` strictly contains range `inner`.
+/// Both ranges must be non-equal and `inner` must be fully within `outer`.
+fn range_contains(outer: Range, inner: Range) -> bool {
+    if outer == inner {
+        return false;
+    }
+    let outer_start = (outer.start.line, outer.start.character);
+    let outer_end = (outer.end.line, outer.end.character);
+    let inner_start = (inner.start.line, inner.start.character);
+    let inner_end = (inner.end.line, inner.end.character);
+    outer_start <= inner_start && inner_end <= outer_end
+}
+
 pub fn all_references(
     nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
 ) -> HashMap<NodeId, Vec<NodeId>> {
@@ -165,6 +244,20 @@ pub fn goto_references_cached(
     };
     let byte_position = pos_to_bytes(source_bytes, position);
 
+    // Check if cursor is on the qualifier segment of a multi-segment
+    // IdentifierPath (e.g., `Pool` in `Pool.State`). If so, resolve
+    // references for the container (via referencedDeclaration → scope)
+    // instead of the struct.
+    if let Some(qualifier_target) = resolve_qualifier_target(&build.nodes, abs_path, byte_position)
+    {
+        return collect_qualifier_references(
+            build,
+            qualifier_target,
+            include_declaration,
+            &all_refs,
+        );
+    }
+
     // Check if cursor is on a Yul external reference first
     let target_node_id = if let Some(decl_id) = byte_to_decl_via_external_refs(
         &build.external_refs,
@@ -214,21 +307,101 @@ pub fn goto_references_cached(
         }
     }
 
-    let mut unique_locations = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for location in locations {
-        let key = (
-            location.uri.clone(),
-            location.range.start.line,
-            location.range.start.character,
-            location.range.end.line,
-            location.range.end.character,
-        );
-        if seen.insert(key) {
-            unique_locations.push(location);
+    dedup_locations(locations)
+}
+
+/// Check if cursor is on the qualifier segment (first `nameLocations` entry) of
+/// a multi-segment `IdentifierPath`. Returns the container declaration's node ID
+/// (via `referencedDeclaration → scope`) if so.
+fn resolve_qualifier_target(
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+    abs_path: &str,
+    byte_position: usize,
+) -> Option<NodeId> {
+    let node_id = byte_to_id(nodes, abs_path, byte_position)?;
+    let file_nodes = nodes.get(abs_path)?;
+    let node_info = file_nodes.get(&node_id)?;
+
+    // Must be a multi-segment IdentifierPath
+    if node_info.node_type.as_deref() != Some("IdentifierPath")
+        || node_info.name_locations.len() <= 1
+    {
+        return None;
+    }
+
+    // Check cursor is on the first segment (the qualifier)
+    let first_loc = SourceLoc::parse(&node_info.name_locations[0])?;
+    if byte_position < first_loc.offset || byte_position >= first_loc.end() {
+        return None;
+    }
+
+    // Follow referencedDeclaration → declaration node → scope
+    let ref_decl_id = node_info.referenced_declaration?;
+    // Find the declaration node across all files to read its scope
+    for file_nodes in nodes.values() {
+        if let Some(decl_node) = file_nodes.get(&ref_decl_id) {
+            return decl_node.scope;
         }
     }
-    unique_locations
+    None
+}
+
+/// Collect references for a container declaration (contract/library/interface),
+/// including both direct references and qualifier references from the
+/// `qualifier_refs` index.
+fn collect_qualifier_references(
+    build: &CachedBuild,
+    container_id: NodeId,
+    include_declaration: bool,
+    all_refs: &HashMap<NodeId, Vec<NodeId>>,
+) -> Vec<Location> {
+    let mut results: HashSet<NodeId> = HashSet::new();
+    if include_declaration {
+        results.insert(container_id);
+    }
+
+    // Direct references to the container (imports, expression-position usages)
+    if let Some(refs) = all_refs.get(&container_id) {
+        results.extend(refs.iter().copied());
+    }
+
+    let mut locations = Vec::new();
+
+    // Emit locations for direct references (using name_location as usual)
+    for id in &results {
+        if let Some(location) =
+            id_to_location_with_index(&build.nodes, &build.id_to_path_map, *id, None)
+        {
+            locations.push(location);
+        }
+    }
+
+    // Emit qualifier locations from the qualifier_refs index.
+    // These are IdentifierPath nodes where the container appears as the
+    // first segment (e.g., `Pool` in `Pool.State`). Emit nameLocations[0].
+    if let Some(qualifier_node_ids) = build.qualifier_refs.get(&container_id) {
+        for &qnode_id in qualifier_node_ids {
+            if let Some(location) = id_to_location_with_index(
+                &build.nodes,
+                &build.id_to_path_map,
+                qnode_id,
+                Some(0), // first segment = qualifier
+            ) {
+                locations.push(location);
+            }
+        }
+    }
+
+    // Also add Yul external reference use sites for the container
+    for (src_str, decl_id) in &build.external_refs {
+        if *decl_id == container_id
+            && let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map)
+        {
+            locations.push(location);
+        }
+    }
+
+    dedup_locations(locations)
 }
 
 /// Resolve cursor position to the target definition's location (abs_path + byte offset).
@@ -245,6 +418,23 @@ pub fn resolve_target_location(
     let path_str = path.to_str()?;
     let abs_path = build.path_to_abs.get(path_str)?;
     let byte_position = pos_to_bytes(source_bytes, position);
+
+    // Check if cursor is on the qualifier segment of a qualified path.
+    // If so, resolve the target to the container declaration instead.
+    if let Some(container_id) = resolve_qualifier_target(&build.nodes, abs_path, byte_position) {
+        for (file_abs_path, file_nodes) in &build.nodes {
+            if let Some(node_info) = file_nodes.get(&container_id) {
+                let loc_str = node_info
+                    .name_location
+                    .as_deref()
+                    .unwrap_or(node_info.src.as_str());
+                if let Some(src_loc) = SourceLoc::parse(loc_str) {
+                    return Some((file_abs_path.to_string(), src_loc.offset));
+                }
+            }
+        }
+        return None;
+    }
 
     // Check Yul external references first
     let target_node_id = if let Some(decl_id) = byte_to_decl_via_external_refs(
@@ -320,6 +510,14 @@ pub fn goto_references_for_target(
         None => return vec![],
     };
 
+    // Check if the target is a container (contract/library/interface) that
+    // has qualifier references. When the caller resolved a qualifier cursor
+    // (e.g., `Pool` in `Pool.State`), the def_byte_offset points to the
+    // container declaration. If this build has qualifier_refs for that
+    // container, we need to include them.
+    let is_qualifier_target =
+        !build.qualifier_refs.is_empty() && build.qualifier_refs.contains_key(&target_node_id);
+
     // Build a set of node IDs that live in the excluded file so we can
     // skip them cheaply during the id_to_location loop.
     let excluded_ids: HashSet<NodeId> = if let Some(excl) = exclude_abs_path {
@@ -357,6 +555,27 @@ pub fn goto_references_for_target(
         }
     }
 
+    // Emit qualifier locations from the qualifier_refs index when the
+    // target is a container. These are IdentifierPath nodes where the
+    // container appears as the first segment (e.g., `Pool` in `Pool.State`).
+    if is_qualifier_target {
+        if let Some(qualifier_node_ids) = build.qualifier_refs.get(&target_node_id) {
+            for &qnode_id in qualifier_node_ids {
+                if excluded_ids.contains(&qnode_id) {
+                    continue;
+                }
+                if let Some(location) = id_to_location_with_index(
+                    &build.nodes,
+                    &build.id_to_path_map,
+                    qnode_id,
+                    Some(0), // first segment = qualifier
+                ) {
+                    locations.push(location);
+                }
+            }
+        }
+    }
+
     // Yul external reference use sites
     for (src_str, decl_id) in &build.external_refs {
         if *decl_id == target_node_id {
@@ -376,5 +595,5 @@ pub fn goto_references_for_target(
         }
     }
 
-    locations
+    dedup_locations(locations)
 }
