@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.31
+
+### Fixes
+
+- Precise `fromRanges` in call hierarchy — `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls` now prefer `member_location` (the identifier-only span) over `src` (the full expression span) for `MemberAccess` nodes; e.g. `slot0.protocolFee().getZeroForOneFee()` produces `fromRanges` pointing at just `protocolFee` and `getZeroForOneFee` instead of the entire chain (#191)
+- Cross-build node ID mismatch in `textDocument/implementation` — the handler used the file build's `target_id` to look up `base_function_implementation` in the project build, which could resolve to a completely different function; now re-resolves the target by `byte_to_id()` per build (#193)
+
+### Docs
+
+- Neovim call hierarchy handler snippet — outgoing calls now use `ctx.params.item.uri` for the file path instead of `vim.api.nvim_buf_get_name(ctx.bufnr)` (which returns the wrong file when `prepareCallHierarchy` resolves to a different file); both handlers sort quickfix items by line then column
+
+### Tests
+
+- 622 tests, 0 failures, 0 warnings
+
 ## v0.1.30
 
 ### Features
