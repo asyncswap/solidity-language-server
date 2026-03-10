@@ -221,7 +221,15 @@ pub fn incoming_calls(
             }
 
             if let Some((caller_id, _)) = best_callable {
-                results.push((caller_id, ref_info.src.to_string()));
+                // Prefer member_location (just the identifier) over src
+                // (the whole expression) so fromRanges point precisely
+                // at the function name, not the entire chain.
+                let call_src = ref_info
+                    .member_location
+                    .as_deref()
+                    .unwrap_or(ref_info.src.as_str())
+                    .to_string();
+                results.push((caller_id, call_src));
             }
         }
     }
@@ -285,7 +293,15 @@ pub fn outgoing_calls(
                 if ref_decl == caller_id {
                     continue;
                 }
-                results.push((ref_decl, ref_info.src.to_string()));
+                // Prefer member_location (just the identifier) over src
+                // (the whole expression) so fromRanges point precisely
+                // at the function name, not the entire chain.
+                let call_src = ref_info
+                    .member_location
+                    .as_deref()
+                    .unwrap_or(ref_info.src.as_str())
+                    .to_string();
+                results.push((ref_decl, call_src));
             }
         }
     }

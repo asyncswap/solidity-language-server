@@ -110,9 +110,9 @@ The `base_function_implementation` index is bidirectional: built from `NodeInfo.
 
 ### fromRanges
 
-Call-site ranges use the reference node's `src` directly — the full expression span at the call site. This gives narrow, precise ranges for:
-- **Direct identifier calls** (e.g., `foo()`): the identifier span
-- **Member access calls** (e.g., `pool.swap()`): the member access expression span
+Call-site ranges prefer `member_location` (the identifier-only span) over `src` (the full expression span). This gives precise ranges that point at the function name, not the entire call chain:
+- **Direct identifier calls** (e.g., `foo()`): uses `src` — the identifier span
+- **Member access calls** (e.g., `slot0.protocolFee().getZeroForOneFee()`): uses `member_location` — just `protocolFee` or `getZeroForOneFee`, not the entire chain from `slot0` through the closing paren
 
 ### Container aggregation
 

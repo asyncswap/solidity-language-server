@@ -19,6 +19,11 @@ vim.lsp.handlers["callHierarchy/incomingCalls"] = function(_, result, ctx)
       })
     end
   end
+  table.sort(items, function(a, b)
+    if a.filename ~= b.filename then return a.filename < b.filename end
+    if a.lnum ~= b.lnum then return a.lnum < b.lnum end
+    return a.col < b.col
+  end)
   vim.fn.setqflist({}, " ", { title = "Incoming Calls", items = items })
   vim.cmd("copen")
 end
@@ -44,6 +49,10 @@ vim.lsp.handlers["callHierarchy/outgoingCalls"] = function(_, result, ctx)
       })
     end
   end
+  table.sort(items, function(a, b)
+    if a.lnum ~= b.lnum then return a.lnum < b.lnum end
+    return a.col < b.col
+  end)
   vim.fn.setqflist({}, " ", { title = "Outgoing Calls", items = items })
   vim.cmd("copen")
 end
