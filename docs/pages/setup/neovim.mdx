@@ -42,6 +42,25 @@ After file renames, if your editor leaves updated imports in modified buffers, r
 
 This writes all modified buffers so tools reading from disk (for example `forge`) see updated imports.
 
+## Call Hierarchy
+
+Neovim has built-in call hierarchy support (`vim.lsp.buf.incoming_calls()`, `vim.lsp.buf.outgoing_calls()`). However, the default quickfix rendering uses `fromRanges` (call-site locations in the current file) rather than the target definition location, which can be confusing.
+
+Add custom handlers to show target definitions instead:
+
+```lua [.config/nvim/plugin/lsp.lua]
+// [!include ~/snippets/setup/neovim-call-hierarchy.lua]
+```
+
+If you have [lspsaga.nvim](https://github.com/glepnir/lspsaga.nvim), it provides a tree UI that renders call hierarchy correctly out of the box:
+
+```vim
+:Lspsaga incoming_calls
+:Lspsaga outgoing_calls
+```
+
+See the [Call Hierarchy reference](/reference/call-hierarchy) for full details on what gets tracked and known limitations.
+
 ## Debugging
 
 Neovim LSP logs are written to:
