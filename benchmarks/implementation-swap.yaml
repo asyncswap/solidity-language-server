@@ -1,0 +1,35 @@
+# Implementation benchmark — IPoolManager.swap (interface → implementations)
+#   lsp-bench -c benchmarks/implementation-swap.yaml -v
+#
+# Uses didOpen to open PoolManager.sol first, which triggers a build containing
+# both IPoolManager and PoolManager. Then tests implementation on IPoolManager.swap.
+
+project: v4-core
+file: src/interfaces/IPoolManager.sol
+line: 145
+col: 13
+output: benchmarks/implementation-swap
+report: README.md
+response: full
+iterations: 1
+warmup: 0
+timeout: 60
+index_timeout: 60
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+benchmarks:
+  - textDocument/implementation
+
+servers:
+  - label: dev
+    cmd: ./target/release/solidity-language-server
+    args: []
+
+methods:
+  textDocument/implementation:
+    waitForProgressToken: "solidity/projectIndexFull"
+    didOpen:
+      - file: src/PoolManager.sol

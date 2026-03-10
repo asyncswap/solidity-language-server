@@ -1,0 +1,30 @@
+# Call hierarchy benchmark — outgoing calls from Pool.swap reached via pool.swap(params)
+#   lsp-bench -c benchmarks/call-hierarchy-pool-swap-site.yaml -v
+
+project: v4-core
+file: src/PoolManager.sol
+line: 234
+col: 17
+output: benchmarks/call-hierarchy-pool-swap-site
+report: README.md
+response: full
+iterations: 1
+warmup: 0
+timeout: 60
+index_timeout: 60
+
+benchmarks:
+  - textDocument/prepareCallHierarchy
+  - callHierarchy/outgoingCalls
+
+servers:
+  - label: dev
+    cmd: ./target/release/solidity-language-server
+    args: []
+
+methods:
+  textDocument/prepareCallHierarchy:
+    cold: true
+
+  callHierarchy/outgoingCalls:
+    cold: true
