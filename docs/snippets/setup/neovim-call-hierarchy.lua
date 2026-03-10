@@ -28,15 +28,16 @@ vim.lsp.handlers["callHierarchy/outgoingCalls"] = function(_, result, ctx)
     vim.notify("No outgoing calls found", vim.log.levels.INFO)
     return
   end
-  -- fromRanges are in the current file (the caller); callee.uri is where
-  -- the callee is defined. Use the current buffer's file for fromRanges.
-  local current_file = vim.api.nvim_buf_get_name(ctx.bufnr)
+  -- fromRanges are in the caller item file, not the callee definition file.
+  local caller_uri = ctx.params and ctx.params.item and ctx.params.item.uri
+  local caller_file = caller_uri and vim.uri_to_fname(caller_uri)
+    or vim.api.nvim_buf_get_name(ctx.bufnr)
   local items = {}
   for _, call in ipairs(result) do
     local callee = call.to
     for _, range in ipairs(call.fromRanges or {}) do
       table.insert(items, {
-        filename = current_file,
+        filename = caller_file,
         lnum = range.start.line + 1,
         col = range.start.character + 1,
         text = callee.name,

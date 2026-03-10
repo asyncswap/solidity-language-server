@@ -19,9 +19,9 @@ keymap("<leader>i", vim.lsp.buf.incoming_calls, "Incoming calls")
 keymap("<leader>o", vim.lsp.buf.outgoing_calls, "Outgoing calls")
 ```
 
-By default, Neovim renders results in the quickfix list using `fromRanges` but shows the target file name with the call-site line number, which can be confusing.
+By default, Neovim renders results in the quickfix list using `fromRanges` but can pair them with the wrong file name, which is confusing.
 
-The recommended handlers below jump to the **call-site expression** (`fromRanges`) with just the function name in the quickfix text. For outgoing calls, `fromRanges` are locations inside the current buffer (where the call expression appears), so the handler uses `ctx.bufnr` instead of the callee's definition URI:
+The recommended handlers below jump to the **call-site expression** (`fromRanges`) with just the function name in the quickfix text. For outgoing calls, `fromRanges` belong to the caller item file (`ctx.params.item.uri`), not the callee definition URI:
 
 ```lua [.config/nvim/plugin/lsp.lua]
 // [!include ~/snippets/setup/neovim-call-hierarchy.lua]
