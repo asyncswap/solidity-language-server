@@ -4074,99 +4074,89 @@ impl LanguageServer for ForgeLsp {
         let byte_position = goto::pos_to_bytes(&source_bytes, position);
         let abs_path = uri.as_ref().strip_prefix("file://").unwrap_or(uri.as_ref());
 
-        // Resolve node ID at cursor and follow referencedDeclaration
-        let target_id = match references::byte_to_id(&cached_build.nodes, abs_path, byte_position) {
-            Some(id) => {
-                if let Some(file_nodes) = cached_build.nodes.get(abs_path) {
-                    if let Some(node_info) = file_nodes.get(&id) {
-                        node_info.referenced_declaration.unwrap_or(id)
-                    } else {
-                        id
-                    }
-                } else {
-                    id
-                }
-            }
-            None => return Ok(None),
-        };
+        // Resolve node ID at cursor and follow referencedDeclaration.
+        // Also resolve the target's declaration abs_path + byte_offset for
+        // cross-build re-resolution (node IDs differ across builds).
+        let (target_id, target_decl_abs, target_decl_offset) =
+            match references::byte_to_id(&cached_build.nodes, abs_path, byte_position) {
+                Some(id) => {
+                    let resolved = cached_build
+                        .nodes
+                        .get(abs_path)
+                        .and_then(|f| f.get(&id))
+                        .and_then(|info| info.referenced_declaration)
+                        .unwrap_or(id);
 
-        // Collect implementations from all builds: file build, project build, sub_caches
-        let mut impl_ids: Vec<crate::types::NodeId> = Vec::new();
+                    // Find the declaration's file and name_location byte offset.
+                    let (decl_abs, decl_offset) = references::resolve_target_location(
+                        &cached_build,
+                        &uri,
+                        position,
+                        &source_bytes,
+                    )
+                    .unwrap_or_else(|| (abs_path.to_string(), byte_position));
 
-        // Check file-level build
-        if let Some(impls) = cached_build.base_function_implementation.get(&target_id) {
-            for &impl_id in impls {
-                if !impl_ids.contains(&impl_id) {
-                    impl_ids.push(impl_id);
+                    (resolved, decl_abs, decl_offset)
                 }
-            }
+                None => return Ok(None),
+            };
+
+        // Collect all builds to search.
+        let project_build = self.ensure_project_cached_build().await;
+        let sub_caches = self.sub_caches.read().await;
+
+        let mut builds: Vec<&goto::CachedBuild> = vec![&cached_build];
+        if let Some(ref pb) = project_build {
+            builds.push(pb);
+        }
+        for sc in sub_caches.iter() {
+            builds.push(sc);
         }
 
-        // Check project build
-        if let Some(project_build) = self.ensure_project_cached_build().await {
-            if let Some(impls) = project_build.base_function_implementation.get(&target_id) {
-                for &impl_id in impls {
-                    if !impl_ids.contains(&impl_id) {
-                        impl_ids.push(impl_id);
-                    }
-                }
-            }
-        }
-
-        // Check sub_caches (library builds)
-        {
-            let sub_caches = self.sub_caches.read().await;
-            for sub_build in sub_caches.iter() {
-                if let Some(impls) = sub_build.base_function_implementation.get(&target_id) {
-                    for &impl_id in impls {
-                        if !impl_ids.contains(&impl_id) {
-                            impl_ids.push(impl_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        if impl_ids.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no implementations found")
-                .await;
-            return Ok(None);
-        }
-
-        // Resolve each implementation ID to a Location, searching all builds
+        // For each build, re-resolve the target by byte offset (stable across
+        // compilations), then look up base_function_implementation with the
+        // build-local node ID.  Collect (impl_id, build_ref) pairs so we can
+        // resolve locations within the same build that produced the ID.
         let mut locations: Vec<Location> = Vec::new();
-        for impl_id in &impl_ids {
-            // Try file build
-            if let Some(loc) = references::id_to_location(
-                &cached_build.nodes,
-                &cached_build.id_to_path_map,
-                *impl_id,
-            ) {
-                locations.push(loc);
+        let mut seen_positions: Vec<(String, u32, u32)> = Vec::new(); // (uri, line, char)
+
+        for build in &builds {
+            // Re-resolve target in this build's node-ID space.
+            let local_target =
+                references::byte_to_id(&build.nodes, &target_decl_abs, target_decl_offset).or_else(
+                    || {
+                        // If the declaration file isn't in this build, try the original ID.
+                        if build.nodes.values().any(|f| f.contains_key(&target_id)) {
+                            Some(target_id)
+                        } else {
+                            None
+                        }
+                    },
+                );
+
+            let Some(local_id) = local_target else {
                 continue;
-            }
-            // Try project build
-            if let Some(ref project_build) = self.ensure_project_cached_build().await {
-                if let Some(loc) = references::id_to_location(
-                    &project_build.nodes,
-                    &project_build.id_to_path_map,
-                    *impl_id,
-                ) {
-                    locations.push(loc);
-                    continue;
-                }
-            }
-            // Try sub_caches
-            let sub_caches = self.sub_caches.read().await;
-            for sub_build in sub_caches.iter() {
-                if let Some(loc) = references::id_to_location(
-                    &sub_build.nodes,
-                    &sub_build.id_to_path_map,
-                    *impl_id,
-                ) {
-                    locations.push(loc);
-                    break;
+            };
+
+            // Look up equivalents in this build.
+            let Some(impls) = build.base_function_implementation.get(&local_id) else {
+                continue;
+            };
+
+            for &impl_id in impls {
+                if let Some(loc) =
+                    references::id_to_location(&build.nodes, &build.id_to_path_map, impl_id)
+                {
+                    // Dedup by source position.
+                    let key = (
+                        loc.uri.to_string(),
+                        loc.range.start.line,
+                        loc.range.start.character,
+                    );
+                    if !seen_positions.contains(&key) {
+                        seen_positions.push(key);
+                        locations.push(loc);
+                    }
                 }
             }
         }
