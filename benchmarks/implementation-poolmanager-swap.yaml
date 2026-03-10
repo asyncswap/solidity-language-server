@@ -1,0 +1,29 @@
+# Implementation benchmark — PoolManager.swap (implementation → interface)
+#   lsp-bench -c benchmarks/implementation-poolmanager-swap.yaml -v
+#
+# PoolManager.swap is a concrete implementation that overrides IPoolManager.swap.
+# The file build alone includes IPoolManager via imports, so no project index needed.
+
+project: v4-core
+file: src/PoolManager.sol
+line: 187
+col: 13
+output: benchmarks/implementation-poolmanager-swap
+report: README.md
+response: full
+iterations: 1
+warmup: 0
+timeout: 60
+index_timeout: 60
+
+benchmarks:
+  - textDocument/implementation
+
+servers:
+  - label: dev
+    cmd: ./target/release/solidity-language-server
+    args: []
+
+methods:
+  textDocument/implementation:
+    cold: true
