@@ -1,0 +1,256 @@
+{
+  "sources": {
+    "example/A.sol": {
+      "ast": {
+        "absolutePath": "example/A.sol",
+        "exportedSymbols": {
+          "Test": [
+            17
+          ]
+        },
+        "id": 18,
+        "license": "UNLICENSED",
+        "nodeType": "SourceUnit",
+        "nodes": [
+          {
+            "id": 14,
+            "literals": [
+              "solidity",
+              "^",
+              "0.8",
+              ".0"
+            ],
+            "nodeType": "PragmaDirective",
+            "src": "39:23:0"
+          },
+          {
+            "canonicalName": "Test",
+            "id": 17,
+            "members": [
+              {
+                "constant": false,
+                "id": 16,
+                "mutability": "mutable",
+                "name": "foo",
+                "nameLocation": "90:3:0",
+                "nodeType": "VariableDeclaration",
+                "scope": 17,
+                "src": "82:11:0",
+                "stateVariable": false,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_uint256",
+                  "typeString": "uint256"
+                },
+                "typeName": {
+                  "id": 15,
+                  "name": "uint256",
+                  "nodeType": "ElementaryTypeName",
+                  "src": "82:7:0",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_uint256",
+                    "typeString": "uint256"
+                  }
+                },
+                "visibility": "internal"
+              }
+            ],
+            "name": "Test",
+            "nameLocation": "71:4:0",
+            "nodeType": "StructDefinition",
+            "scope": 18,
+            "src": "64:32:0",
+            "visibility": "public"
+          }
+        ],
+        "src": "39:58:0"
+      },
+      "id": 0
+    },
+    "example/Alias.sol": {
+      "ast": {
+        "absolutePath": "example/Alias.sol",
+        "exportedSymbols": {
+          "AFile": [
+            4
+          ],
+          "AliasUser": [
+            12
+          ],
+          "MyTest": [
+            17
+          ],
+          "Test": [
+            17
+          ]
+        },
+        "id": 13,
+        "license": "UNLICENSED",
+        "nodeType": "SourceUnit",
+        "nodes": [
+          {
+            "id": 1,
+            "literals": [
+              "solidity",
+              "^",
+              "0.8",
+              ".0"
+            ],
+            "nodeType": "PragmaDirective",
+            "src": "39:23:1"
+          },
+          {
+            "absolutePath": "example/A.sol",
+            "file": "./A.sol",
+            "id": 3,
+            "nameLocation": "-1:-1:-1",
+            "nodeType": "ImportDirective",
+            "scope": 13,
+            "sourceUnit": 18,
+            "src": "64:39:1",
+            "symbolAliases": [
+              {
+                "foreign": {
+                  "id": 2,
+                  "name": "Test",
+                  "nodeType": "Identifier",
+                  "overloadedDeclarations": [],
+                  "referencedDeclaration": 17,
+                  "src": "72:4:1",
+                  "typeDescriptions": {}
+                },
+                "local": "MyTest",
+                "nameLocation": "-1:-1:-1"
+              }
+            ],
+            "unitAlias": ""
+          },
+          {
+            "absolutePath": "example/A.sol",
+            "file": "./A.sol",
+            "id": 4,
+            "nameLocation": "124:5:1",
+            "nodeType": "ImportDirective",
+            "scope": 13,
+            "sourceUnit": 18,
+            "src": "104:26:1",
+            "symbolAliases": [],
+            "unitAlias": "AFile"
+          },
+          {
+            "absolutePath": "example/A.sol",
+            "file": "./A.sol",
+            "id": 5,
+            "nameLocation": "-1:-1:-1",
+            "nodeType": "ImportDirective",
+            "scope": 13,
+            "sourceUnit": 18,
+            "src": "131:17:1",
+            "symbolAliases": [],
+            "unitAlias": ""
+          },
+          {
+            "abstract": false,
+            "baseContracts": [],
+            "canonicalName": "AliasUser",
+            "contractDependencies": [],
+            "contractKind": "contract",
+            "fullyImplemented": true,
+            "id": 12,
+            "linearizedBaseContracts": [
+              12
+            ],
+            "name": "AliasUser",
+            "nameLocation": "159:9:1",
+            "nodeType": "ContractDefinition",
+            "nodes": [
+              {
+                "constant": false,
+                "functionSelector": "5ed8b37d",
+                "id": 8,
+                "mutability": "mutable",
+                "name": "myTest",
+                "nameLocation": "189:6:1",
+                "nodeType": "VariableDeclaration",
+                "scope": 12,
+                "src": "175:20:1",
+                "stateVariable": true,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_struct$_Test_$17_storage",
+                  "typeString": "struct Test"
+                },
+                "typeName": {
+                  "id": 7,
+                  "nodeType": "UserDefinedTypeName",
+                  "pathNode": {
+                    "id": 6,
+                    "name": "MyTest",
+                    "nameLocations": [
+                      "175:6:1"
+                    ],
+                    "nodeType": "IdentifierPath",
+                    "referencedDeclaration": 17,
+                    "src": "175:6:1"
+                  },
+                  "referencedDeclaration": 17,
+                  "src": "175:6:1",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_struct$_Test_$17_storage_ptr",
+                    "typeString": "struct Test"
+                  }
+                },
+                "visibility": "public"
+              },
+              {
+                "constant": false,
+                "functionSelector": "cb602ee0",
+                "id": 11,
+                "mutability": "mutable",
+                "name": "afileTest",
+                "nameLocation": "219:9:1",
+                "nodeType": "VariableDeclaration",
+                "scope": 12,
+                "src": "201:27:1",
+                "stateVariable": true,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_struct$_Test_$17_storage",
+                  "typeString": "struct Test"
+                },
+                "typeName": {
+                  "id": 10,
+                  "nodeType": "UserDefinedTypeName",
+                  "pathNode": {
+                    "id": 9,
+                    "name": "AFile.Test",
+                    "nameLocations": [
+                      "201:5:1",
+                      "207:4:1"
+                    ],
+                    "nodeType": "IdentifierPath",
+                    "referencedDeclaration": 17,
+                    "src": "201:10:1"
+                  },
+                  "referencedDeclaration": 17,
+                  "src": "201:10:1",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_struct$_Test_$17_storage_ptr",
+                    "typeString": "struct Test"
+                  }
+                },
+                "visibility": "public"
+              }
+            ],
+            "scope": 13,
+            "src": "150:81:1",
+            "usedErrors": [],
+            "usedEvents": []
+          }
+        ],
+        "src": "39:193:1"
+      },
+      "id": 1
+    }
+  }
+}

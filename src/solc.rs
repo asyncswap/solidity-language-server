@@ -585,10 +585,19 @@ pub async fn resolve_remappings(config: &FoundryConfig) -> Vec<String> {
 /// The optimizer adds ~3s and doesn't affect AST/doc quality.
 /// Gas estimates force solc through full EVM codegen — benchmarking on
 /// a 510-file project showed 56s with vs 6s without (88% of cost).
+/// Build a standard-json input for a single-file solc compilation.
+///
+/// Only the entry file is listed in `sources`.  Solc discovers imported
+/// files on its own via the import callback and reads them from disk.
+///
+/// When `source_content` is provided, the text is inlined as `"content"`
+/// so solc compiles the editor's live buffer instead of the on-disk version.
+/// When `None`, solc reads the file from disk via `"urls"`.
 pub fn build_standard_json_input(
     file_path: &str,
     remappings: &[String],
     config: &FoundryConfig,
+    source_content: Option<&str>,
 ) -> Value {
     let contract_outputs = vec!["devdoc", "userdoc", "evm.methodIdentifiers"];
 
@@ -611,13 +620,18 @@ pub fn build_standard_json_input(
         settings["evmVersion"] = json!(evm_version);
     }
 
+    let source_value = match source_content {
+        Some(content) => json!({ "content": content }),
+        None => json!({ "urls": [file_path] }),
+    };
+
+    // Build sources manually to avoid json! macro key interpolation issues.
+    let mut sources = serde_json::Map::new();
+    sources.insert(file_path.to_string(), source_value);
+
     json!({
         "language": "Solidity",
-        "sources": {
-            file_path: {
-                "urls": [file_path]
-            }
-        },
+        "sources": sources,
         "settings": settings
     })
 }
@@ -870,10 +884,15 @@ pub fn normalize_forge_output(mut forge_output: Value) -> Value {
 ///
 /// This is the main entry point used by the LSP. Reads the file source
 /// to detect the pragma version and resolve the correct solc binary.
+///
+/// When `content_cache` is provided, open editor buffers are fed to solc
+/// When `source_content` is provided, the text is inlined so solc compiles
+/// the editor's live buffer instead of reading from disk.
 pub async fn solc_ast(
     file_path: &str,
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
+    source_content: Option<&str>,
 ) -> Result<Value, RunnerError> {
     let remappings = resolve_remappings(config).await;
 
@@ -901,7 +920,7 @@ pub async fn solc_ast(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| file_path.to_string());
 
-    let input = build_standard_json_input(&rel_path, &remappings, config);
+    let input = build_standard_json_input(&rel_path, &remappings, config, source_content);
     let raw_output = run_solc(&solc_binary, &input, &config.root).await?;
 
     Ok(normalize_solc_output(raw_output, Some(&config.root)))
@@ -913,7 +932,7 @@ pub async fn solc_build(
     config: &FoundryConfig,
     client: Option<&tower_lsp::Client>,
 ) -> Result<Value, RunnerError> {
-    solc_ast(file_path, config, client).await
+    solc_ast(file_path, config, client, None).await
 }
 
 // ── Project-wide indexing ──────────────────────────────────────────────────
@@ -1987,6 +2006,7 @@ mod tests {
                 "forge-std/=lib/forge-std/src/".to_string(),
             ],
             &config,
+            None,
         );
 
         let sources = input.get("sources").unwrap().as_object().unwrap();
@@ -2023,7 +2043,7 @@ mod tests {
             evm_version: Some("osaka".to_string()),
             ..Default::default()
         };
-        let input = build_standard_json_input("/path/to/Foo.sol", &[], &config);
+        let input = build_standard_json_input("/path/to/Foo.sol", &[], &config, None);
 
         let settings = input.get("settings").unwrap();
 

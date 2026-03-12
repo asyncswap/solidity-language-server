@@ -1,0 +1,29 @@
+# References for `AFile` unit alias at usage site
+#
+# Alias.sol line 9:     AFile.Test public afileTest;
+#                        ^cursor (col 4)
+#
+# Expected: AFile at 4:20 + AFile at 9:4  (2 locations, Alias.sol only)
+#
+#   lsp-bench -c benchmarks/alias-refs-afile-usage.yaml
+
+project: example
+file: Alias.sol
+line: 9
+col: 4
+output: benchmarks/alias-refs-afile-usage
+report: README.md
+
+servers:
+  - mmsaki@latest
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+benchmarks:
+  - textDocument/references
+
+methods:
+  textDocument/references:
+    waitForProgressToken: "solidity/projectIndexFull"

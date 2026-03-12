@@ -1,0 +1,29 @@
+# References for `AFile` unit alias at import declaration site
+#
+# Alias.sol line 4: import "./A.sol" as AFile;
+#                                       ^cursor (col 20)
+#
+# Expected: AFile at 4:20 + AFile at 9:4  (2 locations, Alias.sol only)
+#
+#   lsp-bench -c benchmarks/alias-refs-afile-import.yaml
+
+project: example
+file: Alias.sol
+line: 4
+col: 20
+output: benchmarks/alias-refs-afile-import
+report: README.md
+
+servers:
+  - mmsaki@latest
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+benchmarks:
+  - textDocument/references
+
+methods:
+  textDocument/references:
+    waitForProgressToken: "solidity/projectIndexFull"

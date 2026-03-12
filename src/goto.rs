@@ -132,10 +132,6 @@ pub struct CachedBuild {
     /// The text_cache version this build was created from.
     /// Used to detect dirty files (unsaved edits since last build).
     pub build_version: i32,
-    /// FxHash of the source text this build was compiled from.
-    /// Used to skip redundant rebuilds when content has not changed
-    /// (e.g. format-on-save loops that re-trigger didSave with identical text).
-    pub content_hash: u64,
     /// Qualifier reference index: maps a container declaration ID
     /// (contract/library/interface) to `IdentifierPath` node IDs that use
     /// it as a qualifier prefix in qualified type paths (e.g., `Pool.State`).
@@ -298,7 +294,6 @@ impl CachedBuild {
             doc_index,
             completion_cache,
             build_version,
-            content_hash: 0,
             qualifier_refs,
             base_function_implementation,
         }
@@ -402,7 +397,6 @@ impl CachedBuild {
             doc_index: HashMap::new(),
             completion_cache,
             build_version,
-            content_hash: 0,
             qualifier_refs,
             base_function_implementation,
         }

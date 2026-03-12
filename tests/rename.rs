@@ -548,3 +548,125 @@ async fn test_rename_unit_alias_renames_all_occurrences() {
         assert_eq!(edit.new_text, "Lib");
     }
 }
+
+// =============================================================================
+// Rename alias at USAGE site propagates to import declaration
+//
+// Renaming `MyTest` on line 8 (`MyTest public myTest`) must rename BOTH
+// the usage AND the alias declaration in the import on line 3.
+// Previously this fell into the AST path which followed referencedDeclaration
+// to Test and failed to rename the alias.
+// =============================================================================
+
+#[tokio::test]
+async fn test_rename_symbol_alias_at_usage_site() {
+    let (build, _) = build_example("Alias.sol").await;
+    let example_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+
+    let alias_path = example_dir.join("Alias.sol");
+    let alias_source = std::fs::read(&alias_path).expect("read Alias.sol");
+    let alias_uri = Url::from_file_path(&alias_path).unwrap();
+
+    let mut text_buffers: HashMap<String, Vec<u8>> = HashMap::new();
+    text_buffers.insert(alias_uri.to_string(), alias_source.clone());
+
+    // Cursor on "MyTest" at usage site (line 8, col 6 — middle of "MyTest")
+    let pos = Position::new(8, 6);
+    let result = rename_symbol(
+        &build,
+        &alias_uri,
+        pos,
+        &alias_source,
+        "Renamed".to_string(),
+        &[],
+        &text_buffers,
+    );
+
+    assert!(
+        result.is_some(),
+        "rename of MyTest at usage site should succeed"
+    );
+    let workspace_edit = result.unwrap();
+    let changes = workspace_edit.changes.expect("should have changes");
+    let edits = &changes[&alias_uri];
+
+    // Must rename both: import alias (line 3) + usage (line 8)
+    assert_eq!(
+        edits.len(),
+        2,
+        "expected 2 edits for MyTest (import alias + usage), got {}: {:?}",
+        edits.len(),
+        edits
+    );
+
+    for edit in edits {
+        assert_eq!(edit.new_text, "Renamed");
+        let len = edit.range.end.character - edit.range.start.character;
+        assert_eq!(
+            len, 6,
+            "each edit should cover 'MyTest' (6 chars), got {}",
+            len
+        );
+    }
+
+    // Verify exact lines
+    let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+    assert!(lines.contains(&3), "should have edit on line 3 (import)");
+    assert!(lines.contains(&8), "should have edit on line 8 (usage)");
+}
+
+#[tokio::test]
+async fn test_rename_unit_alias_at_usage_site() {
+    let (build, _) = build_example("Alias.sol").await;
+    let example_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+
+    let alias_path = example_dir.join("Alias.sol");
+    let alias_source = std::fs::read(&alias_path).expect("read Alias.sol");
+    let alias_uri = Url::from_file_path(&alias_path).unwrap();
+
+    let mut text_buffers: HashMap<String, Vec<u8>> = HashMap::new();
+    text_buffers.insert(alias_uri.to_string(), alias_source.clone());
+
+    // Cursor on "AFile" at usage site (line 9, col 5 — middle of "AFile")
+    let pos = Position::new(9, 5);
+    let result = rename_symbol(
+        &build,
+        &alias_uri,
+        pos,
+        &alias_source,
+        "Lib".to_string(),
+        &[],
+        &text_buffers,
+    );
+
+    assert!(
+        result.is_some(),
+        "rename of AFile at usage site should succeed"
+    );
+    let workspace_edit = result.unwrap();
+    let changes = workspace_edit.changes.expect("should have changes");
+    let edits = &changes[&alias_uri];
+
+    // Must rename both: import alias (line 4) + usage (line 9)
+    assert_eq!(
+        edits.len(),
+        2,
+        "expected 2 edits for AFile (import alias + usage), got {}: {:?}",
+        edits.len(),
+        edits
+    );
+
+    for edit in edits {
+        assert_eq!(edit.new_text, "Lib");
+        let len = edit.range.end.character - edit.range.start.character;
+        assert_eq!(
+            len, 5,
+            "each edit should cover 'AFile' (5 chars), got {}",
+            len
+        );
+    }
+
+    let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+    assert!(lines.contains(&4), "should have edit on line 4 (import)");
+    assert!(lines.contains(&9), "should have edit on line 9 (usage)");
+}

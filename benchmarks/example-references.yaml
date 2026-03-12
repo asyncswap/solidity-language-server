@@ -1,0 +1,34 @@
+# References for `Test` struct defined in A.sol
+#
+# Test is referenced across:
+#   - A.sol:4:8  (definition)
+#   - B.sol:4:9  (import {Test})
+#   - B.sol:7:5  (Test test;)
+#   - B.sol:11:5 (Test test;)
+#   - Alias.sol:4:9  (import {Test as MyTest})
+#   - Alias.sol:10:11 (AFile.Test)
+#
+# Expects the project index to find references across all files.
+#
+#   lsp-bench -c benchmarks/example-references.yaml
+
+project: example
+file: A.sol
+line: 3
+col: 8
+output: benchmarks/example-references
+report: README.md
+
+servers:
+  - mmsaki@latest
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+benchmarks:
+  - textDocument/references
+
+methods:
+  textDocument/references:
+    waitForProgressToken: "solidity/projectIndexFull"

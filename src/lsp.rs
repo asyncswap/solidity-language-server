@@ -113,6 +113,10 @@ pub struct ForgeLsp {
     /// to use the canonical IDs.  At query time any build's
     /// `id_to_path_map` can resolve any canonical file ID.
     path_interner: Arc<RwLock<crate::types::PathInterner>>,
+    /// URIs that received cross-file error diagnostics from another file's
+    /// compilation.  Cleared on the next successful build so stale errors
+    /// don't linger after the underlying issue is fixed.
+    cross_file_diag_uris: Arc<RwLock<HashSet<Url>>>,
 }
 
 /// Spawn a background task to discover, build (if missing), and load caches
@@ -373,6 +377,7 @@ impl ForgeLsp {
             sub_caches: Arc::new(RwLock::new(Vec::new())),
             sub_caches_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             path_interner: Arc::new(RwLock::new(crate::types::PathInterner::new())),
+            cross_file_diag_uris: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -709,30 +714,6 @@ impl ForgeLsp {
             }
         };
 
-        // Skip rebuild if the content is identical to what was last compiled.
-        // This avoids a redundant solc invocation on format-on-save loops where
-        // the formatter returns edits, Neovim applies them, saves again, and the
-        // resulting text is already fully formatted (same bytes as last build).
-        {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            params.text.hash(&mut hasher);
-            let incoming_hash = hasher.finish();
-
-            let cache = self.ast_cache.read().await;
-            if let Some(cached) = cache.get(&uri.to_string()) {
-                if cached.content_hash != 0 && cached.content_hash == incoming_hash {
-                    self.client
-                        .log_message(
-                            MessageType::INFO,
-                            "on_change: content unchanged since last build, skipping rebuild",
-                        )
-                        .await;
-                    return;
-                }
-            }
-        }
-
         // Clear stale diagnostics immediately so the user sees instant feedback
         // while solc is compiling.  Fresh diagnostics (if any) are published
         // below once the build finishes.
@@ -753,7 +734,14 @@ impl ForgeLsp {
         // This is the default path — fast and direct.
         let (lint_result, build_result, ast_result) = if self.use_solc {
             let foundry_cfg = self.foundry_config_for_file(&file_path).await;
-            let solc_future = crate::solc::solc_ast(path_str, &foundry_cfg, Some(&self.client));
+            // Pass the editor's live buffer text directly so solc compiles
+            // what the user sees, not the on-disk version.
+            let solc_future = crate::solc::solc_ast(
+                path_str,
+                &foundry_cfg,
+                Some(&self.client),
+                Some(&params.text),
+            );
 
             if should_lint {
                 let (lint, solc) = tokio::join!(
@@ -873,13 +861,23 @@ impl ForgeLsp {
         });
         let build_succeeded = !has_file_local_errors && !has_solc_errors;
 
-        // Compute content hash once — used to stamp the build and skip
-        // future rebuilds when content hasn't changed.
-        let content_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            params.text.hash(&mut hasher);
-            hasher.finish()
+        // Extract cross-file error diagnostics before ast_result is consumed.
+        // These are errors in imported files that need to be published to
+        // those files and their content hashes invalidated.
+        let cross_file_diags = if has_solc_errors {
+            if let Ok(ref data) = ast_result {
+                let cfg = self.foundry_config_for_file(&file_path).await;
+                crate::build::cross_file_error_diagnostics(
+                    data,
+                    &file_path,
+                    &cfg.root,
+                    &cfg.ignored_error_codes,
+                )
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
         };
 
         if build_succeeded {
@@ -899,22 +897,12 @@ impl ForgeLsp {
                             "Build produced empty AST, keeping existing cache",
                         )
                         .await;
-                    // Stamp content_hash on existing cache so the hash guard
-                    // doesn't skip the next rebuild with different content.
-                    let mut cache = self.ast_cache.write().await;
-                    let uri_key = uri.to_string();
-                    if let Some(existing) = cache.get(&uri_key).cloned() {
-                        let mut updated = (*existing).clone();
-                        updated.content_hash = content_hash;
-                        cache.insert(uri_key.into(), Arc::new(updated));
-                    }
                 } else {
-                    let mut cached_build = goto::CachedBuild::new(
+                    let cached_build = goto::CachedBuild::new(
                         ast_data,
                         version,
                         Some(&mut *self.path_interner.write().await),
                     );
-                    cached_build.content_hash = content_hash;
                     let cached_build = Arc::new(cached_build);
                     let mut cache = self.ast_cache.write().await;
                     cache.insert(uri.to_string().into(), cached_build.clone());
@@ -938,21 +926,8 @@ impl ForgeLsp {
                     .await;
             }
         } else {
-            // Build has errors — keep the existing AST (don't invalidate
-            // navigation) but stamp the content_hash so the next save with
-            // *different* content is not falsely skipped by the early-return
-            // guard above.  Without this, fixing an error and reverting to a
-            // previously-compiled state would match the old hash → skip the
-            // rebuild → leave stale error diagnostics in the editor.
-            {
-                let mut cache = self.ast_cache.write().await;
-                let uri_key = uri.to_string();
-                if let Some(existing) = cache.get(&uri_key).cloned() {
-                    let mut updated = (*existing).clone();
-                    updated.content_hash = content_hash;
-                    cache.insert(uri_key.into(), Arc::new(updated));
-                }
-            }
+            // Build has errors — keep the existing AST cache so navigation
+            // continues to work while the user fixes errors.
             let reason = if has_solc_errors && !has_file_local_errors {
                 "Cross-file compilation errors detected, keeping existing AST cache"
             } else {
@@ -1042,6 +1017,32 @@ impl ForgeLsp {
         self.client
             .publish_diagnostics(uri, all_diagnostics, None)
             .await;
+
+        // Cross-file diagnostics: publish errors to affected files and clear
+        // stale errors from files that no longer have cross-file issues.
+        {
+            let mut prev_uris = self.cross_file_diag_uris.write().await;
+            let mut new_uris = HashSet::new();
+
+            for (abs_path, diags) in &cross_file_diags {
+                if let Ok(file_uri) = Url::from_file_path(abs_path) {
+                    self.client
+                        .publish_diagnostics(file_uri.clone(), diags.clone(), None)
+                        .await;
+                    new_uris.insert(file_uri);
+                }
+            }
+
+            // Clear diagnostics from files that previously had cross-file
+            // errors but no longer do (e.g. the error was fixed).
+            for stale_uri in prev_uris.difference(&new_uris) {
+                self.client
+                    .publish_diagnostics(stale_uri.clone(), vec![], None)
+                    .await;
+            }
+
+            *prev_uris = new_uris;
+        }
 
         // Refresh inlay hints after everything is updated
         if build_succeeded {
@@ -1324,11 +1325,25 @@ impl ForgeLsp {
             return None;
         }
 
-        // Cache miss — build the AST from disk.
+        // Cache miss — build the AST from disk.  Use open editor buffers
+        // when available so solc sees unsaved edits.
         let path_str = file_path.to_str()?;
         let ast_result = if self.use_solc {
             let foundry_cfg = self.foundry_config_for_file(&file_path).await;
-            match crate::solc::solc_ast(path_str, &foundry_cfg, Some(&self.client)).await {
+            // Use the text_cache buffer if this file is open in the editor,
+            // otherwise let solc read from disk.
+            let cached_text = {
+                let tc = self.text_cache.read().await;
+                tc.get(&uri_str).map(|(_, c)| c.clone())
+            };
+            match crate::solc::solc_ast(
+                path_str,
+                &foundry_cfg,
+                Some(&self.client),
+                cached_text.as_deref(),
+            )
+            .await
+            {
                 Ok(data) => Ok(data),
                 Err(_) => self.compiler.ast(path_str).await,
             }
@@ -3427,6 +3442,11 @@ impl LanguageServer for ForgeLsp {
         // Slow path: first save for this URI (or worker died) — create channel
         // and spawn the worker.
         let (tx, mut rx) = tokio::sync::watch::channel(Some(params));
+        // Mark the initial value as unseen so the worker processes the first
+        // save immediately.  Without this, `rx.changed()` blocks until the
+        // *second* send because the initial channel value isn't counted as a
+        // change by default.
+        rx.mark_changed();
         self.did_save_workers
             .write()
             .await
@@ -3881,6 +3901,43 @@ impl LanguageServer for ForgeLsp {
 
         let source_text = String::from_utf8_lossy(&source_bytes).to_string();
 
+        // Fast path: if cursor is on an import path string, resolve it with
+        // tree-sitter.  This works regardless of AST state (dirty, errors,
+        // empty cache) because it only needs the live source text and the
+        // project's import resolution rules.
+        {
+            let imports = crate::links::ts_find_imports(&source_bytes);
+            if let Some(imp) = imports.iter().find(|imp| {
+                let r = &imp.inner_range;
+                position >= r.start && position <= r.end
+            }) {
+                let foundry_cfg = self.foundry_config_for_file(&file_path).await;
+                let remappings = crate::solc::resolve_remappings(&foundry_cfg).await;
+                if let Some(abs) = resolve_import_spec_to_abs(
+                    &foundry_cfg.root,
+                    &file_path,
+                    &imp.path,
+                    &remappings,
+                ) {
+                    if abs.exists() {
+                        if let Ok(target_uri) = Url::from_file_path(&abs) {
+                            let location = Location {
+                                uri: target_uri,
+                                range: Range::default(), // start of file
+                            };
+                            self.client
+                                .log_message(
+                                    MessageType::INFO,
+                                    format!("found definition (import path) at {}", location.uri),
+                                )
+                                .await;
+                            return Ok(Some(GotoDefinitionResponse::from(location)));
+                        }
+                    }
+                }
+            }
+        }
+
         // Extract the identifier name under the cursor for tree-sitter validation.
         let cursor_name = goto::cursor_context(&source_text, position).map(|ctx| ctx.name);
 
@@ -4256,6 +4313,64 @@ impl LanguageServer for ForgeLsp {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
+
+        // Fast path: if the cursor is on an import alias name (either at the
+        // import declaration or at a usage site), collect references via
+        // tree-sitter instead of the AST.  Alias local names (e.g. `MyTest`
+        // in `import {Test as MyTest}`) have `nameLocation: "-1:-1:-1"` in
+        // the solc AST, so `byte_to_id` cannot resolve them.  Even at usage
+        // sites, the AST's `referencedDeclaration` points to the original
+        // symbol (Test), not the alias — the AST path would return references
+        // to the wrong name.
+        //
+        // Tree-sitter gives us exact positions for all identifier nodes whose
+        // text matches the alias name within this file.
+        {
+            let cursor_byte = crate::goto::pos_to_bytes(&source_bytes, position);
+            let identifier = crate::rename::get_identifier_at_position(&source_bytes, position);
+
+            let is_alias = if let Some(alias_name) =
+                crate::rename::ts_alias_local_name_at_cursor(&source_bytes, cursor_byte)
+            {
+                // Cursor is directly on an alias name at the import site.
+                Some(alias_name)
+            } else if let Some(ref ident) = identifier {
+                // Cursor is on an identifier — check if it matches any alias
+                // name declared in this file's imports.
+                let alias_names = crate::rename::ts_find_alias_names(&source_bytes);
+                if alias_names.contains(ident.as_str()) {
+                    Some(ident.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(alias_name) = is_alias {
+                let locations = crate::rename::ts_collect_identifier_locations(
+                    &source_bytes,
+                    &uri,
+                    &alias_name,
+                );
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "Found {} references for alias '{}'",
+                            locations.len(),
+                            alias_name
+                        ),
+                    )
+                    .await;
+                return if locations.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(locations))
+                };
+            }
+        }
+
         let file_build = self.get_or_fetch_build(&uri, &file_path, true).await;
         let file_build = match file_build {
             Some(cb) => cb,

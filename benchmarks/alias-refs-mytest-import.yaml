@@ -1,0 +1,29 @@
+# References for `MyTest` alias at import declaration site
+#
+# Alias.sol line 3: import {Test as MyTest} from "./A.sol";
+#                                   ^cursor (col 16)
+#
+# Expected: MyTest at 3:16 + MyTest at 8:4  (2 locations, Alias.sol only)
+#
+#   lsp-bench -c benchmarks/alias-refs-mytest-import.yaml
+
+project: example
+file: Alias.sol
+line: 3
+col: 16
+output: benchmarks/alias-refs-mytest-import
+report: README.md
+
+servers:
+  - mmsaki@latest
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+benchmarks:
+  - textDocument/references
+
+methods:
+  textDocument/references:
+    waitForProgressToken: "solidity/projectIndexFull"
