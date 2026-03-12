@@ -847,8 +847,31 @@ impl ForgeLsp {
             }
         };
 
-        // Only replace cache with new AST if build succeeded (no errors; warnings are OK)
-        let build_succeeded = matches!(&build_result, Ok(diagnostics) if diagnostics.iter().all(|d| d.severity != Some(DiagnosticSeverity::ERROR)));
+        // Only replace cache with new AST if build succeeded (no errors).
+        //
+        // `build_output_to_diagnostics` filters errors to the current file,
+        // so cross-file errors (e.g. an imported file referencing a symbol
+        // we just removed) are invisible to the file-local check.  When such
+        // errors occur solc returns `"sources": {}` — no AST at all — even
+        // though no errors are attributed to the current file.  Check the
+        // raw solc errors array as well so we don't replace a working cache
+        // with an empty build.
+        let has_file_local_errors = matches!(
+            &build_result,
+            Ok(diagnostics) if diagnostics.iter().any(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        );
+        let has_solc_errors = ast_result.as_ref().is_ok_and(|data| {
+            data.get("errors")
+                .and_then(|v| v.as_array())
+                .is_some_and(|errs| {
+                    errs.iter().any(|e| {
+                        e.get("severity")
+                            .and_then(|s| s.as_str())
+                            .is_some_and(|s| s == "error")
+                    })
+                })
+        });
+        let build_succeeded = !has_file_local_errors && !has_solc_errors;
 
         // Compute content hash once — used to stamp the build and skip
         // future rebuilds when content hasn't changed.
@@ -861,24 +884,50 @@ impl ForgeLsp {
 
         if build_succeeded {
             if let Ok(ast_data) = ast_result {
-                let mut cached_build = goto::CachedBuild::new(
-                    ast_data,
-                    version,
-                    Some(&mut *self.path_interner.write().await),
-                );
-                cached_build.content_hash = content_hash;
-                let cached_build = Arc::new(cached_build);
-                let mut cache = self.ast_cache.write().await;
-                cache.insert(uri.to_string().into(), cached_build.clone());
-                drop(cache);
+                // Safety: never replace a populated cache with an empty build.
+                // Even when build_succeeded is true, solc may return empty
+                // sources for edge cases we haven't accounted for.
+                let sources_empty = ast_data
+                    .get("sources")
+                    .and_then(|v| v.as_object())
+                    .map_or(true, |m| m.is_empty());
 
-                // Insert pre-built completion cache (built during CachedBuild::new)
-                {
-                    let mut cc = self.completion_cache.write().await;
-                    cc.insert(
-                        uri.to_string().into(),
-                        cached_build.completion_cache.clone(),
+                if sources_empty {
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            "Build produced empty AST, keeping existing cache",
+                        )
+                        .await;
+                    // Stamp content_hash on existing cache so the hash guard
+                    // doesn't skip the next rebuild with different content.
+                    let mut cache = self.ast_cache.write().await;
+                    let uri_key = uri.to_string();
+                    if let Some(existing) = cache.get(&uri_key).cloned() {
+                        let mut updated = (*existing).clone();
+                        updated.content_hash = content_hash;
+                        cache.insert(uri_key.into(), Arc::new(updated));
+                    }
+                } else {
+                    let mut cached_build = goto::CachedBuild::new(
+                        ast_data,
+                        version,
+                        Some(&mut *self.path_interner.write().await),
                     );
+                    cached_build.content_hash = content_hash;
+                    let cached_build = Arc::new(cached_build);
+                    let mut cache = self.ast_cache.write().await;
+                    cache.insert(uri.to_string().into(), cached_build.clone());
+                    drop(cache);
+
+                    // Insert pre-built completion cache (built during CachedBuild::new)
+                    {
+                        let mut cc = self.completion_cache.write().await;
+                        cc.insert(
+                            uri.to_string().into(),
+                            cached_build.completion_cache.clone(),
+                        );
+                    }
                 }
             } else if let Err(e) = ast_result {
                 self.client
@@ -904,12 +953,12 @@ impl ForgeLsp {
                     cache.insert(uri_key.into(), Arc::new(updated));
                 }
             }
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    "Build errors detected, keeping existing AST cache",
-                )
-                .await;
+            let reason = if has_solc_errors && !has_file_local_errors {
+                "Cross-file compilation errors detected, keeping existing AST cache"
+            } else {
+                "Build errors detected, keeping existing AST cache"
+            };
+            self.client.log_message(MessageType::INFO, reason).await;
         }
 
         // cache text — only if no newer version exists (e.g. from formatting/did_change)
