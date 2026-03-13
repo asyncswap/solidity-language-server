@@ -32,6 +32,7 @@ svm = { package = "svm-rs", version = "0.5", default-features = false, features 
   "rustls",
 ] }
 semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 dhat = { version = "0.3", optional = true }
 
 [features]

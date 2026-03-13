@@ -26,6 +26,62 @@ use tower_lsp::{Client, LanguageServer, lsp_types::*};
 /// Per-document semantic token cache: `result_id` + token list.
 type SemanticTokenCache = HashMap<DocumentUri, (String, Vec<SemanticToken>)>;
 
+// ── Update check ──────────────────────────────────────────────────────
+
+/// The current version from Cargo.toml (e.g. "0.1.31").
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Check GitHub releases for a newer version and notify the user.
+async fn check_for_updates(client: Client) {
+    let url = "https://api.github.com/repos/mmsaki/solidity-language-server/releases/latest";
+
+    let http = match reqwest::Client::builder()
+        .user_agent("solidity-language-server")
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let resp = match http.get(url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return,
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let tag = match body.get("tag_name").and_then(|v| v.as_str()) {
+        Some(t) => t.strip_prefix('v').unwrap_or(t),
+        None => return,
+    };
+
+    let latest = match semver::Version::parse(tag) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let current = match semver::Version::parse(CURRENT_VERSION) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    if latest > current {
+        client
+            .show_message(
+                MessageType::INFO,
+                format!(
+                    "Solidity Language Server v{latest} is available (current: v{current}). \
+                     Update: cargo install solidity-language-server"
+                ),
+            )
+            .await;
+    }
+}
+
 #[derive(Clone)]
 pub struct ForgeLsp {
     client: Client,
@@ -2597,6 +2653,12 @@ impl LanguageServer for ForgeLsp {
             }
         }
 
+        // Check for updates in the background (non-blocking).
+        if self.settings.read().await.check_for_updates {
+            let client = self.client.clone();
+            tokio::spawn(check_for_updates(client));
+        }
+
         // Eagerly build the project index on startup so cross-file features
         // (willRenameFiles, references, goto) work immediately — even before
         // the user opens any .sol file.
@@ -3055,23 +3117,27 @@ impl LanguageServer for ForgeLsp {
                 let root = self.foundry_config.read().await.root.clone();
                 let cache_dir = crate::project_cache::cache_dir(&root);
 
+                // 1. Remove the on-disk cache directory.
                 let disk_result = if cache_dir.exists() {
                     std::fs::remove_dir_all(&cache_dir).map_err(|e| format!("{e}"))
                 } else {
                     Ok(())
                 };
 
-                if let Some(root_key) = self.project_cache_key().await {
-                    self.ast_cache.write().await.remove(&root_key);
-                }
+                // 2. Wipe all in-memory caches for a full reset.
+                self.ast_cache.write().await.clear();
+                self.completion_cache.write().await.clear();
+                self.sub_caches.write().await.clear();
+                self.semantic_token_cache.write().await.clear();
+                *self.path_interner.write().await = crate::types::PathInterner::new();
 
                 match disk_result {
                     Ok(()) => {
                         self.client
-                            .log_message(
+                            .show_message(
                                 MessageType::INFO,
                                 format!(
-                                    "solidity.clearCache: removed {} and cleared in-memory cache",
+                                    "Cache cleared: {} removed, all in-memory caches reset",
                                     cache_dir.display()
                                 ),
                             )
@@ -3080,7 +3146,7 @@ impl LanguageServer for ForgeLsp {
                     }
                     Err(e) => {
                         self.client
-                            .log_message(
+                            .show_message(
                                 MessageType::ERROR,
                                 format!("solidity.clearCache: failed to remove cache dir: {e}"),
                             )

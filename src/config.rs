@@ -29,6 +29,9 @@ pub struct Settings {
     pub file_operations: FileOperationsSettings,
     #[serde(default)]
     pub project_index: ProjectIndexSettings,
+    /// Check GitHub releases for a newer version on startup.
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
 }
 
 /// Inlay-hint settings.
