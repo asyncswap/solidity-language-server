@@ -101,6 +101,15 @@ pub const CHILD_KEYS: &[&str] = &[
 /// to the Solidity declaration node id they refer to.
 pub type ExternalRefs = HashMap<SrcLocation, NodeId>;
 
+/// Storage slot information for a state variable.
+#[derive(Debug, Clone)]
+pub struct StorageSlotInfo {
+    /// Storage slot number (e.g. "0", "1", "6").
+    pub slot: String,
+    /// Byte offset within the slot (0 unless packed).
+    pub offset: u32,
+}
+
 /// Pre-computed AST index. Built once when an AST enters the cache,
 /// then reused on every goto/references/rename/hover request.
 ///
@@ -151,6 +160,16 @@ pub struct CachedBuild {
     /// `callHierarchy/incomingCalls` to unify interface and implementation IDs.
     /// Empty in warm-loaded builds (`from_reference_index`).
     pub base_function_implementation: HashMap<NodeId, Vec<NodeId>>,
+    /// Storage layout index: maps state variable AST node IDs to their
+    /// storage slot and byte offset within that slot.
+    ///
+    /// Built from `contracts[path][name].storageLayout.storage[]` entries.
+    /// The `astId` in each entry matches the `NodeId` of the corresponding
+    /// `VariableDeclaration` in the AST (within the same compilation).
+    ///
+    /// Offset is non-zero only for packed variables (e.g. two `bool`s
+    /// sharing the same slot).
+    pub storage_layout: HashMap<NodeId, StorageSlotInfo>,
 }
 
 impl CachedBuild {
@@ -280,6 +299,9 @@ impl CachedBuild {
         // now persists the base_functions field.
         let base_function_implementation = build_base_function_implementation(&nodes);
 
+        // Build storage layout index from contracts[path][name].storageLayout.storage[].
+        let storage_layout = build_storage_layout(&ast);
+
         // The raw AST JSON is fully consumed — all data has been extracted
         // into the pre-built indexes above. `ast` is dropped here.
 
@@ -296,6 +318,7 @@ impl CachedBuild {
             build_version,
             qualifier_refs,
             base_function_implementation,
+            storage_layout,
         }
     }
 
@@ -346,6 +369,12 @@ impl CachedBuild {
                     entry.push(impl_id);
                 }
             }
+        }
+        // Merge storage layout: keep self's entries, add missing from other.
+        for (node_id, info) in &other.storage_layout {
+            self.storage_layout
+                .entry(*node_id)
+                .or_insert_with(|| info.clone());
         }
     }
 
@@ -399,8 +428,55 @@ impl CachedBuild {
             build_version,
             qualifier_refs,
             base_function_implementation,
+            storage_layout: HashMap::new(),
         }
     }
+}
+
+/// Build the storage layout index from solc's `contracts` output.
+///
+/// Walks `contracts[path][name].storageLayout.storage[]` and maps each
+/// entry's `astId` (which matches the AST `VariableDeclaration` node ID)
+/// to its slot and byte offset.
+fn build_storage_layout(ast: &Value) -> HashMap<NodeId, StorageSlotInfo> {
+    let mut map = HashMap::new();
+    let contracts = match ast.get("contracts").and_then(|v| v.as_object()) {
+        Some(c) => c,
+        None => return map,
+    };
+    for (_path, contracts_in_file) in contracts {
+        let file_contracts = match contracts_in_file.as_object() {
+            Some(c) => c,
+            None => continue,
+        };
+        for (_name, contract_data) in file_contracts {
+            // Process both storageLayout and transientStorageLayout
+            for key in &["storageLayout", "transientStorageLayout"] {
+                let entries = match contract_data
+                    .get(*key)
+                    .and_then(|v| v.get("storage"))
+                    .and_then(|v| v.as_array())
+                {
+                    Some(arr) => arr,
+                    None => continue,
+                };
+                for entry in entries {
+                    let ast_id = match entry.get("astId").and_then(|v| v.as_i64()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let slot = entry
+                        .get("slot")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0")
+                        .to_string();
+                    let offset = entry.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    map.insert(NodeId(ast_id), StorageSlotInfo { slot, offset });
+                }
+            }
+        }
+    }
+    map
 }
 
 /// Build the qualifier reference index from the cached node maps.
