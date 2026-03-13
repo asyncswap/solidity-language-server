@@ -1,0 +1,96 @@
+# v0.1.32
+
+Alias-aware navigation, stale data fixes, update notifications, and a proper cache reset.
+
+## Alias-aware navigation
+
+Import aliases now work everywhere. If you write:
+
+```solidity
+import {ERC20 as Token} from "./ERC20.sol";
+```
+
+Then `Token` correctly resolves through all navigation features:
+
+- **Go to Definition** / **Go to Declaration** — jumps to `ERC20`, not the alias
+- **Go to Implementation** — finds concrete implementations of the original
+- **Find References** — includes both `Token` usages and `ERC20` references
+- **Rename** — renames the alias across the project without touching the original name
+
+## Goto-implementation fallback
+
+When no implementations are found (e.g. cursor is on a concrete function, not
+an interface declaration), the server now falls back to goto-definition instead
+of returning nothing. This matches what most editors do for other languages.
+
+## Live buffer compilation
+
+`textDocument/didChange` now compiles the editor buffer directly with solc.
+You get cross-file diagnostics on unsaved edits — no need to save first.
+
+## Stale data fix across 10 LSP handlers
+
+This was the big bug. When a handler computed zero results, it returned
+JSON `null` instead of `[]`. LSP clients interpret `null` as "server
+couldn't compute" and keep showing whatever stale data they had.
+
+The symptom: delete a function, save, and the editor still shows inlay
+hints / reference highlights / fold markers for code that no longer exists.
+
+Fixed in all affected handlers:
+
+| Handler | Stale symptom |
+|---------|---------------|
+| `inlayHint` | Ghost parameter hints |
+| `references` | Phantom highlights |
+| `documentSymbol` | Stale outline/breadcrumbs |
+| `documentHighlight` | Stale cursor highlights |
+| `documentLink` | Dead import links |
+| `foldingRange` | Fold markers on deleted code |
+| `selectionRange` | Stale selection ranges |
+| `codeAction` | Phantom lightbulb indicators |
+| `workspace/symbol` | Stale search results |
+
+## Startup update check
+
+The server now checks GitHub releases on startup and shows a notification
+when a newer version is available:
+
+```
+Solidity Language Server v0.1.33 is available (current: v0.1.32).
+Update: cargo install solidity-language-server
+```
+
+Runs in the background, 5-second timeout, no impact on startup speed.
+Disable with:
+
+```json
+{
+  "solidity-language-server": {
+    "checkForUpdates": false
+  }
+}
+```
+
+## clearCache is now a full reset
+
+`solidity.clearCache` previously only removed the on-disk cache directory
+and one entry from the AST cache. Per-file builds, completion caches,
+sub-caches, semantic tokens, and the path interner all survived.
+
+Now it wipes everything:
+
+- On-disk `.solidity-language-server/` directory
+- All per-file and project AST builds
+- Completion caches
+- Library sub-caches
+- Semantic token caches
+- Path interner (canonical file ID mappings)
+
+The next open/save rebuilds from scratch.
+
+## Upgrade
+
+```sh
+cargo install solidity-language-server
+```
