@@ -4500,11 +4500,7 @@ impl LanguageServer for ForgeLsp {
                         ),
                     )
                     .await;
-                return if locations.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(locations))
-                };
+                return Ok(Some(locations));
             }
         }
 
@@ -4648,20 +4644,13 @@ impl LanguageServer for ForgeLsp {
         // vs IdentifierPath name-only span for qualified type paths).
         locations = references::dedup_locations(locations);
 
-        if locations.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "No references found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Found {} references", locations.len()),
-                )
-                .await;
-            Ok(Some(locations))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("Found {} references", locations.len()),
+            )
+            .await;
+        Ok(Some(locations))
     }
 
     async fn prepare_rename(
@@ -4856,20 +4845,13 @@ impl LanguageServer for ForgeLsp {
             let query = params.query.to_lowercase();
             all_symbols.retain(|symbol| symbol.name.to_lowercase().contains(&query));
         }
-        if all_symbols.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "No symbols found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} symbols", all_symbols.len()),
-                )
-                .await;
-            Ok(Some(all_symbols))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} symbols", all_symbols.len()),
+            )
+            .await;
+        Ok(Some(all_symbols))
     }
 
     async fn document_symbol(
@@ -4906,20 +4888,13 @@ impl LanguageServer for ForgeLsp {
         };
 
         let symbols = symbols::extract_document_symbols(&source);
-        if symbols.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no document symbols found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} document symbols", symbols.len()),
-                )
-                .await;
-            Ok(Some(DocumentSymbolResponse::Nested(symbols)))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} document symbols", symbols.len()),
+            )
+            .await;
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
     async fn document_highlight(
@@ -4956,21 +4931,13 @@ impl LanguageServer for ForgeLsp {
         };
 
         let highlights = highlight::document_highlights(&source, position);
-
-        if highlights.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no document highlights found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} document highlights", highlights.len()),
-                )
-                .await;
-            Ok(Some(highlights))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} document highlights", highlights.len()),
+            )
+            .await;
+        Ok(Some(highlights))
     }
 
     async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
@@ -5085,21 +5052,13 @@ impl LanguageServer for ForgeLsp {
         };
 
         let result = links::document_links(&cached_build, &uri, &source_bytes);
-
-        if result.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no document links found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} document links", result.len()),
-                )
-                .await;
-            Ok(Some(result))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} document links", result.len()),
+            )
+            .await;
+        Ok(Some(result))
     }
 
     async fn semantic_tokens_full(
@@ -5295,21 +5254,13 @@ impl LanguageServer for ForgeLsp {
         };
 
         let ranges = folding::folding_ranges(&source);
-
-        if ranges.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no folding ranges found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} folding ranges", ranges.len()),
-                )
-                .await;
-            Ok(Some(ranges))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} folding ranges", ranges.len()),
+            )
+            .await;
+        Ok(Some(ranges))
     }
 
     async fn selection_range(
@@ -5342,21 +5293,13 @@ impl LanguageServer for ForgeLsp {
         };
 
         let ranges = selection::selection_ranges(&source, &params.positions);
-
-        if ranges.is_empty() {
-            self.client
-                .log_message(MessageType::INFO, "no selection ranges found")
-                .await;
-            Ok(None)
-        } else {
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("found {} selection ranges", ranges.len()),
-                )
-                .await;
-            Ok(Some(ranges))
-        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("found {} selection ranges", ranges.len()),
+            )
+            .await;
+        Ok(Some(ranges))
     }
 
     async fn inlay_hint(
@@ -5612,11 +5555,7 @@ impl LanguageServer for ForgeLsp {
             }
         }
 
-        if actions.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(actions))
-        }
+        Ok(Some(actions))
     }
 
     async fn will_rename_files(
