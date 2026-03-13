@@ -1,0 +1,24 @@
+# Hover storage layout test — verify slot info on state variables
+#   lsp-bench -c benchmarks/hover-storage-layout.yaml
+
+project: example
+file: Shop.sol
+line: 69
+col: 30
+response: full
+
+iterations: 1
+warmup: 0
+timeout: 10
+
+servers:
+  - mmsaki@latest
+
+benchmarks:
+  - textDocument/hover
+
+methods:
+  textDocument/hover:
+    line: 69
+    col: 30
+    # owner — expect Storage: slot `0`

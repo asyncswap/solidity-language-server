@@ -1292,6 +1292,18 @@ pub fn hover_info(
         ));
     }
 
+    // Storage layout: show slot (and offset if packed) for state variables.
+    if let Some(slot_info) = cached_build.storage_layout.get(&decl_id) {
+        if slot_info.offset > 0 {
+            parts.push(format!(
+                "Storage: slot `{}`, offset `{}`",
+                slot_info.slot, slot_info.offset
+            ));
+        } else {
+            parts.push(format!("Storage: slot `{}`", slot_info.slot));
+        }
+    }
+
     let di = &cached_build.decl_index;
     let id_to_path = &cached_build.node_id_to_source_path;
 

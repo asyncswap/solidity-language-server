@@ -599,7 +599,13 @@ pub fn build_standard_json_input(
     config: &FoundryConfig,
     source_content: Option<&str>,
 ) -> Value {
-    let contract_outputs = vec!["devdoc", "userdoc", "evm.methodIdentifiers"];
+    let contract_outputs = vec![
+        "devdoc",
+        "userdoc",
+        "evm.methodIdentifiers",
+        "storageLayout",
+        "transientStorageLayout",
+    ];
 
     let mut settings = json!({
         "remappings": remappings,
@@ -1164,7 +1170,13 @@ pub fn build_batch_standard_json_input_with_cache(
     config: &FoundryConfig,
     content_cache: Option<&HashMap<crate::types::DocumentUri, (i32, String)>>,
 ) -> Value {
-    let contract_outputs = vec!["devdoc", "userdoc", "evm.methodIdentifiers"];
+    let contract_outputs = vec![
+        "devdoc",
+        "userdoc",
+        "evm.methodIdentifiers",
+        "storageLayout",
+        "transientStorageLayout",
+    ];
 
     let mut settings = json!({
         "remappings": remappings,
