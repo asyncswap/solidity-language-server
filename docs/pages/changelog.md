@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.32
+
+### Features
+
+- Alias-aware navigation — `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/references`, and `textDocument/rename` all work correctly through import aliases (e.g. `import {Foo as Bar}`) (#197)
+- Goto-implementation fallback — when no implementations are found for a function, falls back to goto-definition instead of returning nothing (#200)
+- Live buffer compilation — `textDocument/didChange` compiles the editor buffer directly, providing cross-file diagnostics for unsaved edits
+- Startup update check — the server checks GitHub releases on startup and shows a `window/showMessage` notification when a newer version is available; controlled by the `checkForUpdates` setting (default: `true`)
+
+### Fixes
+
+- Stale results in 10 LSP handlers — handlers returned `Ok(None)` (JSON `null`) instead of `Ok(Some(vec![]))` (JSON `[]`) when they computed zero results; LSP clients (notably Neovim) interpreted `null` as "server couldn't compute" and kept displaying stale data; affected handlers: `inlayHint`, `references`, `workspace/symbol`, `documentSymbol`, `documentHighlight`, `documentLink`, `foldingRange`, `selectionRange`, `codeAction` (#201, #202)
+- `solidity.clearCache` full reset — the command now wipes all in-memory caches (`ast_cache`, `completion_cache`, `sub_caches`, `semantic_token_cache`, `path_interner`) in addition to the on-disk cache directory; previously only the project-root entry was evicted from `ast_cache`
+- Empty build protection — cross-file solc errors no longer replace a valid cached AST with an empty build
+- Alias goto-implementation — import alias at usage site now targets the original definition, not the alias itself
+
+### Tests
+
+- 647 tests, 0 failures, 0 warnings
+
 ## v0.1.31
 
 ### Fixes

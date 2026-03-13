@@ -15,7 +15,8 @@
 - **Go to Implementation** — jump from interface/abstract declarations to their concrete implementations; supports functions, modifiers, and state variables with `baseFunctions`/`baseModifiers`
 - **Call Hierarchy** — `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls` — navigate call graphs across contracts and libraries; tracks function calls, modifier invocations, and base constructor specifiers with narrow call-site ranges; incoming calls include callers via interface-typed references
 - **Code Actions** — `textDocument/codeAction` quickfix engine; handles `unused-import` forge-lint diagnostic with "Remove unused import" action; JSON-driven rule table in `data/error_codes.json`
-- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + in-memory AST, force clean rebuild) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
+- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + all in-memory caches, full reset) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
+- **Update Check** — checks GitHub releases on startup and notifies via `window/showMessage` when a newer version is available (`checkForUpdates` setting, default: `true`)
 - **Save Performance** — content hash check skips redundant solc rebuilds when file is unchanged; `collect_import_pragmas` runs on blocking thread pool to avoid stalling the async runtime on large projects
 
 See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
