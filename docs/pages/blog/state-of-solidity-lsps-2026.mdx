@@ -8,15 +8,19 @@ We benchmarked every major Solidity language server against Uniswap v4-core, one
 
 Five Solidity language servers exist today:
 
-| Server | Language | Maintainer |
-|--------|----------|------------|
-| [solidity-language-server](https://github.com/mmsaki/solidity-language-server) | Rust | mmsaki |
-| [solc --lsp](https://docs.soliditylang.org/) | C++ | Solidity team |
-| [nomicfoundation-solidity-ls](https://github.com/NomicFoundation/hardhat-vscode) | TypeScript | Nomic Foundation |
-| [vscode-solidity](https://github.com/juanfranblanco/vscode-solidity) | TypeScript | Juan Blanco |
-| [solidity-ls (qiuxiang)](https://github.com/qiuxiang/solidity-ls) | TypeScript | qiuxiang |
+| Server | Language | Maintainer | Status |
+|--------|----------|------------|--------|
+| [solidity-language-server](https://github.com/mmsaki/solidity-language-server) | Rust | mmsaki | Active |
+| [solc --lsp](https://docs.soliditylang.org/) | C++ | Solidity team | Abandoned |
+| [nomicfoundation-solidity-ls](https://github.com/NomicFoundation/hardhat-vscode) | TypeScript | Nomic Foundation | Active |
+| [vscode-solidity](https://github.com/juanfranblanco/vscode-solidity) | TypeScript | Juan Blanco | Active |
+| [solidity-ls (qiuxiang)](https://github.com/qiuxiang/solidity-ls) | TypeScript | qiuxiang | Active |
 
 Most Solidity developers use either the Nomic Foundation server (bundled with the Hardhat VS Code extension) or Juan Blanco's extension. These are the defaults. They've been around the longest and have the most installs.
+
+One server that should be on this list — `solc --lsp`, the official LSP built into the Solidity compiler — is no longer a real option. The Solidity team has called it ["effectively abandoned experimental functionality"](https://github.com/ethereum/solidity/issues/16124) with no plans to revive it. It ships with [documented internal compiler errors](https://github.com/ethereum/solidity/issues/16476) during normal editor operations like rename and semantic tokens. Development stopped before the LSP reached stability.
+
+This matters. The official compiler team decided that language server support is not their problem. That leaves the ecosystem dependent on third-party servers — which makes the quality of those servers a critical infrastructure question.
 
 The question is whether "most installed" still means "best."
 
@@ -162,7 +166,7 @@ When you scale to a real codebase:
 - **Nomic Foundation** re-analyzes the full project on every request. At v4-core scale, this exceeds any reasonable timeout.
 - **Juan Blanco** crashes during the diagnostic phase. It never reaches the navigation features.
 - **qiuxiang** initializes quickly but cannot complete any navigation request within 10 seconds.
-- **solc --lsp** returns results for diagnostics but leaves most LSP methods unimplemented or empty.
+- **solc --lsp** returns results for diagnostics but leaves most LSP methods unimplemented or empty. The Solidity team has [officially abandoned](https://github.com/ethereum/solidity/issues/16124) the LSP, calling it "effectively abandoned experimental functionality." It also has [documented internal compiler errors](https://github.com/ethereum/solidity/issues/16476) during normal operations like rename and semantic tokens. It will not improve.
 
 These aren't edge cases. v4-core is the kind of project that Solidity developers actually work on.
 
@@ -257,9 +261,11 @@ Full results: [lsp-bench/benchmarks/v4-core](https://github.com/mmsaki/lsp-bench
 
 ## Conclusion
 
-The Solidity language server ecosystem in 2026 has a clear performance leader. On real-world codebases, most existing servers either time out or crash. solidity-language-server is the only one that handles production-scale Solidity projects with sub-15ms latency across the full LSP feature set.
+The Solidity language server ecosystem in 2026 has a clear performance leader. The official compiler LSP is abandoned. The most popular third-party servers time out or crash on real codebases. solidity-language-server is the only one that handles production-scale Solidity projects with sub-15ms latency across the full LSP feature set.
 
-The benchmarks are open. The tool is open. Try it on your codebase and see for yourself.
+Preventative security infrastructure shouldn't depend on abandoned upstream projects or servers that can't index your code. The benchmarks are open. The tool is open. Try it on your codebase and see for yourself.
+
+The project is funded through [Giveth](https://giveth.io/project/solidity-security-starts-in-the-editor) — if you find it useful, consider supporting it.
 
 ---
 
