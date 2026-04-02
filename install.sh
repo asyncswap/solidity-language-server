@@ -603,10 +603,67 @@ case ":$PATH:" in
         ;;
 esac
 
+setup_claude() {
+    echo ""
+    echo "Run these commands in Claude Code:"
+    echo ""
+    echo "  /plugin marketplace add asyncswap/solidity-language-server-plugin"
+    echo "  /plugin install solidity-language-server@asyncswap"
+    echo "  /reload-plugins"
+    echo ""
+    echo "Full setup guide: ${DOCS_URL}/agents/claude"
+}
+
+setup_opencode() {
+    OPENCODE_DIR="${HOME}/.config/opencode"
+    OPENCODE_FILE="${OPENCODE_DIR}/opencode.json"
+
+    if confirm_append "$OPENCODE_FILE" "solidity-language-server"; then
+        mkdir -p "$OPENCODE_DIR"
+        cat > "$OPENCODE_FILE" << 'OPENCODE'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "solidity": {
+      "command": ["solidity-language-server", "--stdio"],
+      "extensions": [".sol"],
+      "initialization": {
+        "solidity-language-server": {
+          "inlayHints": {
+            "parameters": true
+          },
+          "lint": {
+            "enabled": true
+          },
+          "fileOperations": {
+            "templateOnCreate": true,
+            "updateImportsOnRename": true,
+            "updateImportsOnDelete": true
+          },
+          "projectIndex": {
+            "fullProjectScan": true
+          }
+        }
+      }
+    }
+  }
+}
+OPENCODE
+        echo "Wrote ${OPENCODE_FILE}"
+    fi
+
+    echo ""
+    echo "Enable the experimental LSP tool with:"
+    echo ""
+    echo "  OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode"
+    echo ""
+    echo "Full setup guide: ${DOCS_URL}/agents/opencode"
+}
+
 # ── Editor setup prompt ──────────────────────────────────
 
 echo ""
-echo "Select your editor:"
+echo "Select your editor or agent:"
 echo ""
 echo "  1) Neovim"
 echo "  2) Helix"
@@ -615,7 +672,9 @@ echo "  4) Zed"
 echo "  5) Vim"
 echo "  6) Emacs"
 echo "  7) Sublime Text"
-echo "  8) Skip"
+echo "  8) Claude Code"
+echo "  9) OpenCode"
+echo "  10) Skip"
 echo ""
 printf "> "
 read -r EDITOR_CHOICE < /dev/tty
@@ -628,6 +687,8 @@ case "$EDITOR_CHOICE" in
     5) setup_vim ;;
     6) setup_emacs ;;
     7) setup_sublime ;;
+    8) setup_claude ;;
+    9) setup_opencode ;;
     *) echo "Skipping editor setup." ;;
 esac
 
