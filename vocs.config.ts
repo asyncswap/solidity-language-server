@@ -53,6 +53,7 @@ export default defineConfig({
       text: "Blog",
       items: [
         { text: "All Posts", link: "/blog" },
+        { text: "The State of Solidity LSPs in 2026", link: "/blog/state-of-solidity-lsps-2026" },
         { text: "v0.1.32 Release", link: "/blog/v0-1-32-release" },
         { text: "v0.1.31 Release", link: "/blog/v0-1-31-release" },
         { text: "v0.1.30 Release", link: "/blog/v0-1-30-release" },
