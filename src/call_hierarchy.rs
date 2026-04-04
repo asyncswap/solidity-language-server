@@ -22,11 +22,27 @@
 //! When `base_function_implementation` is populated, incoming calls expand
 //! the target to include all equivalent IDs (interface ↔ implementation),
 //! so callers via interface-typed references are included.
+//!
+//! # Low-level calls
+//!
+//! Solidity's `.call()`, `.staticcall()`, and `.delegatecall()` have no
+//! `referencedDeclaration` in the AST because they are built-in address
+//! methods. These are detected separately:
+//!
+//! - **Solidity `MemberAccess`**: Nodes with `member_name ∈ {call, staticcall,
+//!   delegatecall}` and `referenced_declaration: None`. These have `id` fields
+//!   and are in the `nodes` index.
+//! - **Yul opcodes**: `YulFunctionCall` nodes with `functionName.name ∈ {call,
+//!   staticcall, delegatecall}`. These have NO `id` field and are stored in
+//!   `CachedBuild::low_level_calls`.
+//!
+//! Low-level calls produce synthetic `CallHierarchyItem`s with no backing
+//! declaration node.
 
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{CallHierarchyItem, Range, SymbolKind, Url};
 
-use crate::goto::{CachedBuild, NodeInfo, bytes_to_pos};
+use crate::goto::{CachedBuild, LOW_LEVEL_CALL_NAMES, NodeInfo, bytes_to_pos};
 use crate::references::byte_to_id;
 use crate::solc_ast::DeclNode;
 use crate::types::{AbsPath, NodeId, SolcFileId, SourceLoc};
@@ -309,6 +325,161 @@ pub fn outgoing_calls(
     results.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.1.cmp(&b.1)));
     results.dedup();
     results
+}
+
+/// Find outgoing low-level calls from a given caller function/modifier.
+///
+/// Detects two patterns:
+/// 1. **Solidity `MemberAccess`**: nodes in the `nodes` index with
+///    `member_name ∈ {call, staticcall, delegatecall}` and no
+///    `referenced_declaration`, inside the caller's span.
+/// 2. **Yul opcodes**: entries in `low_level_calls` whose `src` falls
+///    inside the caller's span.  Only actual call opcodes are included
+///    (not `mstore`, `sload`, etc.) — scoped by `YUL_CALL_OPCODES` at
+///    index time.
+///
+/// Returns `(CallHierarchyItem, call_range)` pairs.  The
+/// `CallHierarchyItem` is synthetic — there is no backing declaration
+/// node, so it carries no `nodeId` in `data`.
+pub fn outgoing_low_level_calls(
+    build: &CachedBuild,
+    caller_id: NodeId,
+) -> Vec<(CallHierarchyItem, Range)> {
+    let caller_info = match find_node_info(&build.nodes, caller_id) {
+        Some(info) => info,
+        None => return vec![],
+    };
+    let caller_src = match SourceLoc::parse(caller_info.src.as_str()) {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let mut results: Vec<(CallHierarchyItem, Range)> = Vec::new();
+
+    // ── Pass 1: Solidity MemberAccess low-level calls ──────────────────
+    for (_abs_path, file_nodes) in &build.nodes {
+        for (_ref_id, ref_info) in file_nodes {
+            // Only MemberAccess nodes with no referenced_declaration.
+            if ref_info.referenced_declaration.is_some() {
+                continue;
+            }
+            let Some(mn) = ref_info.member_name.as_deref() else {
+                continue;
+            };
+            if !LOW_LEVEL_CALL_NAMES.contains(&mn) {
+                continue;
+            }
+            let Some(ref_src) = SourceLoc::parse(ref_info.src.as_str()) else {
+                continue;
+            };
+            if ref_src.file_id != caller_src.file_id {
+                continue;
+            }
+            if !(caller_src.offset <= ref_src.offset && ref_src.end() <= caller_src.end()) {
+                continue;
+            }
+
+            // Build a synthetic CallHierarchyItem for this low-level call.
+            // Use member_location (the `.call` identifier) for selection_range
+            // so the cursor lands on the call site, not the whole expression.
+            let name_src = ref_info
+                .member_location
+                .as_deref()
+                .unwrap_or(ref_info.src.as_str());
+            if let Some((item, call_range)) = low_level_call_item_from_src(
+                mn,
+                ref_info.src.as_str(),
+                name_src,
+                &build.id_to_path_map,
+            ) {
+                results.push((item, call_range));
+            }
+        }
+    }
+
+    // ── Pass 2: Yul call opcodes ───────────────────────────────────────
+    for llc in &build.low_level_calls {
+        let Some(llc_src) = SourceLoc::parse(llc.src.as_str()) else {
+            continue;
+        };
+        if llc_src.file_id != caller_src.file_id {
+            continue;
+        }
+        if !(caller_src.offset <= llc_src.offset && llc_src.end() <= caller_src.end()) {
+            continue;
+        }
+
+        // Use functionName.src for selection_range (just the opcode name).
+        if let Some((item, call_range)) = low_level_call_item_from_src(
+            &llc.kind,
+            llc.src.as_str(),
+            llc.name_src.as_str(),
+            &build.id_to_path_map,
+        ) {
+            results.push((item, call_range));
+        }
+    }
+
+    results
+}
+
+/// Build a synthetic `CallHierarchyItem` and call-site `Range` for a
+/// low-level call from its kind (`"call"`, `"staticcall"`, `"delegatecall"`).
+///
+/// - `src` is the full expression span (used for `range` and `fromRanges`).
+/// - `name_src` is the identifier-only span (used for `selection_range` so
+///   the cursor lands on the `.call` / `call` site).
+fn low_level_call_item_from_src(
+    kind: &str,
+    src: &str,
+    name_src: &str,
+    id_to_path_map: &HashMap<SolcFileId, String>,
+) -> Option<(CallHierarchyItem, Range)> {
+    let loc = SourceLoc::parse(src)?;
+    let file_path_str = id_to_path_map.get(&loc.file_id_str())?;
+
+    let file_path = if std::path::Path::new(file_path_str).is_absolute() {
+        std::path::PathBuf::from(file_path_str)
+    } else {
+        std::env::current_dir().ok()?.join(file_path_str)
+    };
+
+    let source_bytes = std::fs::read(&file_path).ok()?;
+    let uri = Url::from_file_path(&file_path).ok()?;
+
+    let start = bytes_to_pos(&source_bytes, loc.offset)?;
+    let end = bytes_to_pos(&source_bytes, loc.end())?;
+    let range = Range { start, end };
+
+    // Parse the name_src for the selection range (the .call / call site).
+    let selection_range = SourceLoc::parse(name_src)
+        .and_then(|nl| {
+            let ns = bytes_to_pos(&source_bytes, nl.offset)?;
+            let ne = bytes_to_pos(&source_bytes, nl.end())?;
+            Some(Range { start: ns, end: ne })
+        })
+        .unwrap_or(range);
+
+    // Read the actual source text at the full expression span for the name.
+    // e.g. "user.call("")" or "delegatecall(0, 0, 0, 0, 0, 0)".
+    let name = source_bytes
+        .get(loc.offset..loc.end())
+        .and_then(|slice| std::str::from_utf8(slice).ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!(".{}()", kind));
+
+    let item = CallHierarchyItem {
+        name,
+        kind: SymbolKind::FUNCTION,
+        tags: None,
+        detail: Some(format!("low-level {}", kind)),
+        uri,
+        range,
+        selection_range,
+        data: Some(serde_json::json!({ "lowLevelCall": kind })),
+    };
+
+    Some((item, selection_range))
 }
 
 // ── LSP conversion helpers ─────────────────────────────────────────────────

@@ -7090,6 +7090,16 @@ impl LanguageServer for ForgeLsp {
                     );
                     resolved_outgoing.push((callee_item, pos, call_range));
                 }
+
+                // Low-level calls (.call/.staticcall/.delegatecall + Yul opcodes).
+                let ll_calls = crate::call_hierarchy::outgoing_low_level_calls(build, cid);
+                for (ll_item, call_range) in ll_calls {
+                    let pos = (
+                        ll_item.selection_range.start.line,
+                        ll_item.selection_range.start.character,
+                    );
+                    resolved_outgoing.push((ll_item, pos, call_range));
+                }
             }
         }
 
