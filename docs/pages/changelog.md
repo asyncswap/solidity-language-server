@@ -4,6 +4,7 @@
 
 ### Features
 
+- Low-level call hierarchy edges — `callHierarchy/outgoingCalls` now surfaces `.call()`, `.staticcall()`, and `.delegatecall()` as synthetic call edges, covering both Solidity `MemberAccess` nodes (which have no `referencedDeclaration`) and Yul call opcodes (which have no AST `id`); selection ranges point at the `.call` / opcode site (#211)
 - Alias-aware navigation — `textDocument/definition`, `textDocument/declaration`, `textDocument/implementation`, `textDocument/references`, and `textDocument/rename` all work correctly through import aliases (e.g. `import {Foo as Bar}`) (#197)
 - Goto-implementation fallback — when no implementations are found for a function, falls back to goto-definition instead of returning nothing (#200)
 - Live buffer compilation — `textDocument/didChange` compiles the editor buffer directly, providing cross-file diagnostics for unsaved edits

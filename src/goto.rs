@@ -22,6 +22,11 @@ pub struct NodeInfo {
     pub node_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_location: Option<String>,
+    /// The `memberName` field from `MemberAccess` AST nodes.
+    /// Used to detect low-level calls (`.call`, `.staticcall`, `.delegatecall`)
+    /// which have `referencedDeclaration: null` in the AST.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absolute_path: Option<String>,
     /// The AST `scope` field — the node ID of the containing declaration
@@ -176,6 +181,13 @@ pub struct CachedBuild {
     /// Offset is non-zero only for packed variables (e.g. two `bool`s
     /// sharing the same slot).
     pub storage_layout: HashMap<NodeId, StorageSlotInfo>,
+    /// Low-level external calls from Yul inline assembly.
+    ///
+    /// Contains `call`, `staticcall`, `delegatecall` Yul opcodes which
+    /// have no `id` field and are not in the `nodes` index.
+    /// Solidity-level `MemberAccess` low-level calls are in `nodes` and
+    /// detected at query time via `NodeInfo.member_name`.
+    pub low_level_calls: Vec<LowLevelCall>,
 }
 
 impl CachedBuild {
@@ -191,12 +203,12 @@ impl CachedBuild {
     /// [`PathInterner`].  This ensures all `CachedBuild` instances share the
     /// same file-ID space regardless of which solc invocation produced them.
     pub fn new(ast: Value, build_version: i32, interner: Option<&mut PathInterner>) -> Self {
-        let (mut nodes, path_to_abs, mut external_refs) = if let Some(sources) = ast.get("sources")
-        {
-            cache_ids(sources)
-        } else {
-            (HashMap::new(), HashMap::new(), HashMap::new())
-        };
+        let (mut nodes, path_to_abs, mut external_refs, mut low_level_calls) =
+            if let Some(sources) = ast.get("sources") {
+                cache_ids(sources)
+            } else {
+                (HashMap::new(), HashMap::new(), HashMap::new(), Vec::new())
+            };
 
         // Parse solc's source_id_to_path from the AST output.
         let solc_id_to_path: HashMap<SolcFileId, String> = ast
@@ -308,6 +320,14 @@ impl CachedBuild {
         // Build storage layout index from contracts[path][name].storageLayout.storage[].
         let storage_layout = build_storage_layout(&ast);
 
+        // Canonicalize Yul low-level call src strings if interner is active.
+        if let Some(ref remap) = canonical_remap {
+            for llc in &mut low_level_calls {
+                llc.src = SrcLocation::new(remap_src_canonical(llc.src.as_str(), remap));
+                llc.name_src = SrcLocation::new(remap_src_canonical(llc.name_src.as_str(), remap));
+            }
+        }
+
         // The raw AST JSON is fully consumed — all data has been extracted
         // into the pre-built indexes above. `ast` is dropped here.
 
@@ -325,6 +345,7 @@ impl CachedBuild {
             qualifier_refs,
             base_function_implementation,
             storage_layout,
+            low_level_calls,
         }
     }
 
@@ -435,6 +456,7 @@ impl CachedBuild {
             qualifier_refs,
             base_function_implementation,
             storage_layout: HashMap::new(),
+            low_level_calls: Vec::new(),
         }
     }
 }
@@ -566,11 +588,44 @@ fn build_base_function_implementation(
     index
 }
 
-/// Return type of [`cache_ids`]: `(nodes, path_to_abs, external_refs)`.
+/// A low-level call detected in the AST that has no `referencedDeclaration`.
+///
+/// Covers Yul opcodes (`call`, `staticcall`, `delegatecall`) from inline
+/// assembly. These `YulFunctionCall` nodes have NO `id` field, so they
+/// are NOT in the `nodes` index — they are collected here instead.
+///
+/// Solidity-level `MemberAccess` low-level calls (e.g. `addr.call(...)`)
+/// DO have `id` fields and ARE in `nodes`. They are detected at query
+/// time via `NodeInfo.member_name` and are NOT duplicated here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LowLevelCall {
+    /// `"call"`, `"staticcall"`, or `"delegatecall"`.
+    pub kind: String,
+    /// The `src` string of the `YulFunctionCall` node (`"offset:length:fileId"`).
+    /// Covers the entire call expression including arguments.
+    pub src: SrcLocation,
+    /// The `src` of the `functionName` identifier (e.g. just `call`).
+    /// Used for `selection_range` so the cursor targets the opcode name.
+    pub name_src: SrcLocation,
+    /// Absolute path of the file containing this call.
+    pub abs_path: AbsPath,
+}
+
+/// The set of low-level call member names on `address` that have no
+/// `referencedDeclaration` in solc's AST.
+pub const LOW_LEVEL_CALL_NAMES: &[&str] = &["call", "staticcall", "delegatecall"];
+
+/// The set of Yul opcodes that perform external calls.
+/// Only these are flagged from `YulFunctionCall`; other Yul builtins
+/// (mstore, sload, add, …) are not call edges.
+pub const YUL_CALL_OPCODES: &[&str] = &["call", "staticcall", "delegatecall"];
+
+/// Return type of [`cache_ids`]: `(nodes, path_to_abs, external_refs, low_level_calls)`.
 type CachedIds = (
     HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
     HashMap<RelPath, AbsPath>,
     ExternalRefs,
+    Vec<LowLevelCall>,
 );
 
 /// Rewrite the file-ID component of a `"offset:length:fileId"` string using
@@ -617,6 +672,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
         HashMap::with_capacity(source_count);
     let mut path_to_abs: HashMap<RelPath, AbsPath> = HashMap::with_capacity(source_count);
     let mut external_refs: ExternalRefs = HashMap::with_capacity(source_count * 10);
+    let mut low_level_calls: Vec<LowLevelCall> = Vec::new();
 
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
@@ -658,6 +714,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
                             member_location: None,
+                            member_name: None,
                             absolute_path: ast
                                 .get("absolutePath")
                                 .and_then(|v| v.as_str())
@@ -735,6 +792,10 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                                 .get("memberLocation")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
+                            member_name: tree
+                                .get("memberName")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                             absolute_path: tree
                                 .get("absolutePath")
                                 .and_then(|v| v.as_str())
@@ -768,6 +829,26 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
                         }
                     }
 
+                    // Detect Yul call opcodes (call, staticcall, delegatecall).
+                    // YulFunctionCall nodes have no `id` field so they aren't
+                    // in the `nodes` index.  We check `functionName.name` and
+                    // only collect actual external-call opcodes, not
+                    // arithmetic/memory builtins like mstore, sload, add, etc.
+                    if tree.get("nodeType").and_then(|v| v.as_str()) == Some("YulFunctionCall")
+                        && let Some(fn_obj) = tree.get("functionName")
+                        && let Some(fn_name) = fn_obj.get("name").and_then(|v| v.as_str())
+                        && YUL_CALL_OPCODES.contains(&fn_name)
+                        && let Some(src) = tree.get("src").and_then(|v| v.as_str())
+                    {
+                        let fn_src = fn_obj.get("src").and_then(|v| v.as_str()).unwrap_or(src);
+                        low_level_calls.push(LowLevelCall {
+                            kind: fn_name.to_string(),
+                            src: SrcLocation::new(src),
+                            name_src: SrcLocation::new(fn_src),
+                            abs_path: abs_path.clone(),
+                        });
+                    }
+
                     for key in CHILD_KEYS {
                         push_if_node_or_array(tree, key, &mut stack);
                     }
@@ -776,7 +857,7 @@ pub fn cache_ids(sources: &Value) -> CachedIds {
         }
     }
 
-    (nodes, path_to_abs, external_refs)
+    (nodes, path_to_abs, external_refs, low_level_calls)
 }
 
 pub fn pos_to_bytes(source_bytes: &[u8], position: Position) -> usize {
@@ -2729,6 +2810,7 @@ contract B { uint256 public x; }
             referenced_declaration: None,
             node_type: Some("Identifier".to_string()),
             member_location: None,
+            member_name: None,
             absolute_path: None,
             scope: None,
             base_functions: vec![],
@@ -2739,6 +2821,7 @@ contract B { uint256 public x; }
         assert!(!serialized.contains("name_locations"));
         assert!(!serialized.contains("referenced_declaration"));
         assert!(!serialized.contains("member_location"));
+        assert!(!serialized.contains("member_name"));
         assert!(!serialized.contains("absolute_path"));
         assert!(!serialized.contains("scope"));
         assert!(!serialized.contains("base_functions"));
@@ -2764,6 +2847,7 @@ contract B { uint256 public x; }
             referenced_declaration: Some(NodeId(42)),
             node_type: Some("FunctionDefinition".to_string()),
             member_location: Some("220:6:7".to_string()),
+            member_name: Some("transfer".to_string()),
             absolute_path: Some("/src/Foo.sol".to_string()),
             scope: Some(NodeId(10)),
             base_functions: vec![NodeId(100), NodeId(200)],
@@ -2774,6 +2858,7 @@ contract B { uint256 public x; }
         assert!(serialized.contains("name_locations"));
         assert!(serialized.contains("referenced_declaration"));
         assert!(serialized.contains("member_location"));
+        assert!(serialized.contains("member_name"));
         assert!(serialized.contains("absolute_path"));
         assert!(serialized.contains("scope"));
         assert!(serialized.contains("base_functions"));

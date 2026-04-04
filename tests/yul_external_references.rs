@@ -8,6 +8,7 @@ type CachedIds = (
     HashMap<AbsPath, HashMap<NodeId, goto::NodeInfo>>,
     HashMap<RelPath, AbsPath>,
     goto::ExternalRefs,
+    Vec<goto::LowLevelCall>,
 );
 
 /// Load poolmanager.json, normalize from solc shape, and run cache_ids.
@@ -21,7 +22,7 @@ fn load_ast() -> CachedIds {
 
 #[test]
 fn test_cache_ids_returns_external_refs() {
-    let (_nodes, _path_to_abs, external_refs) = load_ast();
+    let (_nodes, _path_to_abs, external_refs, _low_level_calls) = load_ast();
 
     // There should be external references (435 total across all InlineAssembly nodes)
     assert!(
@@ -32,7 +33,7 @@ fn test_cache_ids_returns_external_refs() {
 
 #[test]
 fn test_external_refs_for_get_sqrt_price_target() {
-    let (_nodes, _path_to_abs, external_refs) = load_ast();
+    let (_nodes, _path_to_abs, external_refs, _low_level_calls) = load_ast();
 
     // InlineAssembly node 8137 in getSqrtPriceTarget has 11 externalReferences:
     //   declaration 8128 (zeroForOne):         1 use  at src "2068:10:33"
@@ -62,7 +63,7 @@ fn test_external_refs_for_get_sqrt_price_target() {
 
 #[test]
 fn test_external_refs_exact_count_for_each_parameter() {
-    let (_nodes, _path_to_abs, external_refs) = load_ast();
+    let (_nodes, _path_to_abs, external_refs, _low_level_calls) = load_ast();
 
     // Count refs per declaration for the getSqrtPriceTarget parameters
     let count_for =
@@ -101,7 +102,7 @@ fn test_external_refs_exact_count_for_each_parameter() {
 
 #[test]
 fn test_solidity_nodes_unchanged() {
-    let (nodes, _path_to_abs, _external_refs) = load_ast();
+    let (nodes, _path_to_abs, _external_refs, _low_level_calls) = load_ast();
 
     // The u64-keyed HashMap should still contain Solidity nodes with their ids
     // Check that key Solidity declaration nodes exist
@@ -161,7 +162,7 @@ fn test_solidity_nodes_unchanged() {
 
 #[test]
 fn test_no_yul_src_keys_in_u64_map() {
-    let (_nodes, _path_to_abs, external_refs) = load_ast();
+    let (_nodes, _path_to_abs, external_refs, _low_level_calls) = load_ast();
 
     // Verify that none of the Yul src strings appear as node ids in the u64 map.
     // This confirms Yul data is kept separate.
@@ -200,7 +201,7 @@ fn test_goto_bytes_resolves_yul_identifier() {
         })
         .collect();
 
-    let (nodes, path_to_abs, external_refs) = goto::cache_ids(sources);
+    let (nodes, path_to_abs, external_refs, _low_level_calls) = goto::cache_ids(sources);
 
     // Byte offset 1802 is the start of sqrtPriceNextX96 Yul reference (src "1802:16:33")
     // It should resolve to the declaration of sqrtPriceNextX96 (id 8130)
@@ -283,7 +284,7 @@ fn setup_goto() -> SetupGotoResult {
             )
         })
         .collect();
-    let (nodes, path_to_abs, external_refs) = goto::cache_ids(sources);
+    let (nodes, path_to_abs, external_refs, _low_level_calls) = goto::cache_ids(sources);
     SetupGotoResult(nodes, path_to_abs, id_to_path, external_refs)
 }
 

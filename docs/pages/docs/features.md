@@ -34,7 +34,7 @@
 - [x] `textDocument/signatureHelp` - Function signature help (functions, events, mappings)
 - [x] `textDocument/prepareCallHierarchy` - Prepare call hierarchy (resolve callable at cursor)
 - [x] `callHierarchy/incomingCalls` - Find all callers of a function/modifier/contract
-- [x] `callHierarchy/outgoingCalls` - Find all callees from a function/modifier/contract
+- [x] `callHierarchy/outgoingCalls` - Find all callees from a function/modifier/contract (includes low-level `.call()`/`.staticcall()`/`.delegatecall()` and Yul call opcodes)
 - [ ] `textDocument/typeDefinition` - Go to type definition
 - [x] `textDocument/implementation` - Go to implementation (interface → concrete implementations via baseFunctions)
 - [x] `textDocument/documentHighlight` - Document highlighting (read/write classification)
