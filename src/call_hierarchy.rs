@@ -460,7 +460,13 @@ fn low_level_call_item_from_src(
         })
         .unwrap_or(range);
 
-    let name = format!(".{}()", kind);
+    // Read the actual source text at the full expression span for the name.
+    // e.g. "user.call("")" or "delegatecall(0, 0, 0, 0, 0, 0)".
+    let name = source_bytes
+        .get(loc.offset..loc.end())
+        .and_then(|slice| std::str::from_utf8(slice).ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!(".{}()", kind));
 
     let item = CallHierarchyItem {
         name,
