@@ -20,7 +20,14 @@ curl -fsSL https://asyncswap.org/lsp/install.sh | sh
 cargo install solidity-language-server
 ```
 
-Or build from source, or download a pre-built binary from the [latest release](https://github.com/asyncswap/solidity-language-server/releases/latest).
+Or download directly from the [latest release](https://github.com/asyncswap/solidity-language-server/releases/latest) page.
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | solidity-language-server-aarch64-apple-darwin.tar.gz |
+| macOS (Intel) | solidity-language-server-x86_64-apple-darwin.tar.gz |
+| Windows | solidity-language-server-x86_64-pc-windows-msvc.zip |
+| Linux | solidity-language-server-x86_64-unknown-linux-gnu.tar.gz |
 
 ## Benchmarks
 
