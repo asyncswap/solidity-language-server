@@ -2967,6 +2967,13 @@ impl LanguageServer for ForgeLsp {
                                 0,
                                 Some(&mut *phase2_path_interner.write().await),
                             );
+                            // Capture how many sources phase 2's solc actually
+                            // compiled this round, BEFORE merging in phase-1
+                            // data — otherwise the log conflates "files
+                            // freshly compiled" with "files already in cache",
+                            // making a silent phase-2 failure (0 ASTs back)
+                            // look like a successful run.
+                            let phase2_compiled = new_build.nodes.len();
                             // Merge any data from the phase-1 build that
                             // might not be in the full closure (shouldn't
                             // happen, but defensive).
@@ -2981,15 +2988,22 @@ impl LanguageServer for ForgeLsp {
                                 .write()
                                 .await
                                 .insert(phase2_cache_key.clone().into(), cached_build);
-                            phase2_client
-                                .log_message(
-                                    MessageType::INFO,
-                                    format!(
-                                         "project index: phase 2 complete — {} source files indexed in {:.1}s",
-                                        source_count,
-                                        phase2_start.elapsed().as_secs_f64(),
-                                    ),
+                            let phase2_message = if phase2_compiled == 0 {
+                                format!(
+                                    "project index: phase 2 produced no ASTs in {:.1}s — solc likely errored on the batch (cache retains {} merged sources from phase 1)",
+                                    phase2_start.elapsed().as_secs_f64(),
+                                    source_count,
                                 )
+                            } else {
+                                format!(
+                                    "project index: phase 2 complete — {} sources compiled this round, {} total in cache, in {:.1}s",
+                                    phase2_compiled,
+                                    source_count,
+                                    phase2_start.elapsed().as_secs_f64(),
+                                )
+                            };
+                            phase2_client
+                                .log_message(MessageType::INFO, phase2_message)
                                 .await;
 
                             // Pre-load lib sub-caches after full build.
