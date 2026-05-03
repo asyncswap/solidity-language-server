@@ -817,9 +817,26 @@ pub fn load_reference_cache_with_report(
             }
         }
 
-        // Complete = every saved file was reused with a matching hash.
-        let complete =
-            file_count_reused == file_count_hashed && current_hashes == persisted.file_hashes;
+        // Complete = every saved file was reused with a matching hash AND
+        // the saved set covers every project file (src/test/script). The
+        // second clause is what catches a phase-1-only cache: when a previous
+        // run saved only the src closure, every saved file still matches on
+        // disk, but project test/script files were never added to
+        // `file_hashes` — so without this coverage check we'd return
+        // `complete=true` and the eager indexer would skip phase 2 forever.
+        let project_covered = {
+            let project_files = crate::solc::discover_source_files(config);
+            let saved: std::collections::HashSet<&String> = persisted.file_hashes.keys().collect();
+            project_files.iter().all(|abs| {
+                pathdiff::diff_paths(abs, &config.root)
+                    .and_then(|rel| rel.to_str().map(|s| s.to_string()))
+                    .map(|rel| saved.contains(&rel))
+                    .unwrap_or(false)
+            })
+        };
+        let complete = file_count_reused == file_count_hashed
+            && current_hashes == persisted.file_hashes
+            && project_covered;
 
         return CacheLoadReport {
             build: Some(CachedBuild::from_reference_index(

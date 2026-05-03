@@ -4703,6 +4703,45 @@ impl LanguageServer for ForgeLsp {
                 );
                 locations.extend(sub_locations);
             }
+
+            // Per-file builds for files the user has opened. Each per-file
+            // build is the AST of that file's compile unit (the file plus
+            // its transitive imports), with its own solc id space. The
+            // project build may not yet cover those files (phase 2 still
+            // running, partial cache, compile failure for some files), but
+            // their per-file builds will contain refs that match the target
+            // when re-resolved by `byte_to_id` against `def_abs_path` /
+            // `def_byte_offset`. Without this iteration, references queried
+            // from a different file (e.g. `IHubBase.sol` defining `event Add`)
+            // would not see refs in test files that are present only in
+            // their own per-file builds.
+            //
+            // The current file's build was already searched as `file_build`,
+            // and `project_build` was searched above — exclude both to keep
+            // the workload minimal; `dedup_locations` handles overlaps.
+            let project_root_key = self.project_cache_key().await;
+            let other_builds: Vec<Arc<goto::CachedBuild>> = {
+                let cache = self.ast_cache.read().await;
+                cache
+                    .iter()
+                    .filter(|(key, _)| {
+                        key.as_str() != uri.to_string()
+                            && project_root_key.as_deref() != Some(key.as_str())
+                    })
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            };
+            for other in &other_builds {
+                let extra = references::goto_references_for_target(
+                    other,
+                    &def_abs_path,
+                    def_byte_offset,
+                    None,
+                    params.context.include_declaration,
+                    Some(&current_abs),
+                );
+                locations.extend(extra);
+            }
         }
 
         // Deduplicate across all caches — removes exact duplicates and
