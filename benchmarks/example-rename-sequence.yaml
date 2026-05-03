@@ -29,7 +29,7 @@ benchmarks:
 
 methods:
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       # Step 1: A.sol → AA.sol
       - file: A.sol
         newName: AA.sol

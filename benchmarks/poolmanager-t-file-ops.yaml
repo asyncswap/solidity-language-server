@@ -35,13 +35,13 @@ benchmarks:
 
 methods:
   workspace/willCreateFiles:
-    createSteps:
+    createFiles:
       - file: test/PoolManagerBenchCreate.sol
     # Full create lifecycle:
     # willCreateFiles -> apply edits -> create on disk -> didCreateFiles
 
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       - file: src/libraries/Pool.sol
         newName: Pools.sol
       - file: src/libraries/Pools.sol
@@ -50,7 +50,7 @@ methods:
     # willRenameFiles -> apply edits -> rename on disk -> didRenameFiles
 
   workspace/willDeleteFiles:
-    deleteSteps:
+    deleteFiles:
       - file: src/libraries/Pool.sol
     # Full delete lifecycle:
     # willDeleteFiles -> apply edits -> delete on disk -> didDeleteFiles

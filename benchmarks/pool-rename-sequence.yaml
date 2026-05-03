@@ -26,7 +26,7 @@ benchmarks:
 
 methods:
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       # Step 1: Pool.sol → Pools.sol
       - file: src/libraries/Pool.sol
         newName: Pools.sol

@@ -69,7 +69,7 @@ methods:
     # Inside TickMath.getTickAtSqrtPrice(sqrtPriceX96)
 
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       - file: src/libraries/Pool.sol
         newName: Pools.sol
       - file: src/libraries/Pools.sol
@@ -77,11 +77,11 @@ methods:
     # Rename Pool.sol -> Pools.sol, then rename back to original path.
 
   workspace/willCreateFiles:
-    createSteps:
+    createFiles:
       - file: src/libraries/PoolBenchCreate.s.sol
     # Create lifecycle benchmark in v4-core/src/libraries (script template scaffold).
 
   workspace/willDeleteFiles:
-    deleteSteps:
+    deleteFiles:
       - file: src/libraries/Pool.sol
     # Delete lifecycle benchmark for Pool.sol (restored after run).

@@ -21,7 +21,7 @@ benchmarks:
 
 methods:
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       # Step 1: Extsload.sol → Extsloads.sol (add s)
       - file: src/Extsload.sol
         newName: Extsloads.sol

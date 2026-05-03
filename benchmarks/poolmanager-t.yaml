@@ -69,7 +69,7 @@ methods:
     # Inside bound(sqrtPriceX96, TickMath.MIN_SQRT_PRICE, ...)
 
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       - file: src/libraries/Pool.sol
         newName: Pools.sol
       - file: src/libraries/Pools.sol
@@ -77,11 +77,11 @@ methods:
     # Rename Pool.sol -> Pools.sol, then rename back to original path.
 
   workspace/willCreateFiles:
-    createSteps:
+    createFiles:
       - file: test/PoolManagerBenchCreate.sol
     # Create lifecycle benchmark; helper restores original state after run.
 
   workspace/willDeleteFiles:
-    deleteSteps:
+    deleteFiles:
       - file: src/libraries/Pool.sol
     # Delete lifecycle benchmark; helper restores original state after run.

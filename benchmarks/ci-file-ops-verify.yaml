@@ -24,15 +24,15 @@ benchmarks:
 
 methods:
   workspace/willCreateFiles:
-    createSteps:
+    createFiles:
       - file: CIFileOpsCreate.sol
 
   workspace/willDeleteFiles:
-    deleteSteps:
+    deleteFiles:
       - file: B.sol
 
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       - file: A.sol
         newName: AA.sol
       - file: AA.sol

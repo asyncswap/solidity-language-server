@@ -140,7 +140,7 @@ methods:
     # Inside addTax(TAX, TAX_BASE) — first argument position
 
   workspace/willRenameFiles:
-    renameSteps:
+    renameFiles:
       - file: A.sol
         newName: AA.sol
       - file: AA.sol
@@ -148,11 +148,11 @@ methods:
     # Rename A.sol -> AA.sol, then back. Should update Shop.sol import path.
 
   workspace/willCreateFiles:
-    createSteps:
+    createFiles:
       - file: ShopBenchCreate.s.sol
     # Create lifecycle benchmark in example project (script template scaffold).
 
   workspace/willDeleteFiles:
-    deleteSteps:
+    deleteFiles:
       - file: A.sol
     # Delete lifecycle benchmark for imported file A.sol.
