@@ -2,8 +2,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Position, Range,
-    TextEdit,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, CompletionTextEdit,
+    Position, Range, TextEdit,
 };
 
 use crate::goto::CHILD_KEYS;
@@ -1722,6 +1722,163 @@ pub fn get_general_completions(cache: &CompletionCache) -> Vec<CompletionItem> {
     items
 }
 
+fn completion_item(
+    label: impl Into<String>,
+    kind: CompletionItemKind,
+    detail: impl Into<String>,
+) -> CompletionItem {
+    CompletionItem {
+        label: label.into(),
+        kind: Some(kind),
+        detail: Some(detail.into()),
+        ..Default::default()
+    }
+}
+
+fn line_replacement_item(
+    label: impl Into<String>,
+    detail: impl Into<String>,
+    new_text: impl Into<String>,
+    position: Position,
+) -> CompletionItem {
+    let label = label.into();
+    let new_text = new_text.into();
+    CompletionItem {
+        filter_text: Some(format!("spdx {label} {new_text}")),
+        label,
+        kind: Some(CompletionItemKind::CONSTANT),
+        detail: Some(detail.into()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: Position {
+                    line: position.line,
+                    character: 0,
+                },
+                end: position,
+            },
+            new_text,
+        })),
+        ..Default::default()
+    }
+}
+
+fn prefix_at_byte(line: &str, col_byte: u32) -> &str {
+    let mut end = (col_byte as usize).min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+fn source_unit_directive_completions(
+    line_prefix: &str,
+    position: Position,
+) -> Option<Vec<CompletionItem>> {
+    let trimmed = line_prefix.trim_start();
+
+    if let Some(after_slashes) = trimmed.strip_prefix("//") {
+        let body = after_slashes.trim_start();
+        let upper = body.to_ascii_uppercase();
+
+        if upper.starts_with("SPDX-LICENSE-IDENTIFIER:") {
+            return Some(spdx_license_identifier_completions());
+        }
+
+        if is_spdx_directive_prefix(&upper) {
+            return Some(spdx_directive_completions(position));
+        }
+    }
+
+    if let Some(after_solidity) = trimmed.strip_prefix("pragma solidity") {
+        if after_solidity.contains(';') {
+            return Some(vec![]);
+        }
+
+        return Some(solidity_version_completions());
+    }
+
+    if let Some(after_abicoder) = trimmed.strip_prefix("pragma abicoder") {
+        if after_abicoder.contains(';') {
+            return Some(vec![]);
+        }
+
+        return Some(vec![
+            completion_item("v2", CompletionItemKind::CONSTANT, "ABI coder v2"),
+            completion_item("v1", CompletionItemKind::CONSTANT, "ABI coder v1"),
+        ]);
+    }
+
+    if let Some(after_pragma) = trimmed.strip_prefix("pragma")
+        && !after_pragma.is_empty()
+        && after_pragma.trim().is_empty()
+    {
+        return Some(vec![
+            completion_item(
+                "solidity",
+                CompletionItemKind::KEYWORD,
+                "Compiler version pragma",
+            ),
+            completion_item("abicoder", CompletionItemKind::KEYWORD, "ABI coder pragma"),
+        ]);
+    }
+
+    None
+}
+
+fn is_spdx_directive_prefix(upper_comment_body: &str) -> bool {
+    let body = upper_comment_body.trim_start();
+    !body.is_empty() && ("SPDX".starts_with(body) || body.starts_with("SPDX"))
+}
+
+fn spdx_directive_completions(position: Position) -> Vec<CompletionItem> {
+    vec![
+        line_replacement_item(
+            "// SPDX-License-Identifier: MIT",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: MIT",
+            position,
+        ),
+        line_replacement_item(
+            "// SPDX-License-Identifier: UNLICENSED",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: UNLICENSED",
+            position,
+        ),
+        line_replacement_item(
+            "// SPDX-License-Identifier: Apache-2.0",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: Apache-2.0",
+            position,
+        ),
+    ]
+}
+
+fn spdx_license_identifier_completions() -> Vec<CompletionItem> {
+    [
+        "MIT",
+        "UNLICENSED",
+        "Apache-2.0",
+        "GPL-3.0-only",
+        "GPL-3.0-or-later",
+        "BSD-3-Clause",
+    ]
+    .into_iter()
+    .map(|license| completion_item(license, CompletionItemKind::CONSTANT, "SPDX license"))
+    .collect()
+}
+
+fn solidity_version_completions() -> Vec<CompletionItem> {
+    [
+        ("^0.8.35", "Latest Solidity 0.8.x compatible range"),
+        ("0.8.35", "Latest Solidity exact version"),
+        ("^0.8.0", "Solidity 0.8.x compatible range"),
+        (">=0.8.0 <0.9.0", "Solidity 0.8.x range"),
+    ]
+    .into_iter()
+    .map(|(version, detail)| completion_item(version, CompletionItemKind::CONSTANT, detail))
+    .collect()
+}
+
 /// Append auto-import candidates at the tail of completion results.
 ///
 /// This enforces lower priority ordering by:
@@ -1882,6 +2039,14 @@ pub fn handle_completion_with_tail_candidates(
         .map(|i| i + 1)
         .unwrap_or(0);
     let col_byte = (abs_byte - line_start_byte) as u32;
+
+    if let Some(items) = source_unit_directive_completions(prefix_at_byte(line, col_byte), position)
+    {
+        return Some(CompletionResponse::List(CompletionList {
+            is_incomplete: false,
+            items,
+        }));
+    }
 
     // Build scope context for scope-aware type resolution
     let scope_ctx = file_id.map(|fid| ScopeContext {

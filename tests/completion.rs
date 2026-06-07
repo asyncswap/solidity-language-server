@@ -2,11 +2,13 @@ use serde_json::Value;
 use solidity_language_server::completion::{
     AccessKind, DotSegment, build_completion_cache, extract_identifier_before_dot,
     extract_mapping_value_type, extract_node_id_from_type, get_dot_completions,
-    get_general_completions, parse_dot_chain,
+    get_general_completions, handle_completion, parse_dot_chain,
 };
 use solidity_language_server::types::{FileId, NodeId};
 use std::fs;
-use tower_lsp::lsp_types::CompletionItemKind;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Position,
+};
 
 fn load_ast() -> Value {
     let raw: Value =
@@ -19,6 +21,22 @@ fn load_cache() -> solidity_language_server::completion::CompletionCache {
     let sources = ast_data.get("sources").unwrap();
     let contracts = ast_data.get("contracts");
     build_completion_cache(sources, contracts, None)
+}
+
+fn response_labels(resp: Option<CompletionResponse>) -> Vec<String> {
+    match resp {
+        Some(CompletionResponse::List(list)) => list.items.into_iter().map(|i| i.label).collect(),
+        Some(CompletionResponse::Array(items)) => items.into_iter().map(|i| i.label).collect(),
+        None => vec![],
+    }
+}
+
+fn response_items(resp: Option<CompletionResponse>) -> Vec<CompletionItem> {
+    match resp {
+        Some(CompletionResponse::List(list)) => list.items,
+        Some(CompletionResponse::Array(items)) => items,
+        None => vec![],
+    }
 }
 
 // --- extract_node_id_from_type ---
@@ -329,6 +347,132 @@ fn test_general_completions_include_keywords() {
     );
     assert!(names.contains(&"if"), "Should have 'if' keyword");
     assert!(names.contains(&"mapping"), "Should have 'mapping' keyword");
+}
+
+#[test]
+fn test_context_completion_spdx_directive() {
+    let items = response_items(handle_completion(
+        None,
+        "// SPDX",
+        Position {
+            line: 0,
+            character: 7,
+        },
+        None,
+        None,
+    ));
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    let mit = items
+        .iter()
+        .find(|item| item.label == "// SPDX-License-Identifier: MIT")
+        .expect("MIT SPDX completion");
+
+    assert!(labels.contains(&"// SPDX-License-Identifier: MIT"));
+    assert!(!labels.contains(&"pragma"));
+    assert_eq!(mit.kind, Some(CompletionItemKind::CONSTANT));
+    assert_ne!(mit.kind, Some(CompletionItemKind::TEXT));
+    assert_eq!(
+        mit.filter_text.as_deref(),
+        Some("spdx // SPDX-License-Identifier: MIT // SPDX-License-Identifier: MIT")
+    );
+}
+
+#[test]
+fn test_context_completion_spdx_directive_from_short_prefix() {
+    let labels = response_labels(handle_completion(
+        None,
+        "// SP",
+        Position {
+            line: 0,
+            character: 5,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"// SPDX-License-Identifier: MIT".to_string()));
+    assert!(!labels.contains(&"selfdestruct(address payable recipient)".to_string()));
+    assert!(!labels.contains(&"super".to_string()));
+}
+
+#[test]
+fn test_context_completion_spdx_directive_replaces_comment_prefix() {
+    let items = response_items(handle_completion(
+        None,
+        "// SP",
+        Position {
+            line: 0,
+            character: 5,
+        },
+        None,
+        None,
+    ));
+    let mit = items
+        .iter()
+        .find(|item| item.label == "// SPDX-License-Identifier: MIT")
+        .expect("MIT SPDX completion");
+    let edit = match mit.text_edit.as_ref().expect("SPDX text edit") {
+        CompletionTextEdit::Edit(edit) => edit,
+        CompletionTextEdit::InsertAndReplace(_) => panic!("expected line replacement edit"),
+    };
+
+    assert_eq!(edit.range.start.line, 0);
+    assert_eq!(edit.range.start.character, 0);
+    assert_eq!(edit.range.end.line, 0);
+    assert_eq!(edit.range.end.character, 5);
+    assert_eq!(edit.new_text, "// SPDX-License-Identifier: MIT");
+}
+
+#[test]
+fn test_context_completion_pragma_keyword() {
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma ",
+        Position {
+            line: 0,
+            character: 7,
+        },
+        None,
+        None,
+    ));
+
+    assert_eq!(labels, vec!["solidity".to_string(), "abicoder".to_string()]);
+}
+
+#[test]
+fn test_context_completion_pragma_solidity_versions() {
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma solidity ",
+        Position {
+            line: 0,
+            character: 16,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"^0.8.35".to_string()));
+    assert!(labels.contains(&"^0.8.0".to_string()));
+    assert!(!labels.contains(&"revert()".to_string()));
+    assert!(!labels.contains(&"msg".to_string()));
+}
+
+#[test]
+fn test_context_completion_finished_pragma_is_empty() {
+    let source = "pragma solidity ^0.8.0;";
+    let labels = response_labels(handle_completion(
+        None,
+        source,
+        Position {
+            line: 0,
+            character: source.len() as u32,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.is_empty());
 }
 
 #[test]
