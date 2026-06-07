@@ -2,9 +2,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Position, Range,
-    TextEdit,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, CompletionTextEdit,
+    InsertTextFormat, Position, Range, TextEdit,
 };
+use tree_sitter::{Node, Parser};
 
 use crate::goto::CHILD_KEYS;
 use crate::hover::build_function_signature;
@@ -24,6 +25,25 @@ pub struct TopLevelImportable {
     pub kind: CompletionItemKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedImportCompletionContext {
+    pub import_path: String,
+    pub typed_range: (u32, u32, u32),
+}
+
+#[derive(Debug, Clone)]
+struct TopLevelImportableWithId {
+    node_id: Option<NodeId>,
+    symbol: TopLevelImportable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextNamedImportAlias {
+    pub import_path: String,
+    pub foreign_name: String,
+    pub local_name: String,
+}
+
 /// A declaration found within a specific scope.
 #[derive(Debug, Clone)]
 pub struct ScopedDeclaration {
@@ -31,6 +51,8 @@ pub struct ScopedDeclaration {
     pub name: String,
     /// typeIdentifier from typeDescriptions (e.g. "t_struct$_PoolKey_$8887_memory_ptr").
     pub type_id: String,
+    /// Completion item for this declaration, preserving semantic kind/detail.
+    pub item: CompletionItem,
 }
 
 /// A byte range identifying a scope-creating AST node.
@@ -46,6 +68,12 @@ pub struct ScopeRange {
     pub file_id: FileId,
 }
 
+#[derive(Debug, Clone)]
+struct UsingForFunction {
+    first_param_type: Option<TypeIdentifier>,
+    item: CompletionItem,
+}
+
 /// Completion cache built from the AST.
 #[derive(Debug)]
 pub struct CompletionCache {
@@ -57,6 +85,14 @@ pub struct CompletionCache {
 
     /// node id → Vec<CompletionItem> (members of structs, contracts, enums, libraries).
     pub node_members: HashMap<NodeId, Vec<CompletionItem>>,
+
+    /// (container node id, member name) → member typeIdentifier.
+    ///
+    /// Some solc AST declaration nodes, notably contract-scoped enum and
+    /// struct definitions, do not carry `typeDescriptions`. Keeping their
+    /// container-qualified node id lets `RafluxTypes.ListingStatus.` resolve
+    /// to the enum declaration instead of falling back to a flat name lookup.
+    pub member_type_by_container: HashMap<(NodeId, SymbolName), TypeIdentifier>,
 
     /// typeIdentifier → node id (resolve a type string to its definition).
     pub type_to_node: HashMap<TypeIdentifier, NodeId>,
@@ -134,11 +170,82 @@ fn node_type_to_completion_kind(node_type: &str) -> CompletionItemKind {
         "EnumDefinition" => CompletionItemKind::ENUM,
         "EnumValue" => CompletionItemKind::ENUM_MEMBER,
         "EventDefinition" => CompletionItemKind::EVENT,
-        "ErrorDefinition" => CompletionItemKind::EVENT,
+        "ErrorDefinition" => CompletionItemKind::FUNCTION,
         "ModifierDefinition" => CompletionItemKind::METHOD,
         "ImportDirective" => CompletionItemKind::MODULE,
         _ => CompletionItemKind::TEXT,
     }
+}
+
+fn completion_kind_rank(kind: CompletionItemKind) -> u8 {
+    match kind {
+        CompletionItemKind::TEXT => 0,
+        CompletionItemKind::MODULE => 1,
+        CompletionItemKind::KEYWORD => 1,
+        CompletionItemKind::VARIABLE => 2,
+        CompletionItemKind::FUNCTION => 3,
+        CompletionItemKind::METHOD => 3,
+        CompletionItemKind::EVENT => 3,
+        CompletionItemKind::FIELD => 3,
+        CompletionItemKind::ENUM_MEMBER => 3,
+        CompletionItemKind::STRUCT => 4,
+        CompletionItemKind::ENUM => 4,
+        CompletionItemKind::CLASS => 5,
+        CompletionItemKind::INTERFACE => 5,
+        _ => 2,
+    }
+}
+
+fn should_replace_completion_item(existing: &CompletionItem, candidate: &CompletionItem) -> bool {
+    let existing_rank = existing.kind.map(completion_kind_rank).unwrap_or(0);
+    let candidate_rank = candidate.kind.map(completion_kind_rank).unwrap_or(0);
+
+    candidate_rank > existing_rank
+        || (candidate_rank == existing_rank
+            && existing.detail.is_none()
+            && candidate.detail.is_some())
+}
+
+fn completion_detail_for_node(node_type: &str, type_string: Option<String>) -> Option<String> {
+    match node_type {
+        "ContractDefinition"
+        | "StructDefinition"
+        | "EnumDefinition"
+        | "EventDefinition"
+        | "ErrorDefinition"
+        | "ModifierDefinition"
+        | "ImportDirective"
+        | "UserDefinedValueTypeDefinition" => Some(node_type.to_string()),
+        _ => type_string,
+    }
+}
+
+fn completion_item_for_node(
+    name: &str,
+    node_type: &str,
+    type_string: Option<String>,
+) -> CompletionItem {
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(node_type_to_completion_kind(node_type)),
+        detail: completion_detail_for_node(node_type, type_string),
+        ..Default::default()
+    }
+}
+
+fn is_scoped_completion_decl(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "VariableDeclaration"
+            | "FunctionDefinition"
+            | "ModifierDefinition"
+            | "EventDefinition"
+            | "ErrorDefinition"
+            | "StructDefinition"
+            | "EnumDefinition"
+            | "UserDefinedValueTypeDefinition"
+            | "ContractDefinition"
+    )
 }
 
 /// Parse the `src` field of an AST node: "offset:length:fileId".
@@ -284,7 +391,8 @@ fn is_top_level_importable_decl(node_type: &str, node: &Value) -> bool {
         | "StructDefinition"
         | "EnumDefinition"
         | "UserDefinedValueTypeDefinition"
-        | "FunctionDefinition" => true,
+        | "FunctionDefinition"
+        | "ErrorDefinition" => true,
         "VariableDeclaration" => node.get("constant").and_then(|v| v.as_bool()) == Some(true),
         _ => false,
     }
@@ -310,7 +418,17 @@ fn build_top_level_importables_by_name(
 /// - Includes: contract/interface/library/struct/enum/UDVT/top-level free function/top-level constant
 /// - Excludes: imported aliases/re-exports, nested declarations, non-constant variables
 pub fn extract_top_level_importables_for_file(path: &str, ast: &Value) -> Vec<TopLevelImportable> {
-    let mut out: Vec<TopLevelImportable> = Vec::new();
+    extract_direct_top_level_importables_for_file(path, ast)
+        .into_iter()
+        .map(|item| item.symbol)
+        .collect()
+}
+
+fn extract_direct_top_level_importables_for_file(
+    path: &str,
+    ast: &Value,
+) -> Vec<TopLevelImportableWithId> {
+    let mut out: Vec<TopLevelImportableWithId> = Vec::new();
     let mut stack: Vec<&Value> = vec![ast];
     let mut source_unit_id: Option<NodeId> = None;
 
@@ -327,12 +445,79 @@ pub fn extract_top_level_importables_for_file(path: &str, ast: &Value) -> Vec<To
             && let Some(src_scope) = source_unit_id
             && tree.get("scope").and_then(|v| v.as_i64()) == Some(src_scope.0)
         {
-            out.push(TopLevelImportable {
-                name: name.to_string(),
-                declaring_path: path.to_string(),
-                node_type: node_type.to_string(),
-                kind: node_type_to_completion_kind(node_type),
+            out.push(TopLevelImportableWithId {
+                node_id,
+                symbol: TopLevelImportable {
+                    name: name.to_string(),
+                    declaring_path: path.to_string(),
+                    node_type: node_type.to_string(),
+                    kind: node_type_to_completion_kind(node_type),
+                },
             });
+        }
+
+        for key in CHILD_KEYS {
+            push_if_node_or_array(tree, key, &mut stack);
+        }
+    }
+
+    out
+}
+
+fn extract_import_alias_importables_for_file(
+    path: &str,
+    ast: &Value,
+    direct_importable_by_node_id: &HashMap<NodeId, TopLevelImportable>,
+) -> Vec<TopLevelImportable> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&Value> = vec![ast];
+    let mut source_unit_id: Option<NodeId> = None;
+
+    while let Some(tree) = stack.pop() {
+        let node_type = tree.get("nodeType").and_then(|v| v.as_str()).unwrap_or("");
+        let node_id = tree.get("id").and_then(|v| v.as_i64()).map(NodeId);
+        if node_type == "SourceUnit" {
+            source_unit_id = node_id;
+        }
+
+        if node_type == "ImportDirective"
+            && let Some(src_scope) = source_unit_id
+            && tree.get("scope").and_then(|v| v.as_i64()) == Some(src_scope.0)
+            && let Some(aliases) = tree.get("symbolAliases").and_then(|v| v.as_array())
+        {
+            for alias in aliases {
+                let foreign = alias.get("foreign");
+                let local_name = alias
+                    .get("local")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str());
+                let foreign_name = foreign.and_then(|v| v.get("name")).and_then(|v| v.as_str());
+                let name = local_name.or(foreign_name).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+
+                let referenced = foreign
+                    .and_then(|v| v.get("referencedDeclaration"))
+                    .and_then(|v| v.as_i64())
+                    .map(NodeId);
+
+                if let Some(symbol) =
+                    referenced.and_then(|id| direct_importable_by_node_id.get(&id))
+                {
+                    let mut reexport = symbol.clone();
+                    reexport.name = name.to_string();
+                    reexport.declaring_path = path.to_string();
+                    out.push(reexport);
+                } else {
+                    out.push(TopLevelImportable {
+                        name: name.to_string(),
+                        declaring_path: path.to_string(),
+                        node_type: "ImportDirective".to_string(),
+                        kind: CompletionItemKind::MODULE,
+                    });
+                }
+            }
         }
 
         for key in CHILD_KEYS {
@@ -381,6 +566,8 @@ pub fn build_completion_cache(
     let mut name_to_type: HashMap<SymbolName, TypeIdentifier> = HashMap::with_capacity(est_names);
     let mut node_members: HashMap<NodeId, Vec<CompletionItem>> =
         HashMap::with_capacity(est_contracts);
+    let mut member_type_by_container: HashMap<(NodeId, SymbolName), TypeIdentifier> =
+        HashMap::with_capacity(est_names);
     let mut type_to_node: HashMap<TypeIdentifier, NodeId> = HashMap::with_capacity(est_contracts);
     let mut method_identifiers: HashMap<NodeId, Vec<CompletionItem>> =
         HashMap::with_capacity(est_contracts);
@@ -405,6 +592,8 @@ pub fn build_completion_cache(
 
     // Temp: (library_node_id, target_type_id_or_none) for resolving after walk
     let mut using_for_directives: Vec<(NodeId, Option<String>)> = Vec::new();
+    let mut library_functions: HashMap<NodeId, Vec<UsingForFunction>> =
+        HashMap::with_capacity(est_contracts);
 
     // Scope-aware completion data
     let mut scope_declarations: HashMap<NodeId, Vec<ScopedDeclaration>> =
@@ -418,6 +607,45 @@ pub fn build_completion_cache(
         HashMap::with_capacity(est_names);
 
     if let Some(sources_obj) = sources.as_object() {
+        let mut direct_importable_by_node_id: HashMap<NodeId, TopLevelImportable> =
+            HashMap::with_capacity(est_names);
+
+        for (path, source_data) in sources_obj {
+            if let Some(ast) = source_data.get("ast") {
+                let direct_importables = extract_direct_top_level_importables_for_file(path, ast);
+                if direct_importables.is_empty() {
+                    continue;
+                }
+
+                let mut symbols = Vec::with_capacity(direct_importables.len());
+                for item in direct_importables {
+                    if let Some(node_id) = item.node_id {
+                        direct_importable_by_node_id.insert(node_id, item.symbol.clone());
+                    }
+                    symbols.push(item.symbol);
+                }
+                top_level_importables_by_file.insert(RelPath::new(path), symbols);
+            }
+        }
+
+        for (path, source_data) in sources_obj {
+            if let Some(ast) = source_data.get("ast") {
+                let aliases = extract_import_alias_importables_for_file(
+                    path,
+                    ast,
+                    &direct_importable_by_node_id,
+                );
+                if aliases.is_empty() {
+                    continue;
+                }
+
+                top_level_importables_by_file
+                    .entry(RelPath::new(path))
+                    .or_default()
+                    .extend(aliases);
+            }
+        }
+
         for (path, source_data) in sources_obj {
             if let Some(ast) = source_data.get("ast") {
                 // Map file path → source file id for scope resolution.
@@ -428,10 +656,6 @@ pub fn build_completion_cache(
                         .and_then(|r| r.get(&fid).copied())
                         .unwrap_or(FileId(fid));
                     path_to_file_id.insert(RelPath::new(path), canonical_fid);
-                }
-                let file_importables = extract_top_level_importables_for_file(path, ast);
-                if !file_importables.is_empty() {
-                    top_level_importables_by_file.insert(RelPath::new(path), file_importables);
                 }
                 let mut stack: Vec<&Value> = vec![ast];
 
@@ -488,71 +712,59 @@ pub fn build_completion_cache(
                         }
                     }
 
-                    // For VariableDeclarations, record the declaration in its scope
-                    if node_type == "VariableDeclaration"
+                    let type_string = tree
+                        .get("typeDescriptions")
+                        .and_then(|td| td.get("typeString"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    let type_id = tree
+                        .get("typeDescriptions")
+                        .and_then(|td| td.get("typeIdentifier"))
+                        .and_then(|v| v.as_str());
+
+                    if is_scoped_completion_decl(node_type)
                         && !name.is_empty()
                         && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_i64())
-                        && let Some(tid) = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeIdentifier"))
-                            .and_then(|v| v.as_str())
                     {
                         scope_declarations
                             .entry(NodeId(scope_raw))
                             .or_default()
                             .push(ScopedDeclaration {
                                 name: name.to_string(),
-                                type_id: tid.to_string(),
+                                type_id: type_id.unwrap_or_default().to_string(),
+                                item: completion_item_for_node(
+                                    name,
+                                    node_type,
+                                    type_string.clone(),
+                                ),
                             });
                     }
 
-                    // For FunctionDefinitions, record them in their parent scope (the contract)
-                    if node_type == "FunctionDefinition"
-                        && !name.is_empty()
-                        && let Some(scope_raw) = tree.get("scope").and_then(|v| v.as_i64())
-                        && let Some(tid) = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeIdentifier"))
-                            .and_then(|v| v.as_str())
-                    {
-                        scope_declarations
-                            .entry(NodeId(scope_raw))
-                            .or_default()
-                            .push(ScopedDeclaration {
-                                name: name.to_string(),
-                                type_id: tid.to_string(),
-                            });
-                    }
+                    // Collect named nodes as completion items. Some solc AST
+                    // reference nodes (for example IdentifierPath in an
+                    // inheritance clause) carry a name but map to Text. Do not
+                    // let those block the later declaration node from providing
+                    // the semantic kind (Class/Struct/Function/etc.).
+                    if !name.is_empty() {
+                        let item = completion_item_for_node(name, node_type, type_string.clone());
 
-                    // Collect named nodes as completion items
-                    if !name.is_empty() && !seen_names.contains_key(name) {
-                        let type_string = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeString"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        let type_id = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeIdentifier"))
-                            .and_then(|v| v.as_str());
-
-                        let kind = node_type_to_completion_kind(node_type);
-
-                        let item = CompletionItem {
-                            label: name.to_string(),
-                            kind: Some(kind),
-                            detail: type_string,
-                            ..Default::default()
-                        };
-
-                        let idx = names.len();
-                        names.push(item);
-                        seen_names.insert(SymbolName::new(name), idx);
+                        let symbol_name = SymbolName::new(name);
+                        if let Some(&idx) = seen_names.get(&symbol_name) {
+                            if should_replace_completion_item(&names[idx], &item) {
+                                names[idx] = item;
+                            }
+                        } else {
+                            let idx = names.len();
+                            names.push(item);
+                            seen_names.insert(symbol_name.clone(), idx);
+                        }
 
                         // Store name → typeIdentifier mapping
                         if let Some(tid) = type_id {
-                            name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
+                            name_to_type
+                                .entry(symbol_name)
+                                .or_insert_with(|| TypeIdentifier::new(tid));
                         }
                     }
 
@@ -573,6 +785,11 @@ pub fn build_completion_cache(
                                     .and_then(|td| td.get("typeString"))
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string());
+
+                                if let Some(member_type_id) = type_id_for_member(member) {
+                                    member_type_by_container
+                                        .insert((id, SymbolName::new(member_name)), member_type_id);
+                                }
 
                                 members.push(CompletionItem {
                                     label: member_name.to_string(),
@@ -664,13 +881,40 @@ pub fn build_completion_cache(
                                     };
 
                                 let kind = node_type_to_completion_kind(member_type);
-                                members.push(CompletionItem {
+
+                                if let Some(member_type_id) = type_id_for_member(member) {
+                                    member_type_by_container
+                                        .insert((id, SymbolName::new(member_name)), member_type_id);
+                                }
+
+                                let item = CompletionItem {
                                     label: member_name.to_string(),
                                     kind: Some(kind),
                                     detail: member_detail,
                                     label_details,
                                     ..Default::default()
-                                });
+                                };
+
+                                if member_type == "FunctionDefinition"
+                                    && member.get("visibility").and_then(|v| v.as_str())
+                                        != Some("private")
+                                {
+                                    let first_param_type = member
+                                        .get("parameters")
+                                        .and_then(|p| p.get("parameters"))
+                                        .and_then(|v| v.as_array())
+                                        .and_then(|params| params.first())
+                                        .and_then(type_id_for_member);
+
+                                    library_functions.entry(id).or_default().push(
+                                        UsingForFunction {
+                                            first_param_type,
+                                            item: item.clone(),
+                                        },
+                                    );
+                                }
+
+                                members.push(item);
                             }
                         }
                         if !members.is_empty() {
@@ -794,14 +1038,21 @@ pub fn build_completion_cache(
         }
     }
 
-    // Resolve UsingForDirective library references (Form 1)
-    // Now that node_members is populated, look up each library's functions
+    // Resolve UsingForDirective library references (Form 1). Only expose
+    // functions that can actually be called as extensions: non-private library
+    // functions whose first parameter matches the target type.
     for (lib_id, target_type) in &using_for_directives {
-        if let Some(lib_members) = node_members.get(lib_id) {
+        if let Some(lib_members) = library_functions.get(lib_id) {
             let items: Vec<CompletionItem> = lib_members
                 .iter()
-                .filter(|item| item.kind == Some(CompletionItemKind::FUNCTION))
-                .cloned()
+                .filter(|func| match target_type {
+                    Some(tid) => func
+                        .first_param_type
+                        .as_deref()
+                        .is_some_and(|first| using_for_first_param_matches(first, tid)),
+                    None => func.first_param_type.is_some(),
+                })
+                .map(|func| func.item.clone())
                 .collect();
             if !items.is_empty() {
                 if let Some(tid) = target_type {
@@ -925,6 +1176,7 @@ pub fn build_completion_cache(
         names,
         name_to_type,
         node_members,
+        member_type_by_container,
         type_to_node,
         name_to_node_id,
         method_identifiers,
@@ -941,6 +1193,36 @@ pub fn build_completion_cache(
         top_level_importables_by_name,
         top_level_importables_by_file,
     }
+}
+
+fn type_id_for_member(member: &Value) -> Option<TypeIdentifier> {
+    if let Some(type_id) = member
+        .get("typeDescriptions")
+        .and_then(|td| td.get("typeIdentifier"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(TypeIdentifier::new(type_id));
+    }
+
+    let node_type = member
+        .get("nodeType")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if matches!(
+        node_type,
+        "ContractDefinition"
+            | "StructDefinition"
+            | "EnumDefinition"
+            | "UserDefinedValueTypeDefinition"
+    ) {
+        return member
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .map(|id| TypeIdentifier::new(format!("__node_id_{id}")));
+    }
+
+    None
 }
 
 /// Magic type member definitions (msg, block, tx, abi, address).
@@ -1288,17 +1570,27 @@ fn lookup_using_for(cache: &CompletionCache, type_id: &str) -> Vec<CompletionIte
     vec![]
 }
 
+fn using_for_first_param_matches(first_param_type: &str, target_type: &str) -> bool {
+    strip_type_suffix(first_param_type) == strip_type_suffix(target_type)
+}
+
 /// Collect completions available for a given typeIdentifier.
 /// Includes node_members, method_identifiers, using_for, and using_for_wildcard.
-fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+fn completions_for_type(
+    cache: &CompletionCache,
+    type_id: &str,
+    include_using_for: bool,
+) -> Vec<CompletionItem> {
     // Address type
     if type_id == "t_address" || type_id == "t_address_payable" {
         let mut items = address_members();
-        // Also add using-for on address
-        if let Some(uf) = cache.using_for.get(type_id) {
-            items.extend(uf.iter().cloned());
+        if include_using_for {
+            // Also add using-for on address
+            if let Some(uf) = cache.using_for.get(type_id) {
+                items.extend(uf.iter().cloned());
+            }
+            items.extend(cache.using_for_wildcard.iter().cloned());
         }
-        items.extend(cache.using_for_wildcard.iter().cloned());
         return items;
     }
 
@@ -1335,14 +1627,10 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
         }
     }
 
-    // Add using-for library functions, but only for value types — not for
-    // contract/library/interface names. When you type `Lock.`, you want Lock's
-    // own members, not functions from `using Pool for *` or `using SafeCast for *`.
-    let is_contract_name = resolved_node_id
-        .map(|nid| cache.contract_kinds.contains_key(&nid))
-        .unwrap_or(false);
-
-    if !is_contract_name {
+    // Add using-for library functions only for values. Direct type-name member
+    // access like `IERC20.` should show declarations on the type; value member
+    // access like `paymentToken.` should also include `using SafeERC20 for IERC20`.
+    if include_using_for {
         // Try exact match first, then try normalized variants (storage_ptr vs storage vs memory_ptr etc.)
         let uf_items = lookup_using_for(cache, type_id);
         for item in &uf_items {
@@ -1414,6 +1702,16 @@ pub fn resolve_name_in_scope(
     byte_pos: usize,
     file_id: FileId,
 ) -> Option<String> {
+    resolve_scoped_declaration_type(cache, name, byte_pos, file_id)
+        .or_else(|| resolve_name_to_type_id(cache, name))
+}
+
+fn resolve_scoped_declaration_type(
+    cache: &CompletionCache,
+    name: &str,
+    byte_pos: usize,
+    file_id: FileId,
+) -> Option<String> {
     let mut current_scope = find_innermost_scope(cache, byte_pos, file_id)?;
 
     // Walk up the scope chain
@@ -1449,9 +1747,66 @@ pub fn resolve_name_in_scope(
         }
     }
 
-    // Scope walk found nothing — fall back to flat lookup
-    // (handles contract/library names which aren't in scope_declarations)
-    resolve_name_to_type_id(cache, name)
+    None
+}
+
+fn append_declaration_completion_item(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashMap<String, usize>,
+    item: CompletionItem,
+) {
+    if let Some(&idx) = seen.get(&item.label) {
+        if should_replace_completion_item(&items[idx], &item) {
+            items[idx] = item;
+        }
+    } else {
+        let idx = items.len();
+        seen.insert(item.label.clone(), idx);
+        items.push(item);
+    }
+}
+
+fn append_scope_declarations(
+    cache: &CompletionCache,
+    scope_id: NodeId,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashMap<String, usize>,
+) {
+    if let Some(decls) = cache.scope_declarations.get(&scope_id) {
+        for decl in decls {
+            append_declaration_completion_item(items, seen, decl.item.clone());
+        }
+    }
+}
+
+pub fn get_scope_completion_items(
+    cache: &CompletionCache,
+    scope_ctx: &ScopeContext,
+) -> Option<Vec<CompletionItem>> {
+    let mut current_scope = find_innermost_scope(cache, scope_ctx.byte_pos, scope_ctx.file_id)?;
+    let mut items = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
+    loop {
+        append_scope_declarations(cache, current_scope, &mut items, &mut seen);
+
+        if let Some(bases) = cache.linearized_base_contracts.get(&current_scope) {
+            for &base_id in bases.iter().skip(1) {
+                append_scope_declarations(cache, base_id, &mut items, &mut seen);
+            }
+        }
+
+        match cache.scope_parent.get(&current_scope) {
+            Some(&parent_id) => current_scope = parent_id,
+            None => break,
+        }
+    }
+
+    for item in get_static_completions() {
+        append_declaration_completion_item(&mut items, &mut seen, item);
+    }
+
+    Some(items)
 }
 
 /// Resolve a name within a type context to get the member's type.
@@ -1486,18 +1841,14 @@ fn resolve_member_type(
         }
         AccessKind::Index => {
             // Look up the member's type, then extract mapping value type
-            if let Some(members) = cache.node_members.get(&node_id) {
-                for member in members {
-                    if member.label == member_name {
-                        // Get the typeIdentifier from name_to_type
-                        if let Some(tid) = cache.name_to_type.get(member_name) {
-                            if tid.starts_with("t_mapping") {
-                                return extract_mapping_value_type(tid.as_str());
-                            }
-                            return Some(tid.to_string());
-                        }
-                    }
+            if let Some(tid) = cache
+                .member_type_by_container
+                .get(&(node_id, SymbolName::new(member_name)))
+            {
+                if tid.starts_with("t_mapping") {
+                    return extract_mapping_value_type(tid.as_str());
                 }
+                return Some(tid.to_string());
             }
             // Also check: the identifier itself might be a mapping variable
             if let Some(tid) = cache.name_to_type.get(member_name)
@@ -1508,10 +1859,14 @@ fn resolve_member_type(
             None
         }
         AccessKind::Plain => {
-            // Look up member's own type from name_to_type
+            // Prefer the container-qualified type. Flat name_to_type is only
+            // a fallback because nested Solidity types may have no
+            // typeDescriptions on the declaration node and names can repeat
+            // across different containers.
             cache
-                .name_to_type
-                .get(member_name)
+                .member_type_by_container
+                .get(&(node_id, SymbolName::new(member_name)))
+                .or_else(|| cache.name_to_type.get(member_name))
                 .map(|tid| tid.to_string())
         }
     }
@@ -1542,6 +1897,34 @@ fn resolve_name(
     }
 }
 
+fn resolve_name_for_completion(
+    cache: &CompletionCache,
+    name: &str,
+    scope_ctx: Option<&ScopeContext>,
+) -> Option<(String, bool)> {
+    if let Some(ctx) = scope_ctx
+        && let Some(type_id) =
+            resolve_scoped_declaration_type(cache, name, ctx.byte_pos, ctx.file_id)
+    {
+        return Some((type_id, true));
+    }
+
+    if let Some(tid) = cache.name_to_type.get(name) {
+        return Some((tid.to_string(), !cache.name_to_node_id.contains_key(name)));
+    }
+
+    if let Some(node_id) = cache.name_to_node_id.get(name) {
+        for (tid, nid) in &cache.type_to_node {
+            if nid == node_id {
+                return Some((tid.to_string(), false));
+            }
+        }
+        return Some((format!("__node_id_{}", node_id), false));
+    }
+
+    None
+}
+
 /// Get completions for a dot-completion request by resolving the full expression chain.
 pub fn get_dot_completions(
     cache: &CompletionCache,
@@ -1553,11 +1936,13 @@ pub fn get_dot_completions(
         return items;
     }
 
-    // Try to resolve the identifier's type
-    let type_id = resolve_name(cache, identifier, scope_ctx);
-
-    if let Some(tid) = type_id {
-        return completions_for_type(cache, &tid);
+    // Try to resolve the identifier's type. `paymentToken.` is value member
+    // access and should include `using SafeERC20 for IERC20` extensions;
+    // `IERC20.` is type-name access and should not.
+    if let Some((tid, include_using_for)) =
+        resolve_name_for_completion(cache, identifier, scope_ctx)
+    {
+        return completions_for_type(cache, &tid, include_using_for);
     }
 
     vec![]
@@ -1591,12 +1976,12 @@ pub fn get_chain_completions(
                 // foo(). — could be a function call or a type cast like IFoo(addr).
                 // First check if it's a type cast: name matches a contract/interface/library
                 if let Some(type_id) = resolve_name(cache, &seg.name, scope_ctx) {
-                    return completions_for_type(cache, &type_id);
+                    return completions_for_type(cache, &type_id, true);
                 }
                 // Otherwise look up as a function call — check all function_return_types
                 for ((_, fn_name), ret_type) in &cache.function_return_types {
                     if fn_name == &seg.name {
-                        return completions_for_type(cache, ret_type);
+                        return completions_for_type(cache, ret_type, true);
                     }
                 }
                 return vec![];
@@ -1607,7 +1992,7 @@ pub fn get_chain_completions(
                     && tid.starts_with("t_mapping")
                     && let Some(val_type) = extract_mapping_value_type(&tid)
                 {
-                    return completions_for_type(cache, &val_type);
+                    return completions_for_type(cache, &val_type, true);
                 }
                 return vec![];
             }
@@ -1653,9 +2038,25 @@ pub fn get_chain_completions(
 
     // Return completions for the final resolved type
     match current_type {
-        Some(tid) => completions_for_type(cache, &tid),
+        Some(tid) => completions_for_type(cache, &tid, true),
         None => vec![],
     }
+}
+
+fn member_access_chain_at_cursor(line: &str, col_byte: u32) -> Option<Vec<DotSegment>> {
+    let bytes = line.as_bytes();
+    let mut pos = (col_byte as usize).min(bytes.len());
+
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+
+    if pos == 0 || bytes[pos - 1] != b'.' {
+        return None;
+    }
+
+    let chain = parse_dot_chain(line, pos as u32);
+    (!chain.is_empty()).then_some(chain)
 }
 
 /// Get static completions that never change (keywords, magic globals, global functions, units).
@@ -1712,6 +2113,16 @@ pub fn get_static_completions() -> Vec<CompletionItem> {
         });
     }
 
+    items.push(CompletionItem {
+        label: "error Name();".to_string(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("Custom error declaration".to_string()),
+        insert_text: Some("error ${1:ErrorName}(${2});".to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        filter_text: Some("error".to_string()),
+        ..Default::default()
+    });
+
     items
 }
 
@@ -1720,6 +2131,163 @@ pub fn get_general_completions(cache: &CompletionCache) -> Vec<CompletionItem> {
     let mut items = cache.names.clone();
     items.extend(get_static_completions());
     items
+}
+
+fn completion_item(
+    label: impl Into<String>,
+    kind: CompletionItemKind,
+    detail: impl Into<String>,
+) -> CompletionItem {
+    CompletionItem {
+        label: label.into(),
+        kind: Some(kind),
+        detail: Some(detail.into()),
+        ..Default::default()
+    }
+}
+
+fn line_replacement_item(
+    label: impl Into<String>,
+    detail: impl Into<String>,
+    new_text: impl Into<String>,
+    position: Position,
+) -> CompletionItem {
+    let label = label.into();
+    let new_text = new_text.into();
+    CompletionItem {
+        filter_text: Some(format!("spdx {label} {new_text}")),
+        label,
+        kind: Some(CompletionItemKind::CONSTANT),
+        detail: Some(detail.into()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: Position {
+                    line: position.line,
+                    character: 0,
+                },
+                end: position,
+            },
+            new_text,
+        })),
+        ..Default::default()
+    }
+}
+
+fn prefix_at_byte(line: &str, col_byte: u32) -> &str {
+    let mut end = (col_byte as usize).min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+fn source_unit_directive_completions(
+    line_prefix: &str,
+    position: Position,
+) -> Option<Vec<CompletionItem>> {
+    let trimmed = line_prefix.trim_start();
+
+    if let Some(after_slashes) = trimmed.strip_prefix("//") {
+        let body = after_slashes.trim_start();
+        let upper = body.to_ascii_uppercase();
+
+        if upper.starts_with("SPDX-LICENSE-IDENTIFIER:") {
+            return Some(spdx_license_identifier_completions());
+        }
+
+        if is_spdx_directive_prefix(&upper) {
+            return Some(spdx_directive_completions(position));
+        }
+    }
+
+    if let Some(after_solidity) = trimmed.strip_prefix("pragma solidity") {
+        if after_solidity.contains(';') {
+            return Some(vec![]);
+        }
+
+        return Some(solidity_version_completions());
+    }
+
+    if let Some(after_abicoder) = trimmed.strip_prefix("pragma abicoder") {
+        if after_abicoder.contains(';') {
+            return Some(vec![]);
+        }
+
+        return Some(vec![
+            completion_item("v2", CompletionItemKind::CONSTANT, "ABI coder v2"),
+            completion_item("v1", CompletionItemKind::CONSTANT, "ABI coder v1"),
+        ]);
+    }
+
+    if let Some(after_pragma) = trimmed.strip_prefix("pragma")
+        && !after_pragma.is_empty()
+        && after_pragma.trim().is_empty()
+    {
+        return Some(vec![
+            completion_item(
+                "solidity",
+                CompletionItemKind::KEYWORD,
+                "Compiler version pragma",
+            ),
+            completion_item("abicoder", CompletionItemKind::KEYWORD, "ABI coder pragma"),
+        ]);
+    }
+
+    None
+}
+
+fn is_spdx_directive_prefix(upper_comment_body: &str) -> bool {
+    let body = upper_comment_body.trim_start();
+    !body.is_empty() && ("SPDX".starts_with(body) || body.starts_with("SPDX"))
+}
+
+fn spdx_directive_completions(position: Position) -> Vec<CompletionItem> {
+    vec![
+        line_replacement_item(
+            "// SPDX-License-Identifier: MIT",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: MIT",
+            position,
+        ),
+        line_replacement_item(
+            "// SPDX-License-Identifier: UNLICENSED",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: UNLICENSED",
+            position,
+        ),
+        line_replacement_item(
+            "// SPDX-License-Identifier: Apache-2.0",
+            "SPDX license identifier",
+            "// SPDX-License-Identifier: Apache-2.0",
+            position,
+        ),
+    ]
+}
+
+fn spdx_license_identifier_completions() -> Vec<CompletionItem> {
+    [
+        "MIT",
+        "UNLICENSED",
+        "Apache-2.0",
+        "GPL-3.0-only",
+        "GPL-3.0-or-later",
+        "BSD-3-Clause",
+    ]
+    .into_iter()
+    .map(|license| completion_item(license, CompletionItemKind::CONSTANT, "SPDX license"))
+    .collect()
+}
+
+fn solidity_version_completions() -> Vec<CompletionItem> {
+    [
+        ("^0.8.35", "Latest Solidity 0.8.x compatible range"),
+        ("0.8.35", "Latest Solidity exact version"),
+        ("^0.8.0", "Solidity 0.8.x compatible range"),
+        (">=0.8.0 <0.9.0", "Solidity 0.8.x range"),
+    ]
+    .into_iter()
+    .map(|(version, detail)| completion_item(version, CompletionItemKind::CONSTANT, detail))
+    .collect()
 }
 
 /// Append auto-import candidates at the tail of completion results.
@@ -1804,6 +2372,627 @@ pub fn top_level_importable_completion_candidates(
     out
 }
 
+pub fn importable_completion_candidates_for_path(
+    cache: &CompletionCache,
+    import_target_path: &str,
+    typed_range: Option<(u32, u32, u32)>,
+) -> Vec<CompletionItem> {
+    importable_symbols_for_path(cache, import_target_path)
+        .map(|symbols| importable_completion_items(&symbols, typed_range))
+        .unwrap_or_default()
+}
+
+pub fn importable_symbols_for_path(
+    cache: &CompletionCache,
+    import_target_path: &str,
+) -> Option<Vec<TopLevelImportable>> {
+    let Some(symbols) = cache
+        .top_level_importables_by_file
+        .get(&RelPath::new(import_target_path))
+        .or_else(|| {
+            cache
+                .top_level_importables_by_file
+                .iter()
+                .find(|(path, _)| path.as_str().ends_with(import_target_path))
+                .map(|(_, symbols)| symbols)
+        })
+    else {
+        return None;
+    };
+
+    Some(symbols.clone())
+}
+
+pub fn importable_completion_items(
+    symbols: &[TopLevelImportable],
+    typed_range: Option<(u32, u32, u32)>,
+) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = symbols
+        .iter()
+        .map(|symbol| {
+            let text_edit = typed_range.map(|(line, start_col, end_col)| {
+                CompletionTextEdit::Edit(TextEdit {
+                    range: Range {
+                        start: Position {
+                            line,
+                            character: start_col,
+                        },
+                        end: Position {
+                            line,
+                            character: end_col,
+                        },
+                    },
+                    new_text: symbol.name.clone(),
+                })
+            });
+
+            CompletionItem {
+                label: symbol.name.clone(),
+                kind: Some(symbol.kind),
+                detail: Some(symbol.node_type.clone()),
+                filter_text: Some(symbol.name.clone()),
+                text_edit,
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    items.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
+    items.dedup_by(|a, b| a.label == b.label && a.kind == b.kind);
+    items
+}
+
+pub fn imported_symbol_completion_items_for_aliases<F>(
+    aliases: &[TextNamedImportAlias],
+    mut symbols_for_alias: F,
+) -> Vec<CompletionItem>
+where
+    F: FnMut(&TextNamedImportAlias) -> Vec<TopLevelImportable>,
+{
+    let mut items = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
+    for alias in aliases {
+        let symbols = symbols_for_alias(alias);
+        let Some(symbol) = symbols
+            .iter()
+            .find(|symbol| symbol.name == alias.foreign_name)
+        else {
+            continue;
+        };
+
+        let item = CompletionItem {
+            label: alias.local_name.clone(),
+            kind: Some(symbol.kind),
+            detail: Some(symbol.node_type.clone()),
+            filter_text: Some(alias.local_name.clone()),
+            ..Default::default()
+        };
+
+        if let Some(&idx) = seen.get(&item.label) {
+            if should_replace_completion_item(&items[idx], &item) {
+                items[idx] = item;
+            }
+        } else {
+            let idx = items.len();
+            seen.insert(item.label.clone(), idx);
+            items.push(item);
+        }
+    }
+
+    items.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
+    items
+}
+
+pub fn text_top_level_importables_for_file(
+    path: &str,
+    source_text: &str,
+) -> Vec<TopLevelImportable> {
+    let Some(tree) = parse_solidity_text(source_text) else {
+        return vec![];
+    };
+
+    let mut out = Vec::new();
+    for child in named_children(tree.root_node()) {
+        let Some((node_type, kind)) = text_top_level_node_kind(child.kind()) else {
+            continue;
+        };
+        if child.kind() == "state_variable_declaration"
+            && !source_text[child.byte_range()].contains("constant")
+        {
+            continue;
+        }
+        let Some(name) = child_id_text(child, source_text) else {
+            continue;
+        };
+        out.push(TopLevelImportable {
+            name: name.to_string(),
+            declaring_path: path.to_string(),
+            node_type: node_type.to_string(),
+            kind,
+        });
+    }
+
+    out
+}
+
+pub fn text_named_import_aliases(source_text: &str) -> Vec<TextNamedImportAlias> {
+    let Some(tree) = parse_solidity_text(source_text) else {
+        return vec![];
+    };
+
+    let mut out = Vec::new();
+    collect_text_named_import_aliases(tree.root_node(), source_text, &mut out);
+    out
+}
+
+pub fn text_completion_items_for_file(source_text: &str) -> Vec<CompletionItem> {
+    let Some(tree) = parse_solidity_text(source_text) else {
+        return vec![];
+    };
+
+    let mut items = Vec::new();
+    collect_text_completion_items(tree.root_node(), source_text, &mut items);
+    items.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
+    items.dedup_by(|a, b| a.label == b.label && a.kind == b.kind);
+    items
+}
+
+fn text_scope_safe_completion_items_for_file(source_text: &str) -> Vec<CompletionItem> {
+    let Some(tree) = parse_solidity_text(source_text) else {
+        return vec![];
+    };
+
+    let mut items = Vec::new();
+    collect_text_scope_safe_completion_items(tree.root_node(), source_text, &mut items);
+    items.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
+    items.dedup_by(|a, b| a.label == b.label && a.kind == b.kind);
+    items
+}
+
+fn text_completion_items_for_scope_at_byte(
+    source_text: &str,
+    byte_pos: usize,
+) -> Vec<CompletionItem> {
+    let Some(tree) = parse_solidity_text(source_text) else {
+        return vec![];
+    };
+
+    let root = tree.root_node();
+    let cursor_node = innermost_node_at_byte(root, byte_pos);
+    let cursor_contract = ancestor_key(
+        cursor_node,
+        &[
+            "contract_declaration",
+            "interface_declaration",
+            "library_declaration",
+        ],
+    );
+    let cursor_callable =
+        ancestor_key(cursor_node, &["function_definition", "modifier_definition"]);
+
+    let mut items = Vec::new();
+    collect_text_completion_items_for_scope(
+        root,
+        source_text,
+        cursor_contract,
+        cursor_callable,
+        &mut items,
+    );
+    items.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
+    items.dedup_by(|a, b| a.label == b.label && a.kind == b.kind);
+    items
+}
+
+fn append_live_text_completion_items_for_scope(
+    base: Vec<CompletionItem>,
+    source_text: &str,
+    byte_pos: usize,
+) -> Vec<CompletionItem> {
+    append_context_completion_items(
+        base,
+        text_completion_items_for_scope_at_byte(source_text, byte_pos),
+    )
+}
+
+fn append_live_text_completion_items(
+    base: Vec<CompletionItem>,
+    source_text: &str,
+) -> Vec<CompletionItem> {
+    append_context_completion_items(base, text_completion_items_for_file(source_text))
+}
+
+fn append_scope_safe_live_text_completion_items(
+    base: Vec<CompletionItem>,
+    source_text: &str,
+) -> Vec<CompletionItem> {
+    append_context_completion_items(base, text_scope_safe_completion_items_for_file(source_text))
+}
+
+fn append_context_completion_items(
+    mut base: Vec<CompletionItem>,
+    items: Vec<CompletionItem>,
+) -> Vec<CompletionItem> {
+    let mut seen: HashMap<String, usize> = base
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| (item.label.clone(), idx))
+        .collect();
+
+    for item in items {
+        if let Some(&idx) = seen.get(&item.label) {
+            if should_replace_completion_item(&base[idx], &item) {
+                base[idx] = item;
+            }
+        } else {
+            let idx = base.len();
+            seen.insert(item.label.clone(), idx);
+            base.push(item);
+        }
+    }
+
+    base
+}
+
+fn parse_solidity_text(source_text: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_solidity::LANGUAGE.into())
+        .ok()?;
+    parser.parse(source_text, None)
+}
+
+fn text_top_level_node_kind(node_kind: &str) -> Option<(&'static str, CompletionItemKind)> {
+    match node_kind {
+        "contract_declaration" | "interface_declaration" | "library_declaration" => {
+            Some(("ContractDefinition", CompletionItemKind::CLASS))
+        }
+        "struct_declaration" => Some(("StructDefinition", CompletionItemKind::STRUCT)),
+        "enum_declaration" => Some(("EnumDefinition", CompletionItemKind::ENUM)),
+        "function_definition" => Some(("FunctionDefinition", CompletionItemKind::FUNCTION)),
+        "event_definition" => Some(("EventDefinition", CompletionItemKind::EVENT)),
+        "error_declaration" => Some(("ErrorDefinition", CompletionItemKind::FUNCTION)),
+        "state_variable_declaration" => Some(("VariableDeclaration", CompletionItemKind::VARIABLE)),
+        "user_defined_type_definition" => Some((
+            "UserDefinedValueTypeDefinition",
+            CompletionItemKind::TYPE_PARAMETER,
+        )),
+        _ => None,
+    }
+}
+
+fn text_completion_node_kind(node_kind: &str) -> Option<(&'static str, CompletionItemKind)> {
+    text_top_level_node_kind(node_kind).or_else(|| match node_kind {
+        "modifier_definition" => Some(("ModifierDefinition", CompletionItemKind::METHOD)),
+        "variable_declaration" | "parameter" => {
+            Some(("VariableDeclaration", CompletionItemKind::VARIABLE))
+        }
+        "enum_value" => Some(("EnumValue", CompletionItemKind::ENUM_MEMBER)),
+        _ => None,
+    })
+}
+
+fn text_scope_safe_completion_node_kind(
+    node_kind: &str,
+) -> Option<(&'static str, CompletionItemKind)> {
+    text_top_level_node_kind(node_kind).or_else(|| match node_kind {
+        "modifier_definition" => Some(("ModifierDefinition", CompletionItemKind::METHOD)),
+        _ => None,
+    })
+}
+
+fn collect_text_completion_items(node: Node, source_text: &str, out: &mut Vec<CompletionItem>) {
+    if let Some((node_type, kind)) = text_completion_node_kind(node.kind()) {
+        if node.kind() != "state_variable_declaration"
+            || source_text[node.byte_range()].contains("constant")
+            || child_id_text(node, source_text).is_some()
+        {
+            if let Some(name) = child_id_text(node, source_text) {
+                out.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(kind),
+                    detail: Some(node_type.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    for child in all_children(node) {
+        collect_text_completion_items(child, source_text, out);
+    }
+}
+
+fn collect_text_scope_safe_completion_items(
+    node: Node,
+    source_text: &str,
+    out: &mut Vec<CompletionItem>,
+) {
+    if let Some((node_type, kind)) = text_scope_safe_completion_node_kind(node.kind()) {
+        if node.kind() != "state_variable_declaration"
+            || source_text[node.byte_range()].contains("constant")
+            || child_id_text(node, source_text).is_some()
+        {
+            if let Some(name) = child_id_text(node, source_text) {
+                out.push(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(kind),
+                    detail: Some(node_type.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    for child in all_children(node) {
+        collect_text_scope_safe_completion_items(child, source_text, out);
+    }
+}
+
+fn collect_text_completion_items_for_scope(
+    node: Node,
+    source_text: &str,
+    cursor_contract: Option<(usize, usize)>,
+    cursor_callable: Option<(usize, usize)>,
+    out: &mut Vec<CompletionItem>,
+) {
+    if let Some((node_type, kind)) = text_top_level_node_kind(node.kind()) {
+        let include = match node.kind() {
+            "state_variable_declaration" => {
+                cursor_contract.is_some()
+                    && ancestor_key(
+                        node,
+                        &[
+                            "contract_declaration",
+                            "interface_declaration",
+                            "library_declaration",
+                        ],
+                    ) == cursor_contract
+            }
+            "function_definition"
+            | "event_definition"
+            | "error_declaration"
+            | "struct_declaration"
+            | "enum_declaration"
+            | "user_defined_type_definition" => {
+                match ancestor_key(
+                    node,
+                    &[
+                        "contract_declaration",
+                        "interface_declaration",
+                        "library_declaration",
+                    ],
+                ) {
+                    Some(contract) => Some(contract) == cursor_contract,
+                    None => true,
+                }
+            }
+            _ => true,
+        };
+
+        if include
+            && (node.kind() != "state_variable_declaration"
+                || source_text[node.byte_range()].contains("constant")
+                || child_id_text(node, source_text).is_some())
+            && let Some(name) = child_id_text(node, source_text)
+        {
+            out.push(CompletionItem {
+                label: name.to_string(),
+                kind: Some(kind),
+                detail: Some(node_type.to_string()),
+                ..Default::default()
+            });
+        }
+    } else if let Some((node_type, kind)) = text_completion_node_kind(node.kind()) {
+        let include_callable_local = cursor_callable.is_some()
+            && ancestor_key(node, &["function_definition", "modifier_definition"])
+                == cursor_callable;
+        if include_callable_local
+            && matches!(
+                node.kind(),
+                "variable_declaration" | "parameter" | "modifier_definition"
+            )
+            && let Some(name) = child_id_text(node, source_text)
+        {
+            out.push(CompletionItem {
+                label: name.to_string(),
+                kind: Some(kind),
+                detail: Some(node_type.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    for child in all_children(node) {
+        collect_text_completion_items_for_scope(
+            child,
+            source_text,
+            cursor_contract,
+            cursor_callable,
+            out,
+        );
+    }
+}
+
+fn innermost_node_at_byte(mut node: Node, byte_pos: usize) -> Node {
+    loop {
+        let Some(child) = all_children(node)
+            .find(|child| child.start_byte() <= byte_pos && byte_pos <= child.end_byte())
+        else {
+            return node;
+        };
+        node = child;
+    }
+}
+
+fn ancestor_key(mut node: Node, kinds: &[&str]) -> Option<(usize, usize)> {
+    loop {
+        if kinds.contains(&node.kind()) {
+            return Some((node.start_byte(), node.end_byte()));
+        }
+        node = node.parent()?;
+    }
+}
+
+fn collect_text_named_import_aliases(
+    node: Node,
+    source_text: &str,
+    out: &mut Vec<TextNamedImportAlias>,
+) {
+    if node.kind() == "import_directive" {
+        let import_text = source_text[node.byte_range()].trim();
+        if let Some(import_path) = import_path_from_text(import_text)
+            && let Some(alias_body) = braced_import_list(import_text)
+        {
+            for alias in parse_import_aliases(alias_body) {
+                out.push(TextNamedImportAlias {
+                    import_path: import_path.clone(),
+                    foreign_name: alias.0,
+                    local_name: alias.1,
+                });
+            }
+        }
+        return;
+    }
+
+    for child in all_children(node) {
+        collect_text_named_import_aliases(child, source_text, out);
+    }
+}
+
+fn braced_import_list(import_text: &str) -> Option<&str> {
+    let open = import_text.find('{')?;
+    let close = import_text[open + 1..]
+        .find('}')
+        .map(|idx| open + 1 + idx)?;
+    Some(&import_text[open + 1..close])
+}
+
+fn import_path_from_text(import_text: &str) -> Option<String> {
+    let from_idx = import_text.find(" from ").unwrap_or(0);
+    let after_from = &import_text[from_idx..];
+    let quote_idx = after_from.find(['\"', '\''])?;
+    let quote = after_from.as_bytes()[quote_idx];
+    let path_start = from_idx + quote_idx + 1;
+    let rest = &import_text[path_start..];
+    let path_end = rest
+        .as_bytes()
+        .iter()
+        .position(|&b| b == quote)
+        .map(|idx| path_start + idx)?;
+    Some(import_text[path_start..path_end].to_string())
+}
+
+fn parse_import_aliases(alias_body: &str) -> Vec<(String, String)> {
+    alias_body
+        .split(',')
+        .filter_map(|part| {
+            let tokens: Vec<&str> = part.split_whitespace().collect();
+            if tokens.is_empty() {
+                return None;
+            }
+
+            if tokens.len() >= 3 && tokens[1] == "as" {
+                Some((tokens[0].to_string(), tokens[2].to_string()))
+            } else {
+                Some((tokens[0].to_string(), tokens[0].to_string()))
+            }
+        })
+        .collect()
+}
+
+fn named_children(node: Node) -> impl Iterator<Item = Node> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node
+        .children(&mut cursor)
+        .filter(|c| c.is_named())
+        .collect();
+    children.into_iter()
+}
+
+fn all_children(node: Node) -> impl Iterator<Item = Node> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    children.into_iter()
+}
+
+fn child_id_text<'a>(node: Node<'a>, source_text: &'a str) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|c| c.kind() == "identifier" && c.is_named())
+        .map(|c| &source_text[c.byte_range()])
+}
+
+pub fn named_import_completion_context(
+    source_text: &str,
+    position: Position,
+) -> Option<NamedImportCompletionContext> {
+    let lines: Vec<&str> = source_text.lines().collect();
+    let line = lines.get(position.line as usize)?;
+    let abs_byte = crate::utils::position_to_byte_offset(source_text, position);
+    let line_start_byte = source_text[..abs_byte]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let col_byte = abs_byte.saturating_sub(line_start_byte).min(line.len());
+    let prefix = prefix_at_byte(line, col_byte as u32);
+
+    let open_brace = prefix.rfind('{')?;
+    let before_brace = &line[..open_brace];
+    if !before_brace.trim_start().starts_with("import") {
+        return None;
+    }
+
+    let close_brace = line[open_brace..]
+        .find('}')
+        .map(|idx| open_brace + idx)
+        .unwrap_or(line.len());
+    if col_byte < open_brace + 1 || col_byte > close_brace {
+        return None;
+    }
+
+    let import_path = parse_import_from_path(line)?;
+    let typed_start_byte = identifier_start_byte(prefix, open_brace + 1);
+    let start_col = line[..typed_start_byte].chars().count() as u32;
+    let end_col = line[..col_byte].chars().count() as u32;
+
+    Some(NamedImportCompletionContext {
+        import_path,
+        typed_range: (position.line, start_col, end_col),
+    })
+}
+
+fn parse_import_from_path(line: &str) -> Option<String> {
+    let from_idx = line.find(" from ").or_else(|| line.find("\tfrom "))?;
+    let after_from = &line[from_idx + 1..];
+    let quote_rel = after_from.find(['\"', '\''])?;
+    let quote = after_from.as_bytes()[quote_rel];
+    let path_start = from_idx + 1 + quote_rel + 1;
+    let rest = &line[path_start..];
+    let path_end = rest
+        .as_bytes()
+        .iter()
+        .position(|&b| b == quote)
+        .map(|idx| path_start + idx)
+        .unwrap_or(line.len());
+    Some(line[path_start..path_end].to_string())
+}
+
+fn identifier_start_byte(prefix: &str, min_byte: usize) -> usize {
+    let mut start = prefix.len();
+    for (idx, ch) in prefix.char_indices().rev() {
+        if idx < min_byte {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            start = idx;
+        } else {
+            break;
+        }
+    }
+    start
+}
+
 fn to_relative_import_path(current_file: &Path, target_file: &Path) -> Option<String> {
     let from_dir = current_file.parent()?;
     let rel = pathdiff::diff_paths(target_file, from_dir)?;
@@ -1872,6 +3061,26 @@ pub fn handle_completion_with_tail_candidates(
     file_id: Option<FileId>,
     tail_candidates: Vec<CompletionItem>,
 ) -> Option<CompletionResponse> {
+    handle_completion_with_context_candidates(
+        cache,
+        source_text,
+        position,
+        trigger_char,
+        file_id,
+        vec![],
+        tail_candidates,
+    )
+}
+
+pub fn handle_completion_with_context_candidates(
+    cache: Option<&CompletionCache>,
+    source_text: &str,
+    position: Position,
+    trigger_char: Option<&str>,
+    file_id: Option<FileId>,
+    context_candidates: Vec<CompletionItem>,
+    tail_candidates: Vec<CompletionItem>,
+) -> Option<CompletionResponse> {
     let lines: Vec<&str> = source_text.lines().collect();
     let line = lines.get(position.line as usize)?;
 
@@ -1883,14 +3092,27 @@ pub fn handle_completion_with_tail_candidates(
         .unwrap_or(0);
     let col_byte = (abs_byte - line_start_byte) as u32;
 
+    if let Some(items) = source_unit_directive_completions(prefix_at_byte(line, col_byte), position)
+    {
+        return Some(CompletionResponse::List(CompletionList {
+            is_incomplete: false,
+            items,
+        }));
+    }
+
     // Build scope context for scope-aware type resolution
     let scope_ctx = file_id.map(|fid| ScopeContext {
         byte_pos: abs_byte,
         file_id: fid,
     });
 
-    let items = if trigger_char == Some(".") {
-        let chain = parse_dot_chain(line, col_byte);
+    let dot_chain = if trigger_char == Some(".") {
+        Some(parse_dot_chain(line, col_byte))
+    } else {
+        member_access_chain_at_cursor(line, col_byte)
+    };
+
+    let items = if let Some(chain) = dot_chain {
         if chain.is_empty() {
             return None;
         }
@@ -1916,9 +3138,31 @@ pub fn handle_completion_with_tail_candidates(
     } else {
         match cache {
             Some(c) => {
-                append_auto_import_candidates_last(c.general_completions.clone(), tail_candidates)
+                let base = if let Some(ctx) = scope_ctx.as_ref() {
+                    get_scope_completion_items(c, ctx)
+                        .map(|items| {
+                            append_scope_safe_live_text_completion_items(items, source_text)
+                        })
+                        .unwrap_or_else(|| {
+                            append_live_text_completion_items(
+                                c.general_completions.clone(),
+                                source_text,
+                            )
+                        })
+                } else {
+                    append_live_text_completion_items(c.general_completions.clone(), source_text)
+                };
+                let base = append_context_completion_items(base, context_candidates);
+                append_auto_import_candidates_last(base, tail_candidates)
             }
-            None => get_static_completions(),
+            None => {
+                let base = append_live_text_completion_items_for_scope(
+                    get_static_completions(),
+                    source_text,
+                    abs_byte,
+                );
+                append_context_completion_items(base, context_candidates)
+            }
         }
     };
 
@@ -2240,6 +3484,7 @@ mod tests {
             names: vec![],
             name_to_type: HashMap::new(),
             node_members: HashMap::new(),
+            member_type_by_container: HashMap::new(),
             type_to_node: HashMap::new(),
             name_to_node_id: HashMap::new(),
             method_identifiers: HashMap::new(),
@@ -2527,8 +3772,9 @@ mod tests {
         );
         match resp {
             Some(CompletionResponse::List(list)) => {
-                assert_eq!(list.items.len(), 1);
-                assert_eq!(list.items[0].label, "A");
+                let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
+                assert!(labels.contains(&"A"));
+                assert!(labels.contains(&"X"));
             }
             _ => panic!("expected completion list"),
         }

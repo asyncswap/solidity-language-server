@@ -1,12 +1,15 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use solidity_language_server::completion::{
-    AccessKind, DotSegment, build_completion_cache, extract_identifier_before_dot,
-    extract_mapping_value_type, extract_node_id_from_type, get_dot_completions,
-    get_general_completions, parse_dot_chain,
+    AccessKind, DotSegment, TextNamedImportAlias, build_completion_cache,
+    extract_identifier_before_dot, extract_mapping_value_type, extract_node_id_from_type,
+    get_dot_completions, get_general_completions, handle_completion,
+    handle_completion_with_context_candidates, importable_completion_candidates_for_path,
+    imported_symbol_completion_items_for_aliases, named_import_completion_context, parse_dot_chain,
+    text_completion_items_for_file, text_named_import_aliases, text_top_level_importables_for_file,
 };
 use solidity_language_server::types::{FileId, NodeId};
 use std::fs;
-use tower_lsp::lsp_types::CompletionItemKind;
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position};
 
 fn load_ast() -> Value {
     let raw: Value =
@@ -19,6 +22,22 @@ fn load_cache() -> solidity_language_server::completion::CompletionCache {
     let sources = ast_data.get("sources").unwrap();
     let contracts = ast_data.get("contracts");
     build_completion_cache(sources, contracts, None)
+}
+
+fn response_labels(resp: Option<CompletionResponse>) -> Vec<String> {
+    match resp {
+        Some(CompletionResponse::List(list)) => list.items.into_iter().map(|i| i.label).collect(),
+        Some(CompletionResponse::Array(items)) => items.into_iter().map(|i| i.label).collect(),
+        None => vec![],
+    }
+}
+
+fn response_items(resp: Option<CompletionResponse>) -> Vec<CompletionItem> {
+    match resp {
+        Some(CompletionResponse::List(list)) => list.items,
+        Some(CompletionResponse::Array(items)) => items,
+        None => vec![],
+    }
 }
 
 // --- extract_node_id_from_type ---
@@ -332,6 +351,478 @@ fn test_general_completions_include_keywords() {
 }
 
 #[test]
+fn test_context_completion_spdx_directive() {
+    let items = response_items(handle_completion(
+        None,
+        "// SPDX",
+        Position {
+            line: 0,
+            character: 7,
+        },
+        None,
+        None,
+    ));
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    let mit = items
+        .iter()
+        .find(|item| item.label == "// SPDX-License-Identifier: MIT")
+        .expect("MIT SPDX completion");
+
+    assert!(labels.contains(&"// SPDX-License-Identifier: MIT"));
+    assert!(!labels.contains(&"pragma"));
+    assert_eq!(mit.kind, Some(CompletionItemKind::CONSTANT));
+    assert_ne!(mit.kind, Some(CompletionItemKind::TEXT));
+    assert_eq!(
+        mit.filter_text.as_deref(),
+        Some("spdx // SPDX-License-Identifier: MIT // SPDX-License-Identifier: MIT")
+    );
+}
+
+#[test]
+fn test_context_completion_spdx_directive_from_short_prefix() {
+    let labels = response_labels(handle_completion(
+        None,
+        "// SP",
+        Position {
+            line: 0,
+            character: 5,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"// SPDX-License-Identifier: MIT".to_string()));
+    assert!(!labels.contains(&"selfdestruct(address payable recipient)".to_string()));
+    assert!(!labels.contains(&"super".to_string()));
+}
+
+#[test]
+fn test_context_completion_pragma_keyword() {
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma ",
+        Position {
+            line: 0,
+            character: 7,
+        },
+        None,
+        None,
+    ));
+
+    assert_eq!(labels, vec!["solidity".to_string(), "abicoder".to_string()]);
+}
+
+#[test]
+fn test_context_completion_pragma_solidity_versions() {
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma solidity ",
+        Position {
+            line: 0,
+            character: 16,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"^0.8.35".to_string()));
+    assert!(labels.contains(&"^0.8.0".to_string()));
+    assert!(!labels.contains(&"revert()".to_string()));
+    assert!(!labels.contains(&"msg".to_string()));
+}
+
+#[test]
+fn test_context_completion_finished_pragma_is_empty() {
+    let source = "pragma solidity ^0.8.0;";
+    let labels = response_labels(handle_completion(
+        None,
+        source,
+        Position {
+            line: 0,
+            character: source.len() as u32,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.is_empty());
+}
+
+#[test]
+fn test_static_completion_includes_custom_error_snippet() {
+    let labels = response_labels(handle_completion(
+        None,
+        "contract A {\n    err",
+        Position {
+            line: 1,
+            character: 7,
+        },
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"error".to_string()));
+    assert!(labels.contains(&"error Name();".to_string()));
+}
+
+#[test]
+fn test_named_import_completion_context() {
+    let source = "import {Initializ} from \"@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol\";";
+    let ctx = named_import_completion_context(
+        source,
+        Position {
+            line: 0,
+            character: 17,
+        },
+    )
+    .expect("named import context");
+
+    assert_eq!(
+        ctx.import_path,
+        "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol"
+    );
+    assert_eq!(ctx.typed_range, (0, 8, 17));
+}
+
+#[test]
+fn test_importable_candidates_follow_import_alias_shim() {
+    let sources = json!({
+        "/tmp/Shim.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/Shim.sol",
+                "nodes": [
+                    {
+                        "nodeType": "ImportDirective",
+                        "id": 2,
+                        "scope": 1,
+                        "src": "0:1:0",
+                        "file": "/tmp/Initializable.sol",
+                        "absolutePath": "/tmp/Initializable.sol",
+                        "symbolAliases": [
+                            {
+                                "foreign": {
+                                    "name": "Initializable",
+                                    "referencedDeclaration": 10
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "/tmp/Initializable.sol": {
+            "id": 1,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 3,
+                "absolutePath": "/tmp/Initializable.sol",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 10,
+                        "name": "Initializable",
+                        "scope": 3,
+                        "src": "0:1:1",
+                        "contractKind": "contract"
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+    let items = importable_completion_candidates_for_path(&cache, "/tmp/Shim.sol", None);
+
+    let initializable = items
+        .iter()
+        .find(|item| item.label == "Initializable")
+        .expect("Initializable candidate");
+    assert_eq!(initializable.kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(initializable.detail.as_deref(), Some("ContractDefinition"));
+}
+
+#[test]
+fn test_general_completion_upgrades_reference_text_to_contract_class() {
+    let sources = json!({
+        "/tmp/A.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/A.sol",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 2,
+                        "name": "RafluxTicket1155",
+                        "scope": 1,
+                        "src": "0:1:0",
+                        "baseContracts": [
+                            {
+                                "nodeType": "InheritanceSpecifier",
+                                "id": 3,
+                                "baseName": {
+                                    "nodeType": "IdentifierPath",
+                                    "id": 4,
+                                    "name": "Initializable",
+                                    "referencedDeclaration": 10,
+                                    "src": "0:1:0"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "/tmp/Initializable.sol": {
+            "id": 1,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 5,
+                "absolutePath": "/tmp/Initializable.sol",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 10,
+                        "name": "Initializable",
+                        "scope": 5,
+                        "src": "0:1:1",
+                        "contractKind": "contract"
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+
+    let initializable = cache
+        .general_completions
+        .iter()
+        .find(|item| item.label == "Initializable")
+        .expect("Initializable completion item");
+    assert_eq!(initializable.kind, Some(CompletionItemKind::CLASS));
+}
+
+#[test]
+fn test_imported_symbol_completion_items_keep_semantic_kind_for_contract() {
+    let aliases = vec![TextNamedImportAlias {
+        import_path: "./Initializable.sol".to_string(),
+        foreign_name: "Initializable".to_string(),
+        local_name: "Init".to_string(),
+    }];
+    let target_symbols =
+        text_top_level_importables_for_file("/tmp/Initializable.sol", "contract Initializable {}");
+
+    let items = imported_symbol_completion_items_for_aliases(&aliases, |_| target_symbols.clone());
+    let init = items
+        .iter()
+        .find(|item| item.label == "Init")
+        .expect("Init alias completion item");
+
+    assert_eq!(init.kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(init.detail.as_deref(), Some("ContractDefinition"));
+    assert_eq!(init.filter_text.as_deref(), Some("Init"));
+}
+
+#[test]
+fn test_imported_contract_completion_survives_incomplete_inheritance_without_cache() {
+    let source = concat!(
+        "// SPDX-License-Identifier: MIT\n",
+        "pragma solidity ^0.8.20;\n",
+        "import {Initializable} from \"./Initializable.sol\";\n",
+        "contract RafluxTicket1155 is Initi"
+    );
+    let target_symbols =
+        text_top_level_importables_for_file("/tmp/Initializable.sol", "contract Initializable {}");
+    let aliases = text_named_import_aliases(source);
+    let imported_items =
+        imported_symbol_completion_items_for_aliases(&aliases, |_| target_symbols.clone());
+    let position = Position {
+        line: 3,
+        character: "contract RafluxTicket1155 is Initi".len() as u32,
+    };
+
+    let response = handle_completion_with_context_candidates(
+        None,
+        source,
+        position,
+        None,
+        None,
+        imported_items,
+        vec![],
+    );
+    let items = match response.expect("completion response") {
+        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => items,
+    };
+    let initializable = items
+        .iter()
+        .find(|item| item.label == "Initializable")
+        .expect("Initializable completion item");
+
+    assert_eq!(initializable.kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(initializable.detail.as_deref(), Some("ContractDefinition"));
+}
+
+#[test]
+fn test_no_cache_completion_keeps_contract_error_but_not_sibling_params() {
+    let source = concat!(
+        "contract RafluxTicket1155 {\n",
+        "    error NotOperator();\n",
+        "    function initialize(address owner_) external {}\n",
+        "    modifier onlyOperator() {\n",
+        "        revert NotO\n",
+        "    }\n",
+        "}\n"
+    );
+    let position = Position {
+        line: 4,
+        character: "        revert NotO".len() as u32,
+    };
+
+    let response = handle_completion(None, source, position, None, None);
+    let items = match response.expect("completion response") {
+        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => items,
+    };
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    let not_operator = items
+        .iter()
+        .find(|item| item.label == "NotOperator")
+        .expect("NotOperator completion item");
+
+    assert_eq!(not_operator.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(not_operator.detail.as_deref(), Some("ErrorDefinition"));
+    assert!(!labels.contains(&"owner_"));
+}
+
+#[test]
+fn test_text_top_level_importables_include_custom_error() {
+    let source = r#"
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.0;
+
+        error NotOperator();
+        contract RafluxTicket1155 {}
+    "#;
+    let symbols = text_top_level_importables_for_file("/tmp/RafluxTicket1155.sol", source);
+
+    let err = symbols
+        .iter()
+        .find(|symbol| symbol.name == "NotOperator")
+        .expect("NotOperator symbol");
+    assert_eq!(err.kind, CompletionItemKind::FUNCTION);
+    assert_eq!(err.node_type, "ErrorDefinition");
+
+    let contract = symbols
+        .iter()
+        .find(|symbol| symbol.name == "RafluxTicket1155")
+        .expect("contract symbol");
+    assert_eq!(contract.kind, CompletionItemKind::CLASS);
+}
+
+#[test]
+fn test_text_completion_items_include_contract_error_and_state_vars() {
+    let source = r#"
+        contract RafluxTicket1155 {
+            string public name;
+            mapping(address => bool) public isOperator;
+            error NotOperator();
+        }
+    "#;
+    let items = text_completion_items_for_file(source);
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(labels.contains(&"RafluxTicket1155"));
+    assert!(labels.contains(&"name"));
+    assert!(labels.contains(&"isOperator"));
+    assert!(labels.contains(&"NotOperator"));
+
+    let not_operator = items
+        .iter()
+        .find(|item| item.label == "NotOperator")
+        .expect("NotOperator completion item");
+    assert_eq!(not_operator.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(not_operator.detail.as_deref(), Some("ErrorDefinition"));
+}
+
+#[test]
+fn test_no_cache_completion_includes_live_function_parameters_as_variables() {
+    let source = r#"contract Raffle {
+    function buyTickets(uint256 listingId, uint256 amount) external {
+        emit TicketBought(list);
+    }
+}"#;
+    let position = Position {
+        line: 2,
+        character: source.lines().nth(2).unwrap().find("list").unwrap() as u32 + 4,
+    };
+    let items = response_items(handle_completion(None, source, position, None, None));
+
+    let listing_id = items
+        .iter()
+        .find(|item| item.label == "listingId")
+        .expect("listingId should be available from live text before AST cache is ready");
+
+    assert_eq!(listing_id.kind, Some(CompletionItemKind::VARIABLE));
+    assert_ne!(listing_id.kind, Some(CompletionItemKind::TEXT));
+}
+
+#[test]
+fn test_text_named_import_aliases_from_shim() {
+    let source = r#"
+        // SPDX-License-Identifier: MIT
+        pragma solidity ^0.8.20;
+        import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+    "#;
+    let aliases = text_named_import_aliases(source);
+
+    let alias = aliases
+        .iter()
+        .find(|alias| alias.local_name == "Initializable")
+        .expect("Initializable alias");
+    assert_eq!(alias.foreign_name, "Initializable");
+    assert_eq!(
+        alias.import_path,
+        "@openzeppelin/contracts/proxy/utils/Initializable.sol"
+    );
+}
+
+#[test]
+fn test_top_level_custom_error_is_importable() {
+    let sources = json!({
+        "/tmp/Errors.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/Errors.sol",
+                "nodes": [
+                    {
+                        "nodeType": "ErrorDefinition",
+                        "id": 2,
+                        "name": "NotOperator",
+                        "scope": 1,
+                        "src": "0:1:0"
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+    let items = importable_completion_candidates_for_path(&cache, "/tmp/Errors.sol", None);
+
+    let err = items
+        .iter()
+        .find(|item| item.label == "NotOperator")
+        .expect("NotOperator candidate");
+    assert_eq!(err.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(err.detail.as_deref(), Some("ErrorDefinition"));
+}
+
+#[test]
 fn test_general_completions_include_magic_globals() {
     let cache = load_cache();
     let completions = get_general_completions(&cache);
@@ -421,7 +912,7 @@ fn test_dot_completion_on_struct() {
     let pool_key_vars: Vec<&str> = cache
         .name_to_type
         .iter()
-        .filter(|(_, tid)| tid.contains("PoolKey"))
+        .filter(|(_, tid)| tid.starts_with("t_struct$_PoolKey_"))
         .map(|(name, _)| name.as_str())
         .collect();
 
@@ -1129,6 +1620,392 @@ fn test_using_for_pool_key_has_to_id() {
     );
 }
 
+#[test]
+fn test_using_for_contract_value_includes_library_extensions() {
+    let sources = json!({
+        "/tmp/Token.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "src": "0:1000:0",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 10,
+                        "name": "IERC20",
+                        "scope": 1,
+                        "src": "0:100:0",
+                        "contractKind": "interface",
+                        "nodes": [{
+                            "nodeType": "FunctionDefinition",
+                            "id": 11,
+                            "name": "approve",
+                            "scope": 10,
+                            "src": "10:20:0",
+                            "visibility": "external",
+                            "parameters": { "nodeType": "ParameterList", "parameters": [] },
+                            "returnParameters": { "nodeType": "ParameterList", "parameters": [] }
+                        }]
+                    },
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 30,
+                        "name": "IERC1363",
+                        "scope": 1,
+                        "src": "110:100:0",
+                        "contractKind": "interface",
+                        "nodes": []
+                    },
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 20,
+                        "name": "SafeERC20",
+                        "scope": 1,
+                        "src": "220:300:0",
+                        "contractKind": "library",
+                        "nodes": [
+                            {
+                                "nodeType": "FunctionDefinition",
+                                "id": 21,
+                                "name": "safeTransferFrom",
+                                "scope": 20,
+                                "src": "230:50:0",
+                                "visibility": "internal",
+                                "parameters": { "nodeType": "ParameterList", "parameters": [
+                                    { "nodeType": "VariableDeclaration", "id": 211, "name": "token", "typeDescriptions": { "typeIdentifier": "t_contract$_IERC20_$10", "typeString": "contract IERC20" } },
+                                    { "nodeType": "VariableDeclaration", "id": 212, "name": "from", "typeDescriptions": { "typeIdentifier": "t_address", "typeString": "address" } },
+                                    { "nodeType": "VariableDeclaration", "id": 213, "name": "to", "typeDescriptions": { "typeIdentifier": "t_address", "typeString": "address" } },
+                                    { "nodeType": "VariableDeclaration", "id": 214, "name": "value", "typeDescriptions": { "typeIdentifier": "t_uint256", "typeString": "uint256" } }
+                                ] },
+                                "returnParameters": { "nodeType": "ParameterList", "parameters": [] }
+                            },
+                            {
+                                "nodeType": "FunctionDefinition",
+                                "id": 22,
+                                "name": "safeTransfer",
+                                "scope": 20,
+                                "src": "290:50:0",
+                                "visibility": "internal",
+                                "parameters": { "nodeType": "ParameterList", "parameters": [
+                                    { "nodeType": "VariableDeclaration", "id": 221, "name": "token", "typeDescriptions": { "typeIdentifier": "t_contract$_IERC20_$10", "typeString": "contract IERC20" } },
+                                    { "nodeType": "VariableDeclaration", "id": 222, "name": "to", "typeDescriptions": { "typeIdentifier": "t_address", "typeString": "address" } },
+                                    { "nodeType": "VariableDeclaration", "id": 223, "name": "value", "typeDescriptions": { "typeIdentifier": "t_uint256", "typeString": "uint256" } }
+                                ] },
+                                "returnParameters": { "nodeType": "ParameterList", "parameters": [] }
+                            },
+                            {
+                                "nodeType": "FunctionDefinition",
+                                "id": 23,
+                                "name": "approveAndCallRelaxed",
+                                "scope": 20,
+                                "src": "350:50:0",
+                                "visibility": "internal",
+                                "parameters": { "nodeType": "ParameterList", "parameters": [
+                                    { "nodeType": "VariableDeclaration", "id": 231, "name": "token", "typeDescriptions": { "typeIdentifier": "t_contract$_IERC1363_$30", "typeString": "contract IERC1363" } }
+                                ] },
+                                "returnParameters": { "nodeType": "ParameterList", "parameters": [] }
+                            },
+                            {
+                                "nodeType": "FunctionDefinition",
+                                "id": 24,
+                                "name": "_safeTransfer",
+                                "scope": 20,
+                                "src": "410:50:0",
+                                "visibility": "private",
+                                "parameters": { "nodeType": "ParameterList", "parameters": [
+                                    { "nodeType": "VariableDeclaration", "id": 241, "name": "token", "typeDescriptions": { "typeIdentifier": "t_contract$_IERC20_$10", "typeString": "contract IERC20" } }
+                                ] },
+                                "returnParameters": { "nodeType": "ParameterList", "parameters": [] }
+                            }
+                        ]
+                    },
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 40,
+                        "name": "Raffle",
+                        "scope": 1,
+                        "src": "530:300:0",
+                        "contractKind": "contract",
+                        "nodes": [
+                            {
+                                "nodeType": "UsingForDirective",
+                                "id": 41,
+                                "src": "540:30:0",
+                                "libraryName": { "nodeType": "IdentifierPath", "name": "SafeERC20", "referencedDeclaration": 20 },
+                                "typeName": { "nodeType": "UserDefinedTypeName", "referencedDeclaration": 10, "typeDescriptions": { "typeIdentifier": "t_contract$_IERC20_$10", "typeString": "contract IERC20" } }
+                            },
+                            {
+                                "nodeType": "VariableDeclaration",
+                                "id": 42,
+                                "name": "paymentToken",
+                                "scope": 40,
+                                "src": "580:20:0",
+                                "stateVariable": true,
+                                "typeDescriptions": { "typeIdentifier": "t_contract$_IERC20_$10", "typeString": "contract IERC20" }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+
+    let value_items = get_chain_completions(
+        &cache,
+        &[DotSegment {
+            name: "paymentToken".to_string(),
+            kind: AccessKind::Plain,
+            call_args: None,
+        }],
+        None,
+    );
+    let value_labels: Vec<&str> = value_items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(
+        value_labels.contains(&"approve"),
+        "labels: {value_labels:?}"
+    );
+    assert!(
+        value_labels.contains(&"safeTransferFrom"),
+        "labels: {value_labels:?}"
+    );
+    assert!(
+        value_labels.contains(&"safeTransfer"),
+        "labels: {value_labels:?}"
+    );
+    assert!(
+        !value_labels.contains(&"approveAndCallRelaxed"),
+        "IERC1363-only extension should not be offered for IERC20: {value_labels:?}"
+    );
+    assert!(
+        !value_labels.contains(&"_safeTransfer"),
+        "private library helpers should not be offered as extension methods: {value_labels:?}"
+    );
+
+    let type_items = get_chain_completions(
+        &cache,
+        &[DotSegment {
+            name: "IERC20".to_string(),
+            kind: AccessKind::Plain,
+            call_args: None,
+        }],
+        None,
+    );
+    let type_labels: Vec<&str> = type_items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(type_labels.contains(&"approve"), "labels: {type_labels:?}");
+    assert!(
+        !type_labels.contains(&"safeTransferFrom"),
+        "direct type-name completion should not include using-for value extensions: {type_labels:?}"
+    );
+}
+
+#[test]
+fn test_member_access_prefix_completion_stays_in_dot_context() {
+    let sources = json!({
+        "/tmp/RafluxTypes.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/RafluxTypes.sol",
+                "src": "0:100:0",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 10,
+                        "name": "RafluxTypes",
+                        "scope": 1,
+                        "src": "0:100:0",
+                        "contractKind": "library",
+                        "typeDescriptions": {
+                            "typeIdentifier": "t_contract$_RafluxTypes_$10",
+                            "typeString": "library RafluxTypes"
+                        },
+                        "nodes": [
+                            {
+                                "nodeType": "EnumDefinition",
+                                "id": 11,
+                                "name": "RaffleKind",
+                                "scope": 10,
+                                "src": "10:30:0",
+                                "typeDescriptions": {
+                                    "typeIdentifier": "t_enum$_RaffleKind_$11",
+                                    "typeString": "enum RafluxTypes.RaffleKind"
+                                },
+                                "members": [
+                                    { "nodeType": "EnumValue", "id": 12, "name": "HARD_CAP", "scope": 11, "src": "12:8:0" },
+                                    { "nodeType": "EnumValue", "id": 13, "name": "SOFT_CAP", "scope": 11, "src": "22:8:0" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "/tmp/RafluxRaffleV1.sol": {
+            "id": 1,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 20,
+                "absolutePath": "/tmp/RafluxRaffleV1.sol",
+                "src": "0:100:1",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 21,
+                        "name": "RafluxRaffleV1",
+                        "scope": 20,
+                        "src": "0:100:1",
+                        "contractKind": "contract"
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+
+    let source = "contract C { function f() external { RafluxTypes.Raff } }";
+    let position = Position {
+        line: 0,
+        character: source.find("Raff }").expect("typed prefix") as u32 + "Raff".len() as u32,
+    };
+    let labels = response_labels(handle_completion(
+        Some(&cache),
+        source,
+        position,
+        None,
+        None,
+    ));
+
+    assert!(
+        labels.contains(&"RaffleKind".to_string()),
+        "labels: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"RafluxRaffleV1".to_string()),
+        "member-access completion must not leak general class completions: {labels:?}"
+    );
+}
+
+#[test]
+fn test_nested_member_access_prefix_completion_returns_enum_members() {
+    let sources = json!({
+        "/tmp/RafluxTypes.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/RafluxTypes.sol",
+                "src": "0:100:0",
+                "nodes": [{
+                    "nodeType": "ContractDefinition",
+                    "id": 10,
+                    "name": "RafluxTypes",
+                    "scope": 1,
+                    "src": "0:100:0",
+                    "contractKind": "contract",
+                    "nodes": [
+                        {
+                            "nodeType": "EnumDefinition",
+                            "id": 11,
+                            "name": "RaffleKind",
+                            "src": "10:30:0",
+                            "members": [
+                                { "nodeType": "EnumValue", "id": 12, "name": "HARD_CAP", "src": "12:8:0" },
+                                { "nodeType": "EnumValue", "id": 13, "name": "SOFT_CAP", "src": "22:8:0" }
+                            ]
+                        },
+                        {
+                            "nodeType": "EnumDefinition",
+                            "id": 14,
+                            "name": "ListingStatus",
+                            "src": "40:50:0",
+                            "members": [
+                                { "nodeType": "EnumValue", "id": 15, "name": "NONE", "src": "50:4:0" },
+                                { "nodeType": "EnumValue", "id": 16, "name": "ACTIVE", "src": "60:6:0" },
+                                { "nodeType": "EnumValue", "id": 17, "name": "RANDOM_REQUESTED", "src": "70:16:0" }
+                            ]
+                        }
+                    ]
+                }]
+            }
+        },
+        "/tmp/RafluxRaffleV1.sol": {
+            "id": 1,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 20,
+                "absolutePath": "/tmp/RafluxRaffleV1.sol",
+                "src": "0:100:1",
+                "nodes": [{
+                    "nodeType": "ContractDefinition",
+                    "id": 21,
+                    "name": "RafluxRaffleV1",
+                    "scope": 20,
+                    "src": "0:100:1",
+                    "contractKind": "contract"
+                }]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+
+    let source = "contract C { function f() external { RafluxTypes.Listing } }";
+    let position = Position {
+        line: 0,
+        character: source.find("Listing }").expect("typed enum name prefix") as u32
+            + "Listing".len() as u32,
+    };
+    let labels = response_labels(handle_completion(
+        Some(&cache),
+        source,
+        position,
+        None,
+        None,
+    ));
+
+    assert!(
+        labels.contains(&"ListingStatus".to_string()),
+        "labels: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"RaffleKind".to_string()),
+        "labels: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"RafluxRaffleV1".to_string()),
+        "member-access completion must not leak general class completions: {labels:?}"
+    );
+
+    let source = "contract C { function f() external { RafluxTypes.ListingStatus.ACT } }";
+    let position = Position {
+        line: 0,
+        character: source.find("ACT }").expect("typed enum member prefix") as u32
+            + "ACT".len() as u32,
+    };
+    let labels = response_labels(handle_completion(
+        Some(&cache),
+        source,
+        position,
+        None,
+        None,
+    ));
+
+    assert!(labels.contains(&"ACTIVE".to_string()), "labels: {labels:?}");
+    assert!(labels.contains(&"NONE".to_string()), "labels: {labels:?}");
+    assert!(
+        labels.contains(&"RANDOM_REQUESTED".to_string()),
+        "labels: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"RafluxRaffleV1".to_string()),
+        "nested member-access completion must not leak general class completions: {labels:?}"
+    );
+}
+
 // --- Chain resolution with get_chain_completions ---
 
 use solidity_language_server::completion::get_chain_completions;
@@ -1653,7 +2530,9 @@ fn test_general_completions_include_common_int_types() {
 
 // --- Scope-aware completion tests ---
 
-use solidity_language_server::completion::{ScopeContext, resolve_name_in_scope};
+use solidity_language_server::completion::{
+    ScopeContext, get_scope_completion_items, resolve_name_in_scope,
+};
 
 #[test]
 fn test_scope_declarations_populated() {
@@ -1773,6 +2652,129 @@ fn test_scope_resolve_unknown_name_falls_back() {
         result.is_some(),
         "Contract names should be resolved via fallback"
     );
+}
+
+#[test]
+fn test_scope_completion_items_do_not_leak_sibling_function_params() {
+    let cache = load_cache();
+    let ctx = ScopeContext {
+        byte_pos: 9600,
+        file_id: FileId(5),
+    };
+    let items = get_scope_completion_items(&cache, &ctx).expect("scope completions");
+    let names: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert!(
+        cache
+            .general_completions
+            .iter()
+            .any(|item| item.label == "newOwner"),
+        "fixture should contain newOwner globally so this catches flat completion leakage"
+    );
+    assert!(names.contains(&"key"), "local parameter should be visible");
+    assert!(
+        names.contains(&"_pools"),
+        "contract state variable should be visible"
+    );
+    assert!(
+        names.contains(&"owner"),
+        "inherited state variable should be visible"
+    );
+    assert!(
+        names.contains(&"msg"),
+        "static global should still be visible"
+    );
+    assert!(
+        !names.contains(&"newOwner"),
+        "parameter from an unrelated function must not leak into this scope"
+    );
+}
+
+#[test]
+fn test_scope_completion_items_include_contract_custom_error_as_function() {
+    let sources = json!({
+        "/tmp/A.sol": {
+            "id": 0,
+            "ast": {
+                "nodeType": "SourceUnit",
+                "id": 1,
+                "absolutePath": "/tmp/A.sol",
+                "src": "0:140:0",
+                "nodes": [
+                    {
+                        "nodeType": "ContractDefinition",
+                        "id": 2,
+                        "name": "A",
+                        "scope": 1,
+                        "src": "0:140:0",
+                        "linearizedBaseContracts": [2],
+                        "nodes": [
+                            {
+                                "nodeType": "ErrorDefinition",
+                                "id": 3,
+                                "name": "NotOperator",
+                                "scope": 2,
+                                "src": "20:20:0",
+                                "typeDescriptions": {
+                                    "typeString": "function () pure returns (error)"
+                                }
+                            },
+                            {
+                                "nodeType": "FunctionDefinition",
+                                "id": 4,
+                                "name": "transferOwnership",
+                                "scope": 2,
+                                "src": "45:35:0",
+                                "typeDescriptions": {
+                                    "typeIdentifier": "t_function_internal_nonpayable$_t_address_$returns$__$",
+                                    "typeString": "function (address)"
+                                },
+                                "parameters": {
+                                    "nodeType": "ParameterList",
+                                    "id": 5,
+                                    "parameters": [
+                                        {
+                                            "nodeType": "VariableDeclaration",
+                                            "id": 6,
+                                            "name": "newOwner",
+                                            "scope": 4,
+                                            "src": "65:8:0",
+                                            "typeDescriptions": {
+                                                "typeIdentifier": "t_address",
+                                                "typeString": "address"
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "nodeType": "ModifierDefinition",
+                                "id": 7,
+                                "name": "onlyOperator",
+                                "scope": 2,
+                                "src": "90:35:0"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    });
+    let cache = build_completion_cache(&sources, None, None);
+    let ctx = ScopeContext {
+        byte_pos: 100,
+        file_id: FileId(0),
+    };
+    let items = get_scope_completion_items(&cache, &ctx).expect("scope completions");
+    let not_operator = items
+        .iter()
+        .find(|item| item.label == "NotOperator")
+        .expect("NotOperator completion item");
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+
+    assert_eq!(not_operator.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(not_operator.detail.as_deref(), Some("ErrorDefinition"));
+    assert!(!labels.contains(&"newOwner"));
 }
 
 #[test]
