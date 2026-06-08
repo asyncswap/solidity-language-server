@@ -1771,6 +1771,7 @@ fn prefix_at_byte(line: &str, col_byte: u32) -> &str {
 }
 
 fn source_unit_directive_completions(
+    line: &str,
     line_prefix: &str,
     position: Position,
 ) -> Option<Vec<CompletionItem>> {
@@ -1789,15 +1790,18 @@ fn source_unit_directive_completions(
         }
     }
 
-    if let Some(after_solidity) = trimmed.strip_prefix("pragma solidity") {
+    if let Some(after_solidity) = strip_directive_value(trimmed, "pragma solidity") {
         if after_solidity.contains(';') {
             return Some(vec![]);
         }
 
-        return Some(solidity_version_completions());
+        return Some(solidity_version_completions(
+            position,
+            directive_value_range(line, "pragma solidity"),
+        ));
     }
 
-    if let Some(after_abicoder) = trimmed.strip_prefix("pragma abicoder") {
+    if let Some(after_abicoder) = strip_directive_value(trimmed, "pragma abicoder") {
         if after_abicoder.contains(';') {
             return Some(vec![]);
         }
@@ -1823,6 +1827,15 @@ fn source_unit_directive_completions(
     }
 
     None
+}
+
+fn strip_directive_value<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(directive)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 fn is_spdx_directive_prefix(upper_comment_body: &str) -> bool {
@@ -1867,7 +1880,69 @@ fn spdx_license_identifier_completions() -> Vec<CompletionItem> {
     .collect()
 }
 
-fn solidity_version_completions() -> Vec<CompletionItem> {
+fn directive_value_range(line: &str, directive: &str) -> Range {
+    let mut byte = line
+        .find(directive)
+        .map(|idx| idx + directive.len())
+        .unwrap_or(line.len());
+
+    while byte < line.len() {
+        let ch = line[byte..]
+            .chars()
+            .next()
+            .expect("byte is within string bounds");
+        if !ch.is_whitespace() {
+            break;
+        }
+        byte += ch.len_utf8();
+    }
+
+    let end_byte = line[byte..]
+        .find(';')
+        .map(|idx| byte + idx)
+        .unwrap_or(line.len());
+
+    Range {
+        start: Position {
+            line: 0,
+            character: line[..byte].encode_utf16().count() as u32,
+        },
+        end: Position {
+            line: 0,
+            character: line[..end_byte].encode_utf16().count() as u32,
+        },
+    }
+}
+
+fn version_completion_item(
+    label: impl Into<String>,
+    detail: impl Into<String>,
+    position: Position,
+    range: Range,
+) -> CompletionItem {
+    let label = label.into();
+    CompletionItem {
+        label: label.clone(),
+        kind: Some(CompletionItemKind::CONSTANT),
+        detail: Some(detail.into()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: Range {
+                start: Position {
+                    line: position.line,
+                    character: range.start.character,
+                },
+                end: Position {
+                    line: position.line,
+                    character: range.end.character,
+                },
+            },
+            new_text: label,
+        })),
+        ..Default::default()
+    }
+}
+
+fn solidity_version_completions(position: Position, range: Range) -> Vec<CompletionItem> {
     [
         ("^0.8.35", "Latest Solidity 0.8.x compatible range"),
         ("0.8.35", "Latest Solidity exact version"),
@@ -1875,7 +1950,7 @@ fn solidity_version_completions() -> Vec<CompletionItem> {
         (">=0.8.0 <0.9.0", "Solidity 0.8.x range"),
     ]
     .into_iter()
-    .map(|(version, detail)| completion_item(version, CompletionItemKind::CONSTANT, detail))
+    .map(|(version, detail)| version_completion_item(version, detail, position, range))
     .collect()
 }
 
@@ -2040,7 +2115,8 @@ pub fn handle_completion_with_tail_candidates(
         .unwrap_or(0);
     let col_byte = (abs_byte - line_start_byte) as u32;
 
-    if let Some(items) = source_unit_directive_completions(prefix_at_byte(line, col_byte), position)
+    if let Some(items) =
+        source_unit_directive_completions(line, prefix_at_byte(line, col_byte), position)
     {
         return Some(CompletionResponse::List(CompletionList {
             is_incomplete: false,

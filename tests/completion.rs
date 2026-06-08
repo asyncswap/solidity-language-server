@@ -459,6 +459,69 @@ fn test_context_completion_pragma_solidity_versions() {
 }
 
 #[test]
+fn test_context_completion_pragma_directive_requires_token_boundary() {
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma solidityx",
+        Position {
+            line: 0,
+            character: "pragma solidityx".len() as u32,
+        },
+        None,
+        None,
+    ));
+
+    assert!(!labels.contains(&"^0.8.35".to_string()));
+    assert!(!labels.contains(&"^0.8.0".to_string()));
+
+    let labels = response_labels(handle_completion(
+        None,
+        "pragma abicoderx",
+        Position {
+            line: 0,
+            character: "pragma abicoderx".len() as u32,
+        },
+        None,
+        None,
+    ));
+
+    assert!(!labels.contains(&"v2".to_string()));
+    assert!(!labels.contains(&"v1".to_string()));
+}
+
+#[test]
+fn test_context_completion_pragma_solidity_version_replaces_partial_token() {
+    let source = "pragma solidity 0.* ^0.8.35;";
+    let items = response_items(handle_completion(
+        None,
+        source,
+        Position {
+            line: 0,
+            character: "pragma solidity 0.*".len() as u32,
+        },
+        None,
+        None,
+    ));
+    let version = items
+        .iter()
+        .find(|item| item.label == "^0.8.35")
+        .expect("^0.8.35 completion");
+    let edit = match version.text_edit.as_ref().expect("version text edit") {
+        CompletionTextEdit::Edit(edit) => edit,
+        CompletionTextEdit::InsertAndReplace(_) => panic!("expected replacement edit"),
+    };
+
+    assert_eq!(edit.range.start.line, 0);
+    assert_eq!(edit.range.start.character, "pragma solidity ".len() as u32);
+    assert_eq!(edit.range.end.line, 0);
+    assert_eq!(
+        edit.range.end.character,
+        "pragma solidity 0.* ^0.8.35".len() as u32
+    );
+    assert_eq!(edit.new_text, "^0.8.35");
+}
+
+#[test]
 fn test_context_completion_finished_pragma_is_empty() {
     let source = "pragma solidity ^0.8.0;";
     let labels = response_labels(handle_completion(
