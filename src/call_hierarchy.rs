@@ -97,22 +97,22 @@ pub fn verify_node_identity(
     // source file covers exactly `expected_name`.  We verify by reading the source
     // only when the offset already matched (so this is the rare confirmation path,
     // not the hot path).
-    if let Some(nl) = info.name_location.as_deref() {
-        if let Some(loc) = SourceLoc::parse(nl) {
-            // Read the source bytes at the name_location range and compare.
-            // The file read is cached by the OS and is the same file we'll read
-            // later for building CallHierarchyItems anyway.
-            let name_matches = std::path::Path::new(expected_abs_path)
-                .exists()
-                .then(|| std::fs::read(expected_abs_path).ok())
-                .flatten()
-                .is_some_and(|source_bytes| {
-                    source_bytes
-                        .get(loc.offset..loc.end())
-                        .is_some_and(|slice| slice == expected_name.as_bytes())
-                });
-            return name_matches;
-        }
+    if let Some(nl) = info.name_location.as_deref()
+        && let Some(loc) = SourceLoc::parse(nl)
+    {
+        // Read the source bytes at the name_location range and compare.
+        // The file read is cached by the OS and is the same file we'll read
+        // later for building CallHierarchyItems anyway.
+        let name_matches = std::path::Path::new(expected_abs_path)
+            .exists()
+            .then(|| std::fs::read(expected_abs_path).ok())
+            .flatten()
+            .is_some_and(|source_bytes| {
+                source_bytes
+                    .get(loc.offset..loc.end())
+                    .is_some_and(|slice| slice == expected_name.as_bytes())
+            });
+        return name_matches;
     }
     false
 }
@@ -157,15 +157,15 @@ pub fn resolve_target_in_build(
     // Re-resolve by byte offset (stable across compilations).
     if let Some(resolved_id) = byte_to_id(&build.nodes, target_abs, target_name_offset) {
         // Double-check that the resolved node is a callable with the right name.
-        if let Some(file_nodes) = build.nodes.get(target_abs) {
-            if let Some(info) = file_nodes.get(&resolved_id) {
-                let nt = info.node_type.as_deref().unwrap_or("");
-                if matches!(
-                    nt,
-                    "FunctionDefinition" | "ModifierDefinition" | "ContractDefinition"
-                ) {
-                    ids.push(resolved_id);
-                }
+        if let Some(file_nodes) = build.nodes.get(target_abs)
+            && let Some(info) = file_nodes.get(&resolved_id)
+        {
+            let nt = info.node_type.as_deref().unwrap_or("");
+            if matches!(
+                nt,
+                "FunctionDefinition" | "ModifierDefinition" | "ContractDefinition"
+            ) {
+                ids.push(resolved_id);
             }
         }
     }
@@ -190,7 +190,7 @@ pub fn incoming_calls(
 ) -> Vec<(NodeId, String)> {
     let mut results = Vec::new();
 
-    for (_abs_path, file_nodes) in nodes {
+    for file_nodes in nodes.values() {
         // Collect all callable nodes in this file for enclosing-span lookup.
         let callables: Vec<(NodeId, &NodeInfo)> = file_nodes
             .iter()
@@ -291,8 +291,8 @@ pub fn outgoing_calls(
 
     let mut results = Vec::new();
 
-    for (_abs_path, file_nodes) in nodes {
-        for (_ref_id, ref_info) in file_nodes {
+    for file_nodes in nodes.values() {
+        for ref_info in file_nodes.values() {
             let Some(ref_decl) = ref_info.referenced_declaration else {
                 continue;
             };
@@ -357,8 +357,8 @@ pub fn outgoing_low_level_calls(
     let mut results: Vec<(CallHierarchyItem, Range)> = Vec::new();
 
     // ── Pass 1: Solidity MemberAccess low-level calls ──────────────────
-    for (_abs_path, file_nodes) in &build.nodes {
-        for (_ref_id, ref_info) in file_nodes {
+    for file_nodes in build.nodes.values() {
+        for ref_info in file_nodes.values() {
             // Only MemberAccess nodes with no referenced_declaration.
             if ref_info.referenced_declaration.is_some() {
                 continue;
@@ -627,10 +627,10 @@ pub fn call_src_to_range(
 // ── Internal helpers ───────────────────────────────────────────────────────
 
 /// Find a node in the `nodes` index by ID, searching all files.
-pub fn find_node_info<'a>(
-    nodes: &'a HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+pub fn find_node_info(
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
     node_id: NodeId,
-) -> Option<&'a NodeInfo> {
+) -> Option<&NodeInfo> {
     for file_nodes in nodes.values() {
         if let Some(info) = file_nodes.get(&node_id) {
             return Some(info);
@@ -716,15 +716,15 @@ pub fn resolve_callable_at_position(
 
     // Case 2: the node references a callable declaration.
     if let Some(ref_id) = info.referenced_declaration {
-        if let Some(decl) = build.decl_index.get(&ref_id) {
-            if matches!(
+        if let Some(decl) = build.decl_index.get(&ref_id)
+            && matches!(
                 decl,
                 DeclNode::FunctionDefinition(_)
                     | DeclNode::ModifierDefinition(_)
                     | DeclNode::ContractDefinition(_)
-            ) {
-                return Some(ref_id);
-            }
+            )
+        {
+            return Some(ref_id);
         }
         if let Some(ref_info) = find_node_info(&build.nodes, ref_id) {
             let ref_type = ref_info.node_type.as_deref().unwrap_or("");
@@ -747,15 +747,16 @@ pub fn resolve_callable_at_position(
         ) {
             continue;
         }
-        if let Some(src_loc) = SourceLoc::parse(ni.src.as_str()) {
-            if src_loc.offset <= byte_position && byte_position < src_loc.end() {
-                match best_callable {
-                    None => best_callable = Some((*id, src_loc.length)),
-                    Some((_, best_len)) if src_loc.length < best_len => {
-                        best_callable = Some((*id, src_loc.length));
-                    }
-                    _ => {}
+        if let Some(src_loc) = SourceLoc::parse(ni.src.as_str())
+            && src_loc.offset <= byte_position
+            && byte_position < src_loc.end()
+        {
+            match best_callable {
+                None => best_callable = Some((*id, src_loc.length)),
+                Some((_, best_len)) if src_loc.length < best_len => {
+                    best_callable = Some((*id, src_loc.length));
                 }
+                _ => {}
             }
         }
     }

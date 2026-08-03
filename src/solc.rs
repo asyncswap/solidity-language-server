@@ -712,13 +712,11 @@ pub fn normalize_solc_output(mut solc_output: Value, project_root: Option<&Path>
     fn resolve_import_absolute_paths(node: &mut Value, resolve: &dyn Fn(&str) -> String) {
         let is_import = node.get("nodeType").and_then(|v| v.as_str()) == Some("ImportDirective");
 
-        if is_import {
-            if let Some(abs_path) = node.get("absolutePath").and_then(|v| v.as_str()) {
-                let resolved = resolve(abs_path);
-                node.as_object_mut()
-                    .unwrap()
-                    .insert("absolutePath".to_string(), json!(resolved));
-            }
+        if is_import && let Some(abs_path) = node.get("absolutePath").and_then(|v| v.as_str()) {
+            let resolved = resolve(abs_path);
+            node.as_object_mut()
+                .unwrap()
+                .insert("absolutePath".to_string(), json!(resolved));
         }
 
         // Recurse into "nodes" array (top-level AST children)
@@ -1003,10 +1001,11 @@ pub fn discover_src_only_closure(config: &FoundryConfig, remappings: &[String]) 
             Err(_) => continue,
         };
         for imp in links::ts_find_imports(source.as_bytes()) {
-            if let Some(abs) = resolve_import_to_abs(&config.root, &file, &imp.path, remappings) {
-                if abs.exists() && !visited.contains(&abs) {
-                    queue.push_back(abs);
-                }
+            if let Some(abs) = resolve_import_to_abs(&config.root, &file, &imp.path, remappings)
+                && abs.exists()
+                && !visited.contains(&abs)
+            {
+                queue.push_back(abs);
             }
         }
     }
@@ -1093,10 +1092,11 @@ pub fn discover_compilation_closure(config: &FoundryConfig, remappings: &[String
             Err(_) => continue,
         };
         for imp in links::ts_find_imports(source.as_bytes()) {
-            if let Some(abs) = resolve_import_to_abs(&config.root, &file, &imp.path, remappings) {
-                if abs.exists() && !visited.contains(&abs) {
-                    queue.push_back(abs);
-                }
+            if let Some(abs) = resolve_import_to_abs(&config.root, &file, &imp.path, remappings)
+                && abs.exists()
+                && !visited.contains(&abs)
+            {
+                queue.push_back(abs);
             }
         }
     }
@@ -1414,22 +1414,22 @@ async fn solc_project_index_from_files_ast_only(
         (source_files.to_vec(), Vec::new())
     };
 
-    if !incompatible_files.is_empty() {
-        if let Some(c) = client {
-            c.log_message(
-                tower_lsp::lsp_types::MessageType::INFO,
-                format!(
-                    "project index: {} compatible, {} incompatible with solc {}",
-                    compatible_files.len(),
-                    incompatible_files.len(),
-                    project_version
-                        .as_ref()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default(),
-                ),
-            )
-            .await;
-        }
+    if !incompatible_files.is_empty()
+        && let Some(c) = client
+    {
+        c.log_message(
+            tower_lsp::lsp_types::MessageType::INFO,
+            format!(
+                "project index: {} compatible, {} incompatible with solc {}",
+                compatible_files.len(),
+                incompatible_files.len(),
+                project_version
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+        )
+        .await;
     }
 
     let mut result = if compatible_files.is_empty() {
@@ -1451,8 +1451,11 @@ async fn solc_project_index_from_files_ast_only(
             .ok()
             .and_then(|src| parse_pragma(&src));
         let file_binary = resolve_solc_binary(config, pragma.as_ref(), client).await;
-        let input =
-            build_batch_standard_json_input_ast_only(&[file.clone()], &remappings, &config.root);
+        let input = build_batch_standard_json_input_ast_only(
+            std::slice::from_ref(file),
+            &remappings,
+            &config.root,
+        );
         if let Ok(raw) = run_solc(&file_binary, &input, &config.root).await {
             let normalized = normalize_solc_output(raw, Some(&config.root));
             merge_normalized_outputs(&mut result, normalized);
@@ -1708,22 +1711,22 @@ async fn solc_project_index_from_files(
         (source_files.to_vec(), Vec::new())
     };
 
-    if !incompatible_files.is_empty() {
-        if let Some(c) = client {
-            c.log_message(
-                tower_lsp::lsp_types::MessageType::INFO,
-                format!(
-                    "project index: {} compatible, {} incompatible with solc {}",
-                    compatible_files.len(),
-                    incompatible_files.len(),
-                    project_version
-                        .as_ref()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default(),
-                ),
-            )
-            .await;
-        }
+    if !incompatible_files.is_empty()
+        && let Some(c) = client
+    {
+        c.log_message(
+            tower_lsp::lsp_types::MessageType::INFO,
+            format!(
+                "project index: {} compatible, {} incompatible with solc {}",
+                compatible_files.len(),
+                incompatible_files.len(),
+                project_version
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            ),
+        )
+        .await;
     }
 
     // -- Full batch compile of compatible files. --
@@ -1764,14 +1767,14 @@ async fn solc_project_index_from_files(
                 arr.iter()
                     .filter(|e| e.get("severity").and_then(|s| s.as_str()) == Some("error"))
                     .take(3)
-                    .filter_map(|e| {
+                    .map(|e| {
                         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("?");
                         let file = e
                             .get("sourceLocation")
                             .and_then(|sl| sl.get("file"))
                             .and_then(|f| f.as_str())
                             .unwrap_or("?");
-                        Some(format!("{file}: {msg}"))
+                        format!("{file}: {msg}")
                     })
                     .collect()
             })
@@ -1808,7 +1811,7 @@ async fn solc_project_index_from_files(
 
         let file_binary = resolve_solc_binary(config, Some(&file_constraint), client).await;
         let input = build_batch_standard_json_input_with_cache(
-            &[file.clone()],
+            std::slice::from_ref(file),
             &remappings,
             config,
             text_cache,

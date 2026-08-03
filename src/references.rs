@@ -575,20 +575,20 @@ pub fn goto_references_for_target(
     // Emit qualifier locations from the qualifier_refs index when the
     // target is a container. These are IdentifierPath nodes where the
     // container appears as the first segment (e.g., `Pool` in `Pool.State`).
-    if is_qualifier_target {
-        if let Some(qualifier_node_ids) = build.qualifier_refs.get(&target_node_id) {
-            for &qnode_id in qualifier_node_ids {
-                if excluded_ids.contains(&qnode_id) {
-                    continue;
-                }
-                if let Some(location) = id_to_location_with_index(
-                    &build.nodes,
-                    &build.id_to_path_map,
-                    qnode_id,
-                    Some(0), // first segment = qualifier
-                ) {
-                    locations.push(location);
-                }
+    if is_qualifier_target
+        && let Some(qualifier_node_ids) = build.qualifier_refs.get(&target_node_id)
+    {
+        for &qnode_id in qualifier_node_ids {
+            if excluded_ids.contains(&qnode_id) {
+                continue;
+            }
+            if let Some(location) = id_to_location_with_index(
+                &build.nodes,
+                &build.id_to_path_map,
+                qnode_id,
+                Some(0), // first segment = qualifier
+            ) {
+                locations.push(location);
             }
         }
     }
@@ -597,14 +597,12 @@ pub fn goto_references_for_target(
     for (src_str, decl_id) in &build.external_refs {
         if target_ids.contains(decl_id) {
             // Skip external refs in the excluded file.
-            if let Some(excl) = exclude_abs_path {
-                if let Some(src_loc) = SourceLoc::parse(src_str.as_str()) {
-                    if let Some(ref_path) = build.id_to_path_map.get(&src_loc.file_id_str()) {
-                        if ref_path == excl {
-                            continue;
-                        }
-                    }
-                }
+            if let Some(excl) = exclude_abs_path
+                && let Some(src_loc) = SourceLoc::parse(src_str.as_str())
+                && let Some(ref_path) = build.id_to_path_map.get(&src_loc.file_id_str())
+                && ref_path == excl
+            {
+                continue;
             }
             if let Some(location) = src_to_location(src_str.as_str(), &build.id_to_path_map) {
                 locations.push(location);

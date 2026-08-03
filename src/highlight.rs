@@ -407,7 +407,7 @@ mod tests {
 }"#;
         let highlights = highlights_at(source, 0, 9);
         assert!(
-            highlights.len() >= 1,
+            !highlights.is_empty(),
             "expected at least 1 highlight for contract name 'Foo'"
         );
         // Contract declaration name is Write
@@ -460,7 +460,7 @@ mod tests {
         // Click on "x" — should NOT highlight "y"
         let highlights = highlights_at(source, 1, 23);
         for h in &highlights {
-            let text = &source[..];
+            let text = source;
             let line: &str = text.lines().nth(h.0 as usize).unwrap();
             assert!(
                 line.contains("x"),

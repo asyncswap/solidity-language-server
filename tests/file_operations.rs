@@ -22,7 +22,7 @@ async fn test_rename_a_to_aa_produces_edit_on_b() {
     let source_files: Vec<String> = fs::read_dir(&example_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "sol"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sol"))
         .filter_map(|e| e.path().to_str().map(String::from))
         .collect();
 
@@ -44,7 +44,7 @@ async fn test_rename_a_to_aa_produces_edit_on_b() {
         let fallback_files: Vec<String> = fs::read_dir(&example_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "sol"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sol"))
             .filter_map(|e| e.path().to_str().map(String::from))
             .collect();
         edits = file_operations::rename_imports_single(
@@ -94,7 +94,7 @@ async fn test_rename_a_to_aa_via_solc_project_index() {
     let source_files: Vec<String> = fs::read_dir(&example_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "sol"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sol"))
         .filter_map(|e| e.path().to_str().map(String::from))
         .collect();
 
@@ -275,7 +275,7 @@ fn test_rename_multiple_importers() {
 
     assert_eq!(edits.len(), 2, "both B.sol and C.sol should have edits");
 
-    for (_uri, file_edits) in &edits {
+    for file_edits in edits.values() {
         for te in file_edits {
             assert_eq!(te.new_text, "\"./AA.sol\"");
         }

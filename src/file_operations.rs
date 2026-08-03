@@ -76,7 +76,7 @@ pub fn expand_folder_renames(
     // Deduplicate by old path; last entry wins.
     let mut dedup: HashMap<PathBuf, PathBuf> = HashMap::new();
     for (old_path, new_path) in params {
-        if old_path.is_dir() || !old_path.extension().map_or(false, |e| e == "sol") {
+        if old_path.is_dir() || old_path.extension().is_none_or(|e| e != "sol") {
             for sf in source_files {
                 let sf_path = Path::new(sf);
                 if let Ok(suffix) = sf_path.strip_prefix(old_path) {
@@ -100,7 +100,7 @@ pub fn expand_folder_renames(
 pub fn expand_folder_deletes(params: &[PathBuf], source_files: &[String]) -> Vec<PathBuf> {
     let mut dedup: HashMap<PathBuf, ()> = HashMap::new();
     for old_path in params {
-        if old_path.is_dir() || !old_path.extension().map_or(false, |e| e == "sol") {
+        if old_path.is_dir() || old_path.extension().is_none_or(|e| e != "sol") {
             for sf in source_files {
                 let sf_path = Path::new(sf);
                 if sf_path.strip_prefix(old_path).is_ok() {
@@ -134,7 +134,7 @@ pub fn expand_folder_renames_from_paths(
             Err(_) => continue,
         };
 
-        if old_path.extension().map_or(false, |e| e == "sol") && !old_path.is_dir() {
+        if old_path.extension().is_some_and(|e| e == "sol") && !old_path.is_dir() {
             dedup.insert(old_uri.to_string(), new_uri.to_string());
         } else {
             for existing_path in candidate_paths {
@@ -169,7 +169,7 @@ pub fn expand_folder_deletes_from_paths(
             Err(_) => continue,
         };
 
-        if old_path.extension().map_or(false, |e| e == "sol") && !old_path.is_dir() {
+        if old_path.extension().is_some_and(|e| e == "sol") && !old_path.is_dir() {
             dedup.insert(old_path, ());
         } else {
             for existing_path in candidate_paths {
@@ -395,7 +395,7 @@ pub fn rename_imports(
                 continue;
             }
 
-            let already_edited = edits.get(&old_uri).map_or(false, |file_edits| {
+            let already_edited = edits.get(&old_uri).is_some_and(|file_edits| {
                 let qr = range_with_quotes(imp.inner_range);
                 file_edits.iter().any(|e| e.range == qr)
             });
@@ -498,9 +498,9 @@ pub fn delete_imports(
                 continue;
             };
 
-            let duplicate = edits.get(&source_uri).map_or(false, |file_edits| {
-                file_edits.iter().any(|e| e.range == statement_range)
-            });
+            let duplicate = edits
+                .get(&source_uri)
+                .is_some_and(|file_edits| file_edits.iter().any(|e| e.range == statement_range));
             if duplicate {
                 stats.dedup_skips += 1;
                 continue;
@@ -772,7 +772,7 @@ pub fn generate_scaffold(uri: &Url, solc_version: Option<&str>) -> Option<String
         "contract"
     } else if stem.starts_with('I')
         && stem.len() > 1
-        && stem.chars().nth(1).map_or(false, |c| c.is_uppercase())
+        && stem.chars().nth(1).is_some_and(|c| c.is_uppercase())
     {
         "interface"
     } else if stem.starts_with("Lib") || stem.starts_with("lib") {

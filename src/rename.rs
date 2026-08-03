@@ -202,13 +202,12 @@ pub fn ts_alias_local_name_at_cursor(source_bytes: &[u8], cursor_byte: usize) ->
                 let child = node.child(i as u32)?;
                 if child.kind() == "as" {
                     // The identifier immediately after `as` is the local alias name
-                    if let Some(next) = node.child((i + 1) as u32) {
-                        if next.kind() == "identifier"
-                            && next.start_byte() <= cursor_byte
-                            && cursor_byte < next.end_byte()
-                        {
-                            return Some(source[next.start_byte()..next.end_byte()].to_string());
-                        }
+                    if let Some(next) = node.child((i + 1) as u32)
+                        && next.kind() == "identifier"
+                        && next.start_byte() <= cursor_byte
+                        && cursor_byte < next.end_byte()
+                    {
+                        return Some(source[next.start_byte()..next.end_byte()].to_string());
                     }
                 }
                 i += 1;
@@ -217,10 +216,10 @@ pub fn ts_alias_local_name_at_cursor(source_bytes: &[u8], cursor_byte: usize) ->
         }
         // Recurse
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if let Some(result) = find_alias(child, source, cursor_byte) {
-                    return Some(result);
-                }
+            if let Some(child) = node.child(i as u32)
+                && let Some(result) = find_alias(child, source, cursor_byte)
+            {
+                return Some(result);
             }
         }
         None
@@ -265,16 +264,16 @@ pub fn ts_collect_identifier_locations(
     ) {
         if node.kind() == "identifier" {
             let text = &source[node.start_byte()..node.end_byte()];
-            if text == name {
-                if let (Some(start), Some(end)) = (
+            if text == name
+                && let (Some(start), Some(end)) = (
                     goto::bytes_to_pos(source_bytes, node.start_byte()),
                     goto::bytes_to_pos(source_bytes, node.end_byte()),
-                ) {
-                    out.push(Location {
-                        uri: file_uri.clone(),
-                        range: Range { start, end },
-                    });
-                }
+                )
+            {
+                out.push(Location {
+                    uri: file_uri.clone(),
+                    range: Range { start, end },
+                });
             }
         }
         for i in 0..node.child_count() {
@@ -329,14 +328,14 @@ pub fn ts_find_alias_names(source_bytes: &[u8]) -> std::collections::HashSet<Str
             let count = node.child_count();
             let mut i = 0;
             while i < count {
-                if let Some(child) = node.child(i as u32) {
-                    if child.kind() == "as" {
-                        // The identifier immediately after `as` is the local alias name
-                        if let Some(next) = node.child((i + 1) as u32) {
-                            if next.kind() == "identifier" {
-                                out.insert(source[next.start_byte()..next.end_byte()].to_string());
-                            }
-                        }
+                if let Some(child) = node.child(i as u32)
+                    && child.kind() == "as"
+                {
+                    // The identifier immediately after `as` is the local alias name
+                    if let Some(next) = node.child((i + 1) as u32)
+                        && next.kind() == "identifier"
+                    {
+                        out.insert(source[next.start_byte()..next.end_byte()].to_string());
                     }
                 }
                 i += 1;
@@ -379,19 +378,16 @@ pub fn ts_find_alias_declaration(source_bytes: &[u8], alias_name: &str) -> Optio
             let count = node.child_count();
             let mut i = 0;
             while i < count {
-                if let Some(child) = node.child(i as u32) {
-                    if child.kind() == "as" {
-                        if let Some(next) = node.child((i + 1) as u32) {
-                            if next.kind() == "identifier" {
-                                let text = &source[next.start_byte()..next.end_byte()];
-                                if text == alias_name {
-                                    let start =
-                                        goto::bytes_to_pos(source_bytes, next.start_byte())?;
-                                    let end = goto::bytes_to_pos(source_bytes, next.end_byte())?;
-                                    return Some(Range { start, end });
-                                }
-                            }
-                        }
+                if let Some(child) = node.child(i as u32)
+                    && child.kind() == "as"
+                    && let Some(next) = node.child((i + 1) as u32)
+                    && next.kind() == "identifier"
+                {
+                    let text = &source[next.start_byte()..next.end_byte()];
+                    if text == alias_name {
+                        let start = goto::bytes_to_pos(source_bytes, next.start_byte())?;
+                        let end = goto::bytes_to_pos(source_bytes, next.end_byte())?;
+                        return Some(Range { start, end });
                     }
                 }
                 i += 1;
@@ -399,10 +395,10 @@ pub fn ts_find_alias_declaration(source_bytes: &[u8], alias_name: &str) -> Optio
             return None;
         }
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if let Some(result) = find_decl(child, source, source_bytes, alias_name) {
-                    return Some(result);
-                }
+            if let Some(child) = node.child(i as u32)
+                && let Some(result) = find_decl(child, source, source_bytes, alias_name)
+            {
+                return Some(result);
             }
         }
         None
@@ -430,7 +426,7 @@ pub fn ts_alias_foreign_byte_offset(source_bytes: &[u8], cursor_byte: usize) -> 
         .ok()?;
     let tree = parser.parse(source_str, None)?;
 
-    fn find_foreign(node: tree_sitter::Node, source: &str, cursor_byte: usize) -> Option<usize> {
+    fn find_foreign(node: tree_sitter::Node, cursor_byte: usize) -> Option<usize> {
         if node.kind() == "import_directive" {
             let count = node.child_count();
             let mut i = 0;
@@ -438,23 +434,21 @@ pub fn ts_alias_foreign_byte_offset(source_bytes: &[u8], cursor_byte: usize) -> 
                 let child = node.child(i as u32)?;
                 if child.kind() == "as" {
                     // Check if cursor is on the identifier after "as"
-                    if let Some(next) = node.child((i + 1) as u32) {
-                        if next.kind() == "identifier"
-                            && next.start_byte() <= cursor_byte
-                            && cursor_byte < next.end_byte()
+                    if let Some(next) = node.child((i + 1) as u32)
+                        && next.kind() == "identifier"
+                        && next.start_byte() <= cursor_byte
+                        && cursor_byte < next.end_byte()
+                    {
+                        // Found alias at cursor — now find the identifier before "as".
+                        // For `{Test as MyTest}`, the identifier before "as" is at index i-1.
+                        if i > 0
+                            && let Some(prev) = node.child((i - 1) as u32)
+                            && prev.kind() == "identifier"
                         {
-                            // Found alias at cursor — now find the identifier before "as".
-                            // For `{Test as MyTest}`, the identifier before "as" is at index i-1.
-                            if i > 0 {
-                                if let Some(prev) = node.child((i - 1) as u32) {
-                                    if prev.kind() == "identifier" {
-                                        return Some(prev.start_byte());
-                                    }
-                                }
-                            }
-                            // Unit alias (`import "file" as AFile`) — no foreign identifier
-                            return None;
+                            return Some(prev.start_byte());
                         }
+                        // Unit alias (`import "file" as AFile`) — no foreign identifier
+                        return None;
                     }
                 }
                 i += 1;
@@ -462,16 +456,16 @@ pub fn ts_alias_foreign_byte_offset(source_bytes: &[u8], cursor_byte: usize) -> 
             return None;
         }
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if let Some(result) = find_foreign(child, source, cursor_byte) {
-                    return Some(result);
-                }
+            if let Some(child) = node.child(i as u32)
+                && let Some(result) = find_foreign(child, cursor_byte)
+            {
+                return Some(result);
             }
         }
         None
     }
 
-    find_foreign(tree.root_node(), source_str, cursor_byte)
+    find_foreign(tree.root_node(), cursor_byte)
 }
 
 /// Deduplication map: URI → (start_line, start_col, end_line, end_col) → TextEdit.

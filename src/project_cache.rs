@@ -589,7 +589,7 @@ pub fn load_lib_cache(sub_root: &Path) -> Option<CachedBuild> {
     let mut nodes: HashMap<AbsPath, HashMap<NodeId, NodeInfo>> = HashMap::new();
     let mut reused_decl_ids = std::collections::HashSet::new();
 
-    for (_rel_path, shard_name) in &persisted.node_shards {
+    for shard_name in persisted.node_shards.values() {
         let shard_path = shards_dir.join(shard_name);
         let shard_bytes = match fs::read(&shard_path) {
             Ok(v) => v,

@@ -2061,7 +2061,7 @@ fn build_import_text_edit(source_text: &str, symbol: &str, import_path: &str) ->
         .enumerate()
         .filter(|(_, line)| line.trim_start().starts_with("import "))
         .map(|(idx, _)| idx)
-        .last();
+        .next_back();
 
     let insert_line = if let Some(idx) = last_import_line {
         idx + 1
@@ -2070,7 +2070,7 @@ fn build_import_text_edit(source_text: &str, symbol: &str, import_path: &str) ->
         .enumerate()
         .filter(|(_, line)| line.trim_start().starts_with("pragma "))
         .map(|(idx, _)| idx)
-        .last()
+        .next_back()
     {
         idx + 1
     } else {

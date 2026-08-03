@@ -535,13 +535,12 @@ fn build_qualifier_refs(
     let mut qualifier_refs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for file_nodes in nodes.values() {
         for (id, info) in file_nodes {
-            if info.name_locations.len() > 1 && info.node_type.as_deref() == Some("IdentifierPath")
+            if info.name_locations.len() > 1
+                && info.node_type.as_deref() == Some("IdentifierPath")
+                && let Some(ref_decl) = info.referenced_declaration
+                && let Some(&scope_id) = node_scope.get(&ref_decl)
             {
-                if let Some(ref_decl) = info.referenced_declaration
-                    && let Some(&scope_id) = node_scope.get(&ref_decl)
-                {
-                    qualifier_refs.entry(scope_id).or_default().push(*id);
-                }
+                qualifier_refs.entry(scope_id).or_default().push(*id);
             }
         }
     }
@@ -1091,10 +1090,10 @@ fn resolve_qualifier_goto(
 }
 
 /// Find a `NodeInfo` by node ID across all files.
-fn find_node_info<'a>(
-    nodes: &'a HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
+fn find_node_info(
+    nodes: &HashMap<AbsPath, HashMap<NodeId, NodeInfo>>,
     node_id: NodeId,
-) -> Option<&'a NodeInfo> {
+) -> Option<&NodeInfo> {
     for file_nodes in nodes.values() {
         if let Some(node) = file_nodes.get(&node_id) {
             return Some(node);

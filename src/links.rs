@@ -168,19 +168,19 @@ fn find_assembly_flags_range(
     // Fully parsed: assembly_statement > assembly_flags > string
     if node.kind() == "assembly_flags" {
         for i in 0..node.named_child_count() {
-            if let Some(child) = node.named_child(i as u32) {
-                if child.kind() == "string" {
-                    let start = child.start_byte();
-                    let end = child.end_byte().min(source_bytes.len());
-                    if end >= start + 2 {
-                        let inner_start = start + 1;
-                        let inner_end = end - 1;
-                        let s = utils::byte_offset_to_position(source_str, inner_start);
-                        let e = utils::byte_offset_to_position(source_str, inner_end);
-                        let r = Range { start: s, end: e };
-                        if position >= r.start && position <= r.end {
-                            return Some(r);
-                        }
+            if let Some(child) = node.named_child(i as u32)
+                && child.kind() == "string"
+            {
+                let start = child.start_byte();
+                let end = child.end_byte().min(source_bytes.len());
+                if end >= start + 2 {
+                    let inner_start = start + 1;
+                    let inner_end = end - 1;
+                    let s = utils::byte_offset_to_position(source_str, inner_start);
+                    let e = utils::byte_offset_to_position(source_str, inner_end);
+                    let r = Range { start: s, end: e };
+                    if position >= r.start && position <= r.end {
+                        return Some(r);
                     }
                 }
             }
@@ -218,10 +218,10 @@ fn find_assembly_flags_range(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i as u32) {
-            if let Some(r) = find_assembly_flags_range(child, source_bytes, source_str, position) {
-                return Some(r);
-            }
+        if let Some(child) = node.child(i as u32)
+            && let Some(r) = find_assembly_flags_range(child, source_bytes, source_str, position)
+        {
+            return Some(r);
         }
     }
     None
@@ -264,26 +264,25 @@ fn collect_imports(node: tree_sitter::Node, source_bytes: &[u8], out: &mut Vec<T
                 if child.kind() == "ERROR" {
                     // Look for a bare opening quote inside the ERROR node
                     for j in 0..child.child_count() {
-                        if let Some(gc) = child.child(j as u32) {
-                            if gc.kind() == "\"" || gc.kind() == "'" {
-                                let q = source_bytes[gc.start_byte()];
-                                let inner_start = gc.start_byte() + 1;
-                                let inner_end = find_closing_quote(source_bytes, inner_start, q);
-                                let path =
-                                    String::from_utf8_lossy(&source_bytes[inner_start..inner_end])
-                                        .to_string();
-                                let start_pos =
-                                    utils::byte_offset_to_position(source_str, inner_start);
-                                let end_pos = utils::byte_offset_to_position(source_str, inner_end);
-                                out.push(TsImport {
-                                    path,
-                                    inner_range: Range {
-                                        start: start_pos,
-                                        end: end_pos,
-                                    },
-                                });
-                                return;
-                            }
+                        if let Some(gc) = child.child(j as u32)
+                            && (gc.kind() == "\"" || gc.kind() == "'")
+                        {
+                            let q = source_bytes[gc.start_byte()];
+                            let inner_start = gc.start_byte() + 1;
+                            let inner_end = find_closing_quote(source_bytes, inner_start, q);
+                            let path =
+                                String::from_utf8_lossy(&source_bytes[inner_start..inner_end])
+                                    .to_string();
+                            let start_pos = utils::byte_offset_to_position(source_str, inner_start);
+                            let end_pos = utils::byte_offset_to_position(source_str, inner_end);
+                            out.push(TsImport {
+                                path,
+                                inner_range: Range {
+                                    start: start_pos,
+                                    end: end_pos,
+                                },
+                            });
+                            return;
                         }
                     }
                 }
@@ -391,8 +390,7 @@ fn push_string_node(
 /// Find the byte offset of the closing `quote_char` starting at `from`, or
 /// return the end of the current line (or end-of-source) if none is found.
 fn find_closing_quote(source_bytes: &[u8], from: usize, quote_char: u8) -> usize {
-    for i in from..source_bytes.len() {
-        let b = source_bytes[i];
+    for (i, &b) in source_bytes.iter().enumerate().skip(from) {
         if b == quote_char {
             return i;
         }

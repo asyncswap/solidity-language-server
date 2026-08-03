@@ -75,7 +75,9 @@ impl LspProc {
     fn write_msg(&mut self, msg: &Value) {
         let body = serde_json::to_vec(msg).expect("serialize");
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        self.stdin.write_all(header.as_bytes()).expect("write header");
+        self.stdin
+            .write_all(header.as_bytes())
+            .expect("write header");
         self.stdin.write_all(&body).expect("write body");
         self.stdin.flush().expect("flush");
     }
@@ -120,7 +122,10 @@ impl LspProc {
     fn wait_response(&mut self, id: u64, timeout: Duration) -> Value {
         let deadline = Instant::now() + timeout;
         loop {
-            assert!(Instant::now() < deadline, "timed out waiting response id={id}");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting response id={id}"
+            );
             if let Some(msg) = self.stash.pop_front() {
                 if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
                     return msg;
@@ -238,9 +243,7 @@ src = "src"
     )
     .expect("write B.sol");
 
-    let root_uri = Url::from_file_path(dir)
-        .expect("root uri")
-        .to_string();
+    let root_uri = Url::from_file_path(dir).expect("root uri").to_string();
     let a_uri = Url::from_file_path(&a).expect("a uri").to_string();
     let b_uri = Url::from_file_path(&b).expect("b uri").to_string();
     (root_uri, a_uri, b_uri)
@@ -262,7 +265,10 @@ fn initialize_server(lsp: &mut LspProc, root_uri: &str) {
         }),
     );
     let init_resp = lsp.wait_response(init_id, Duration::from_secs(10));
-    assert!(init_resp.get("result").is_some(), "initialize failed: {init_resp}");
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize failed: {init_resp}"
+    );
     lsp.send_notification("initialized", json!({}));
 }
 

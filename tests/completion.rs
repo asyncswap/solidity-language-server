@@ -3003,14 +3003,9 @@ fn walk_scope_chain(
 ) -> Vec<NodeId> {
     let mut chain = vec![start];
     let mut current = start;
-    loop {
-        match cache.scope_parent.get(&current) {
-            Some(&parent) => {
-                chain.push(parent);
-                current = parent;
-            }
-            None => break,
-        }
+    while let Some(&parent) = cache.scope_parent.get(&current) {
+        chain.push(parent);
+        current = parent;
     }
     chain
 }

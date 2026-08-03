@@ -240,7 +240,7 @@ fn spawn_load_lib_sub_caches_task(
                 // file IDs stay consistent when merging or replacing builds.
                 {
                     let mut interner = path_interner.write().await;
-                    for (_solc_id, path) in &build.id_to_path_map {
+                    for path in build.id_to_path_map.values() {
                         interner.intern(path);
                     }
                 }
@@ -538,9 +538,7 @@ impl ForgeLsp {
         let Ok(report) = load_res else {
             return None;
         };
-        let Some(build) = report.build else {
-            return None;
-        };
+        let build = report.build?;
 
         let source_count = build.nodes.len();
         let complete = report.complete;
@@ -944,7 +942,7 @@ impl ForgeLsp {
                 let sources_empty = ast_data
                     .get("sources")
                     .and_then(|v| v.as_object())
-                    .map_or(true, |m| m.is_empty());
+                    .is_none_or(|m| m.is_empty());
 
                 if sources_empty {
                     self.client
@@ -1385,7 +1383,7 @@ impl ForgeLsp {
         // when available so solc sees unsaved edits.
         let path_str = file_path.to_str()?;
         let ast_result = if self.use_solc {
-            let foundry_cfg = self.foundry_config_for_file(&file_path).await;
+            let foundry_cfg = self.foundry_config_for_file(file_path).await;
             // Use the text_cache buffer if this file is open in the editor,
             // otherwise let solc read from disk.
             let cached_text = {
@@ -1859,64 +1857,63 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
             settings_snapshot.project_index.cache_mode,
             crate::config::ProjectIndexCacheMode::V2 | crate::config::ProjectIndexCacheMode::Auto
         )
-    {
-        if start_or_mark_project_cache_upsert_pending(
+        && start_or_mark_project_cache_upsert_pending(
             &this.project_cache_upsert_pending,
             &this.project_cache_upsert_running,
-        ) {
-            let upsert_files = this.project_cache_upsert_files.clone();
-            let ast_cache = this.ast_cache.clone();
-            let client = this.client.clone();
-            let running_flag = this.project_cache_upsert_running.clone();
-            let pending_flag = this.project_cache_upsert_pending.clone();
-            let foundry_config = this.foundry_config.read().await.clone();
-            let root_key = this.project_cache_key().await;
+        )
+    {
+        let upsert_files = this.project_cache_upsert_files.clone();
+        let ast_cache = this.ast_cache.clone();
+        let client = this.client.clone();
+        let running_flag = this.project_cache_upsert_running.clone();
+        let pending_flag = this.project_cache_upsert_pending.clone();
+        let foundry_config = this.foundry_config.read().await.clone();
+        let root_key = this.project_cache_key().await;
 
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
-                    if !take_project_cache_upsert_pending(&pending_flag) {
-                        if stop_project_cache_upsert_worker_or_reclaim(&pending_flag, &running_flag)
-                        {
-                            continue;
-                        }
-                        break;
-                    }
-
-                    let changed_paths: Vec<String> = {
-                        let mut paths = upsert_files.write().await;
-                        paths.drain().collect()
-                    };
-                    if changed_paths.is_empty() {
+                if !take_project_cache_upsert_pending(&pending_flag) {
+                    if stop_project_cache_upsert_worker_or_reclaim(&pending_flag, &running_flag) {
                         continue;
                     }
+                    break;
+                }
 
-                    // Read the authoritative merged root-key build from
-                    // ast_cache.  This is the CachedBuild that
-                    // merge_scoped_cached_build has already remapped with
-                    // correct global file IDs.
-                    let Some(ref rk) = root_key else {
-                        continue;
-                    };
-                    let Some(root_build) = ast_cache.read().await.get(rk).cloned() else {
-                        continue;
-                    };
+                let changed_paths: Vec<String> = {
+                    let mut paths = upsert_files.write().await;
+                    paths.drain().collect()
+                };
+                if changed_paths.is_empty() {
+                    continue;
+                }
 
-                    let cfg = foundry_config.clone();
-                    let build = (*root_build).clone();
-                    let changed = changed_paths.clone();
+                // Read the authoritative merged root-key build from
+                // ast_cache.  This is the CachedBuild that
+                // merge_scoped_cached_build has already remapped with
+                // correct global file IDs.
+                let Some(ref rk) = root_key else {
+                    continue;
+                };
+                let Some(root_build) = ast_cache.read().await.get(rk).cloned() else {
+                    continue;
+                };
 
-                    let res = tokio::task::spawn_blocking(move || {
-                        crate::project_cache::upsert_reference_cache_v2_with_report(
-                            &cfg, &build, &changed,
-                        )
-                    })
-                    .await;
+                let cfg = foundry_config.clone();
+                let build = (*root_build).clone();
+                let changed = changed_paths.clone();
 
-                    match res {
-                        Ok(Ok(report)) => {
-                            client
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::project_cache::upsert_reference_cache_v2_with_report(
+                        &cfg, &build, &changed,
+                    )
+                })
+                .await;
+
+                match res {
+                    Ok(Ok(report)) => {
+                        client
                                 .log_message(
                                     MessageType::INFO,
                                     format!(
@@ -1925,27 +1922,26 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                     ),
                                 )
                                 .await;
-                        }
-                        Ok(Err(e)) => {
-                            client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!("project cache v2 upsert: {e}"),
-                                )
-                                .await;
-                        }
-                        Err(e) => {
-                            client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!("project cache v2 upsert task failed: {e}"),
-                                )
-                                .await;
-                        }
+                    }
+                    Ok(Err(e)) => {
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("project cache v2 upsert: {e}"),
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("project cache v2 upsert task failed: {e}"),
+                            )
+                            .await;
                     }
                 }
-            });
-        }
+            }
+        });
     }
 
     // If workspace file-ops changed project structure, schedule a
@@ -1953,92 +1949,91 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
     if this.use_solc
         && settings_snapshot.project_index.full_project_scan
         && this.project_cache_dirty.load(Ordering::Acquire)
-    {
-        if start_or_mark_project_cache_sync_pending(
+        && start_or_mark_project_cache_sync_pending(
             &this.project_cache_sync_pending,
             &this.project_cache_sync_running,
-        ) {
-            let foundry_config = this.foundry_config.read().await.clone();
-            let root_key = this.project_cache_key().await;
-            let ast_cache = this.ast_cache.clone();
-            let text_cache = this.text_cache.clone();
-            let client = this.client.clone();
-            let dirty_flag = this.project_cache_dirty.clone();
-            let running_flag = this.project_cache_sync_running.clone();
-            let pending_flag = this.project_cache_sync_pending.clone();
-            let changed_files = this.project_cache_changed_files.clone();
-            let aggressive_scoped = settings_snapshot.project_index.incremental_edit_reindex;
-            let force_full_rebuild_flag = this.project_cache_force_full_rebuild.clone();
-            let path_interner = this.path_interner.clone();
+        )
+    {
+        let foundry_config = this.foundry_config.read().await.clone();
+        let root_key = this.project_cache_key().await;
+        let ast_cache = this.ast_cache.clone();
+        let text_cache = this.text_cache.clone();
+        let client = this.client.clone();
+        let dirty_flag = this.project_cache_dirty.clone();
+        let running_flag = this.project_cache_sync_running.clone();
+        let pending_flag = this.project_cache_sync_pending.clone();
+        let changed_files = this.project_cache_changed_files.clone();
+        let aggressive_scoped = settings_snapshot.project_index.incremental_edit_reindex;
+        let force_full_rebuild_flag = this.project_cache_force_full_rebuild.clone();
+        let path_interner = this.path_interner.clone();
 
-            tokio::spawn(async move {
-                loop {
-                    // Debounce save bursts into one trailing sync.
-                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        tokio::spawn(async move {
+            loop {
+                // Debounce save bursts into one trailing sync.
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
-                    if !take_project_cache_sync_pending(&pending_flag) {
-                        if stop_project_cache_sync_worker_or_reclaim(&pending_flag, &running_flag) {
-                            continue;
-                        }
-                        break;
-                    }
-
-                    if !try_claim_project_cache_dirty(&dirty_flag) {
+                if !take_project_cache_sync_pending(&pending_flag) {
+                    if stop_project_cache_sync_worker_or_reclaim(&pending_flag, &running_flag) {
                         continue;
                     }
+                    break;
+                }
 
-                    let Some(cache_key) = &root_key else {
-                        dirty_flag.store(true, Ordering::Release);
-                        continue;
+                if !try_claim_project_cache_dirty(&dirty_flag) {
+                    continue;
+                }
+
+                let Some(cache_key) = &root_key else {
+                    dirty_flag.store(true, Ordering::Release);
+                    continue;
+                };
+                if !foundry_config.root.is_dir() {
+                    dirty_flag.store(true, Ordering::Release);
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "didSave cache sync: invalid project root {}, deferring",
+                                foundry_config.root.display()
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+
+                let mut scoped_ok = false;
+
+                // If solidity.reindex was called while this worker was
+                // already running, bypass the incremental scoped path and
+                // do a full rebuild instead.
+                let force_full = force_full_rebuild_flag.swap(false, Ordering::AcqRel);
+
+                if aggressive_scoped && !force_full {
+                    let changed_abs: Vec<PathBuf> = {
+                        let mut changed = changed_files.write().await;
+
+                        changed.drain().map(PathBuf::from).collect::<Vec<PathBuf>>()
                     };
-                    if !foundry_config.root.is_dir() {
-                        dirty_flag.store(true, Ordering::Release);
-                        client
-                            .log_message(
-                                MessageType::WARNING,
-                                format!(
-                                    "didSave cache sync: invalid project root {}, deferring",
-                                    foundry_config.root.display()
-                                ),
+                    if !changed_abs.is_empty() {
+                        let remappings = crate::solc::resolve_remappings(&foundry_config).await;
+                        let cfg_for_plan = foundry_config.clone();
+                        let changed_for_plan = changed_abs.clone();
+                        let remappings_for_plan = remappings.clone();
+                        let plan_res = tokio::task::spawn_blocking(move || {
+                            compute_reverse_import_closure(
+                                &cfg_for_plan,
+                                &changed_for_plan,
+                                &remappings_for_plan,
                             )
-                            .await;
-                        continue;
-                    }
+                        })
+                        .await;
 
-                    let mut scoped_ok = false;
-
-                    // If solidity.reindex was called while this worker was
-                    // already running, bypass the incremental scoped path and
-                    // do a full rebuild instead.
-                    let force_full = force_full_rebuild_flag.swap(false, Ordering::AcqRel);
-
-                    if aggressive_scoped && !force_full {
-                        let changed_abs: Vec<PathBuf> = {
-                            let mut changed = changed_files.write().await;
-                            let drained =
-                                changed.drain().map(PathBuf::from).collect::<Vec<PathBuf>>();
-                            drained
+                        let affected_files = match plan_res {
+                            Ok(set) => set.into_iter().collect::<Vec<PathBuf>>(),
+                            Err(_) => Vec::new(),
                         };
-                        if !changed_abs.is_empty() {
-                            let remappings = crate::solc::resolve_remappings(&foundry_config).await;
-                            let cfg_for_plan = foundry_config.clone();
-                            let changed_for_plan = changed_abs.clone();
-                            let remappings_for_plan = remappings.clone();
-                            let plan_res = tokio::task::spawn_blocking(move || {
-                                compute_reverse_import_closure(
-                                    &cfg_for_plan,
-                                    &changed_for_plan,
-                                    &remappings_for_plan,
-                                )
-                            })
-                            .await;
-
-                            let affected_files = match plan_res {
-                                Ok(set) => set.into_iter().collect::<Vec<PathBuf>>(),
-                                Err(_) => Vec::new(),
-                            };
-                            if !affected_files.is_empty() {
-                                client
+                        if !affected_files.is_empty() {
+                            client
                                     .log_message(
                                         MessageType::INFO,
                                         format!(
@@ -2048,54 +2043,53 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                     )
                                     .await;
 
-                                let text_cache_snapshot = text_cache.read().await.clone();
-                                match crate::solc::solc_project_index_scoped(
-                                    &foundry_config,
-                                    Some(&client),
-                                    Some(&text_cache_snapshot),
-                                    &affected_files,
-                                )
-                                .await
-                                {
-                                    Ok(ast_data) => {
-                                        let scoped_build = Arc::new(crate::goto::CachedBuild::new(
-                                            ast_data,
-                                            0,
-                                            Some(&mut *path_interner.write().await),
-                                        ));
-                                        let source_count = scoped_build.nodes.len();
-                                        enum ScopedApply {
-                                            Merged { affected_count: usize },
-                                            Stored,
-                                            Failed(String),
-                                        }
-                                        let apply_outcome = {
-                                            let mut cache = ast_cache.write().await;
-                                            if let Some(existing) = cache.get(cache_key).cloned() {
-                                                let mut merged = (*existing).clone();
-                                                match merge_scoped_cached_build(
-                                                    &mut merged,
-                                                    (*scoped_build).clone(),
-                                                ) {
-                                                    Ok(affected_count) => {
-                                                        cache.insert(
-                                                            cache_key.clone().into(),
-                                                            Arc::new(merged),
-                                                        );
-                                                        ScopedApply::Merged { affected_count }
-                                                    }
-                                                    Err(e) => ScopedApply::Failed(e),
+                            let text_cache_snapshot = text_cache.read().await.clone();
+                            match crate::solc::solc_project_index_scoped(
+                                &foundry_config,
+                                Some(&client),
+                                Some(&text_cache_snapshot),
+                                &affected_files,
+                            )
+                            .await
+                            {
+                                Ok(ast_data) => {
+                                    let scoped_build = Arc::new(crate::goto::CachedBuild::new(
+                                        ast_data,
+                                        0,
+                                        Some(&mut *path_interner.write().await),
+                                    ));
+                                    let source_count = scoped_build.nodes.len();
+                                    enum ScopedApply {
+                                        Merged { affected_count: usize },
+                                        Stored,
+                                        Failed(String),
+                                    }
+                                    let apply_outcome = {
+                                        let mut cache = ast_cache.write().await;
+                                        if let Some(existing) = cache.get(cache_key).cloned() {
+                                            let mut merged = (*existing).clone();
+                                            match merge_scoped_cached_build(
+                                                &mut merged,
+                                                (*scoped_build).clone(),
+                                            ) {
+                                                Ok(affected_count) => {
+                                                    cache.insert(
+                                                        cache_key.clone().into(),
+                                                        Arc::new(merged),
+                                                    );
+                                                    ScopedApply::Merged { affected_count }
                                                 }
-                                            } else {
-                                                cache
-                                                    .insert(cache_key.clone().into(), scoped_build);
-                                                ScopedApply::Stored
+                                                Err(e) => ScopedApply::Failed(e),
                                             }
-                                        };
+                                        } else {
+                                            cache.insert(cache_key.clone().into(), scoped_build);
+                                            ScopedApply::Stored
+                                        }
+                                    };
 
-                                        match apply_outcome {
-                                            ScopedApply::Merged { affected_count } => {
-                                                client
+                                    match apply_outcome {
+                                        ScopedApply::Merged { affected_count } => {
+                                            client
                                                     .log_message(
                                                         MessageType::INFO,
                                                         format!(
@@ -2104,10 +2098,10 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                         ),
                                                     )
                                                     .await;
-                                                scoped_ok = true;
-                                            }
-                                            ScopedApply::Stored => {
-                                                client
+                                            scoped_ok = true;
+                                        }
+                                        ScopedApply::Stored => {
+                                            client
                                                     .log_message(
                                                         MessageType::INFO,
                                                         format!(
@@ -2116,10 +2110,10 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                         ),
                                                     )
                                                     .await;
-                                                scoped_ok = true;
-                                            }
-                                            ScopedApply::Failed(e) => {
-                                                client
+                                            scoped_ok = true;
+                                        }
+                                        ScopedApply::Failed(e) => {
+                                            client
                                                 .log_message(
                                                     MessageType::WARNING,
                                                     format!(
@@ -2127,12 +2121,12 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                     ),
                                                 )
                                                 .await;
-                                                dirty_flag.store(true, Ordering::Release);
-                                            }
+                                            dirty_flag.store(true, Ordering::Release);
                                         }
                                     }
-                                    Err(e) => {
-                                        client
+                                }
+                                Err(e) => {
+                                    client
                                             .log_message(
                                                 MessageType::WARNING,
                                                 format!(
@@ -2140,68 +2134,66 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                                 ),
                                             )
                                             .await;
-                                        dirty_flag.store(true, Ordering::Release);
-                                    }
+                                    dirty_flag.store(true, Ordering::Release);
                                 }
-                            } else {
-                                client
-                                    .log_message(
-                                        MessageType::INFO,
-                                        "didSave cache sync: no affected files from scoped planner",
-                                    )
-                                    .await;
                             }
+                        } else {
+                            client
+                                .log_message(
+                                    MessageType::INFO,
+                                    "didSave cache sync: no affected files from scoped planner",
+                                )
+                                .await;
                         }
                     }
+                }
 
-                    if scoped_ok {
-                        continue;
-                    }
-                    if aggressive_scoped {
-                        continue;
-                    }
+                if scoped_ok {
+                    continue;
+                }
+                if aggressive_scoped {
+                    continue;
+                }
 
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            "didSave cache sync: rebuilding project index from disk",
-                        )
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        "didSave cache sync: rebuilding project index from disk",
+                    )
+                    .await;
+
+                match crate::solc::solc_project_index(&foundry_config, Some(&client), None).await {
+                    Ok(ast_data) => {
+                        let mut new_build = crate::goto::CachedBuild::new(
+                            ast_data,
+                            0,
+                            Some(&mut *path_interner.write().await),
+                        );
+                        if let Some(prev) = ast_cache.read().await.get(cache_key) {
+                            new_build.merge_missing_from(prev);
+                        }
+                        let source_count = new_build.nodes.len();
+                        let cached_build = Arc::new(new_build);
+                        let build_for_save = (*cached_build).clone();
+                        ast_cache
+                            .write()
+                            .await
+                            .insert(cache_key.clone().into(), cached_build);
+
+                        let cfg_for_save = foundry_config.clone();
+                        let save_res = tokio::task::spawn_blocking(move || {
+                            crate::project_cache::save_reference_cache_with_report(
+                                &cfg_for_save,
+                                &build_for_save,
+                                None,
+                            )
+                        })
                         .await;
 
-                    match crate::solc::solc_project_index(&foundry_config, Some(&client), None)
-                        .await
-                    {
-                        Ok(ast_data) => {
-                            let mut new_build = crate::goto::CachedBuild::new(
-                                ast_data,
-                                0,
-                                Some(&mut *path_interner.write().await),
-                            );
-                            if let Some(prev) = ast_cache.read().await.get(cache_key) {
-                                new_build.merge_missing_from(prev);
-                            }
-                            let source_count = new_build.nodes.len();
-                            let cached_build = Arc::new(new_build);
-                            let build_for_save = (*cached_build).clone();
-                            ast_cache
-                                .write()
-                                .await
-                                .insert(cache_key.clone().into(), cached_build);
-
-                            let cfg_for_save = foundry_config.clone();
-                            let save_res = tokio::task::spawn_blocking(move || {
-                                crate::project_cache::save_reference_cache_with_report(
-                                    &cfg_for_save,
-                                    &build_for_save,
-                                    None,
-                                )
-                            })
-                            .await;
-
-                            match save_res {
-                                Ok(Ok(report)) => {
-                                    changed_files.write().await.clear();
-                                    client
+                        match save_res {
+                            Ok(Ok(report)) => {
+                                changed_files.write().await.clear();
+                                client
                                         .log_message(
                                             MessageType::INFO,
                                             format!(
@@ -2210,44 +2202,43 @@ async fn run_did_save(this: ForgeLsp, params: DidSaveTextDocumentParams) {
                                             ),
                                         )
                                         .await;
-                                }
-                                Ok(Err(e)) => {
-                                    dirty_flag.store(true, Ordering::Release);
-                                    client
-                                        .log_message(
-                                            MessageType::WARNING,
-                                            format!(
-                                                "didSave cache sync: persist failed, will retry: {e}"
-                                            ),
-                                        )
-                                        .await;
-                                }
-                                Err(e) => {
-                                    dirty_flag.store(true, Ordering::Release);
-                                    client
-                                        .log_message(
-                                            MessageType::WARNING,
-                                            format!(
-                                                "didSave cache sync: save task failed, will retry: {e}"
-                                            ),
-                                        )
-                                        .await;
-                                }
+                            }
+                            Ok(Err(e)) => {
+                                dirty_flag.store(true, Ordering::Release);
+                                client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!(
+                                            "didSave cache sync: persist failed, will retry: {e}"
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Err(e) => {
+                                dirty_flag.store(true, Ordering::Release);
+                                client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!(
+                                            "didSave cache sync: save task failed, will retry: {e}"
+                                        ),
+                                    )
+                                    .await;
                             }
                         }
-                        Err(e) => {
-                            dirty_flag.store(true, Ordering::Release);
-                            client
-                                .log_message(
-                                    MessageType::WARNING,
-                                    format!("didSave cache sync: re-index failed, will retry: {e}"),
-                                )
-                                .await;
-                        }
+                    }
+                    Err(e) => {
+                        dirty_flag.store(true, Ordering::Release);
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("didSave cache sync: re-index failed, will retry: {e}"),
+                            )
+                            .await;
                     }
                 }
-            });
-        }
+            }
+        });
     }
 }
 
@@ -2529,7 +2520,6 @@ impl LanguageServer for ForgeLsp {
                                 },
                             }],
                         }),
-                        ..Default::default()
                     }),
                 }),
                 execute_command_provider: Some(ExecuteCommandOptions {
@@ -2624,10 +2614,11 @@ impl LanguageServer for ForgeLsp {
                     .await
                 {
                     Ok(values) => {
-                        if let Some(val) = values.into_iter().next() {
-                            if !val.is_null() {
-                                let s = config::parse_settings(&val);
-                                self.client
+                        if let Some(val) = values.into_iter().next()
+                            && !val.is_null()
+                        {
+                            let s = config::parse_settings(&val);
+                            self.client
                                     .log_message(
                                         MessageType::INFO,
                                         format!(
@@ -2636,9 +2627,8 @@ impl LanguageServer for ForgeLsp {
                                         ),
                                     )
                                     .await;
-                                let mut settings = self.settings.write().await;
-                                *settings = s;
-                            }
+                            let mut settings = self.settings.write().await;
+                            *settings = s;
                         }
                     }
                     Err(e) => {
@@ -2795,9 +2785,8 @@ impl LanguageServer for ForgeLsp {
                                 // `waitForProgressToken`) unblock —
                                 // otherwise they hang forever waiting on
                                 // a phase-2 that won't run.
-                                let token2 = NumberOrString::String(
-                                    "solidity/projectIndexFull".to_string(),
-                                );
+                                let token2 =
+                                    NumberOrString::String("solidity/projectIndexFull".to_string());
                                 let _ = client
                                     .send_request::<request::WorkDoneProgressCreate>(
                                         WorkDoneProgressCreateParams {
@@ -3475,13 +3464,13 @@ impl LanguageServer for ForgeLsp {
                 let cache_has_content = {
                     let tc = self.text_cache.read().await;
                     tc.get(&uri_str)
-                        .map_or(false, |(_, c)| c.chars().any(|ch| !ch.is_whitespace()))
+                        .is_some_and(|(_, c)| c.chars().any(|ch| !ch.is_whitespace()))
                 };
 
                 if !cache_has_content {
                     let file_has_content = td.uri.to_file_path().ok().is_some_and(|p| {
                         std::fs::read_to_string(&p)
-                            .map_or(false, |c| c.chars().any(|ch| !ch.is_whitespace()))
+                            .is_ok_and(|c| c.chars().any(|ch| !ch.is_whitespace()))
                     });
 
                     if !file_has_content {
@@ -4050,22 +4039,20 @@ impl LanguageServer for ForgeLsp {
                     &file_path,
                     &imp.path,
                     &remappings,
-                ) {
-                    if abs.exists() {
-                        if let Ok(target_uri) = Url::from_file_path(&abs) {
-                            let location = Location {
-                                uri: target_uri,
-                                range: Range::default(), // start of file
-                            };
-                            self.client
-                                .log_message(
-                                    MessageType::INFO,
-                                    format!("found definition (import path) at {}", location.uri),
-                                )
-                                .await;
-                            return Ok(Some(GotoDefinitionResponse::from(location)));
-                        }
-                    }
+                ) && abs.exists()
+                    && let Ok(target_uri) = Url::from_file_path(&abs)
+                {
+                    let location = Location {
+                        uri: target_uri,
+                        range: Range::default(), // start of file
+                    };
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("found definition (import path) at {}", location.uri),
+                        )
+                        .await;
+                    return Ok(Some(GotoDefinitionResponse::from(location)));
                 }
             }
         }
@@ -4079,25 +4066,24 @@ impl LanguageServer for ForgeLsp {
             let identifier = crate::rename::get_identifier_at_position(&source_bytes, position);
             if let Some(ref ident) = identifier {
                 let alias_names = crate::rename::ts_find_alias_names(&source_bytes);
-                if alias_names.contains(ident.as_str()) {
-                    if let Some(decl_range) =
+                if alias_names.contains(ident.as_str())
+                    && let Some(decl_range) =
                         crate::rename::ts_find_alias_declaration(&source_bytes, ident)
-                    {
-                        let location = Location {
-                            uri: uri.clone(),
-                            range: decl_range,
-                        };
-                        self.client
-                            .log_message(
-                                MessageType::INFO,
-                                format!(
-                                    "found definition (alias declaration) for '{}' at {}:{}",
-                                    ident, location.uri, decl_range.start.line
-                                ),
-                            )
-                            .await;
-                        return Ok(Some(GotoDefinitionResponse::from(location)));
-                    }
+                {
+                    let location = Location {
+                        uri: uri.clone(),
+                        range: decl_range,
+                    };
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!(
+                                "found definition (alias declaration) for '{}' at {}:{}",
+                                ident, location.uri, decl_range.start.line
+                            ),
+                        )
+                        .await;
+                    return Ok(Some(GotoDefinitionResponse::from(location)));
                 }
             }
         }
@@ -4287,25 +4273,24 @@ impl LanguageServer for ForgeLsp {
             let identifier = crate::rename::get_identifier_at_position(&source_bytes, position);
             if let Some(ref ident) = identifier {
                 let alias_names = crate::rename::ts_find_alias_names(&source_bytes);
-                if alias_names.contains(ident.as_str()) {
-                    if let Some(decl_range) =
+                if alias_names.contains(ident.as_str())
+                    && let Some(decl_range) =
                         crate::rename::ts_find_alias_declaration(&source_bytes, ident)
-                    {
-                        let location = Location {
-                            uri: uri.clone(),
-                            range: decl_range,
-                        };
-                        self.client
-                            .log_message(
-                                MessageType::INFO,
-                                format!(
-                                    "found declaration (alias) for '{}' at line {}",
-                                    ident, decl_range.start.line
-                                ),
-                            )
-                            .await;
-                        return Ok(Some(request::GotoDeclarationResponse::from(location)));
-                    }
+                {
+                    let location = Location {
+                        uri: uri.clone(),
+                        range: decl_range,
+                    };
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!(
+                                "found declaration (alias) for '{}' at line {}",
+                                ident, decl_range.start.line
+                            ),
+                        )
+                        .await;
+                    return Ok(Some(request::GotoDeclarationResponse::from(location)));
                 }
             }
         }
@@ -5549,33 +5534,33 @@ impl LanguageServer for ForgeLsp {
 
         for diag in &params.context.diagnostics {
             // ── forge-lint string codes ───────────────────────────────────────
-            if let Some(NumberOrString::String(s)) = &diag.code {
-                if s == "unused-import" {
-                    if let Some(edit) = source.as_deref().and_then(|src| {
-                        goto::code_action_edit(
-                            src,
-                            diag.range,
-                            goto::CodeActionKind::DeleteNodeByKind {
-                                node_kind: "import_directive",
-                            },
-                        )
-                    }) {
-                        let mut changes = HashMap::new();
-                        changes.insert(uri.clone(), vec![edit]);
-                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                            title: "Remove unused import".to_string(),
-                            kind: Some(CodeActionKind::QUICKFIX),
-                            diagnostics: Some(vec![diag.clone()]),
-                            edit: Some(WorkspaceEdit {
-                                changes: Some(changes),
-                                ..Default::default()
-                            }),
-                            is_preferred: Some(true),
+            if let Some(NumberOrString::String(s)) = &diag.code
+                && s == "unused-import"
+            {
+                if let Some(edit) = source.as_deref().and_then(|src| {
+                    goto::code_action_edit(
+                        src,
+                        diag.range,
+                        goto::CodeActionKind::DeleteNodeByKind {
+                            node_kind: "import_directive",
+                        },
+                    )
+                }) {
+                    let mut changes = HashMap::new();
+                    changes.insert(uri.clone(), vec![edit]);
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: "Remove unused import".to_string(),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![diag.clone()]),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(changes),
                             ..Default::default()
-                        }));
-                    }
-                    continue;
+                        }),
+                        is_preferred: Some(true),
+                        ..Default::default()
+                    }));
                 }
+                continue;
             }
 
             // Diagnostics from solc carry the error code as a string.
@@ -6035,15 +6020,15 @@ impl LanguageServer for ForgeLsp {
                 .iter()
                 .flat_map(|(old_key, new_key)| {
                     let mut paths = Vec::new();
-                    if let Ok(u) = Url::parse(old_key) {
-                        if let Ok(p) = u.to_file_path() {
-                            paths.push(p);
-                        }
+                    if let Ok(u) = Url::parse(old_key)
+                        && let Ok(p) = u.to_file_path()
+                    {
+                        paths.push(p);
                     }
-                    if let Ok(u) = Url::parse(new_key) {
-                        if let Ok(p) = u.to_file_path() {
-                            paths.push(p);
-                        }
+                    if let Ok(u) = Url::parse(new_key)
+                        && let Ok(p) = u.to_file_path()
+                    {
+                        paths.push(p);
                     }
                     paths
                 })
@@ -6570,13 +6555,13 @@ impl LanguageServer for ForgeLsp {
 
                 let open_has_content = tc
                     .get(&uri_str)
-                    .map_or(false, |(_, c)| c.chars().any(|ch| !ch.is_whitespace()));
+                    .is_some_and(|(_, c)| c.chars().any(|ch| !ch.is_whitespace()));
                 let path = match uri.to_file_path() {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
                 let disk_has_content = std::fs::read_to_string(&path)
-                    .map_or(false, |c| c.chars().any(|ch| !ch.is_whitespace()));
+                    .is_ok_and(|c| c.chars().any(|ch| !ch.is_whitespace()));
 
                 // If an open buffer already has content, skip. If buffer is
                 // open but empty, still apply scaffold to that buffer.
@@ -6662,25 +6647,23 @@ impl LanguageServer for ForgeLsp {
                 for (uri_str, content) in staged_content {
                     tc.insert(uri_str.into(), (0, content));
                 }
-            } else {
-                if let Ok(resp) = &apply_result {
-                    self.client
-                        .log_message(
-                            MessageType::WARNING,
-                            format!(
-                                "didCreateFiles: applyEdit rejected (no disk fallback): {:?}",
-                                resp.failure_reason
-                            ),
-                        )
-                        .await;
-                } else if let Err(e) = &apply_result {
-                    self.client
-                        .log_message(
-                            MessageType::WARNING,
-                            format!("didCreateFiles: applyEdit failed (no disk fallback): {e}"),
-                        )
-                        .await;
-                }
+            } else if let Ok(resp) = &apply_result {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "didCreateFiles: applyEdit rejected (no disk fallback): {:?}",
+                            resp.failure_reason
+                        ),
+                    )
+                    .await;
+            } else if let Err(e) = &apply_result {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("didCreateFiles: applyEdit failed (no disk fallback): {e}"),
+                    )
+                    .await;
             }
         }
 
