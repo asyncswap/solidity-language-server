@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.1.35
+
+### Features
+
+- Source-unit directive completions — `textDocument/completion` now recognizes the file-header directives before falling through to the general completion path, so the top of a fresh `.sol` file is no longer a dead zone (#224):
+  - `// SPDX…` offers whole-line `// SPDX-License-Identifier:` items (MIT, UNLICENSED, Apache-2.0) that replace the partial comment via a `TextEdit` spanning column 0 to the cursor.
+  - `// SPDX-License-Identifier:` offers the license IDs themselves — MIT, UNLICENSED, Apache-2.0, GPL-3.0-only, GPL-3.0-or-later, BSD-3-Clause.
+  - `pragma ` offers `solidity` and `abicoder`; `pragma solidity ` offers `^0.8.35`, `0.8.35`, `^0.8.0`, `>=0.8.0 <0.9.0`; `pragma abicoder ` offers `v2` and `v1`.
+  - Completions are suppressed once the directive line already contains `;`, so a finished line doesn't keep re-prompting.
+
+### Fixes
+
+- Partial pragma versions were appended, not replaced — accepting a version completion on a half-typed `pragma solidity ^0.8` produced `pragma solidity ^0.8^0.8.35` because the items carried no explicit `TextEdit` and the client's default word range stopped at the non-identifier characters. Fix: `solidity_version_completions` now attaches a `TextEdit` whose range covers the entire directive value — from the first non-whitespace byte after `pragma solidity` to the `;` (or end of line) — computed in UTF-16 code units (#224).
+- `pragma` prefix matching required no word boundary — `trimmed.strip_prefix("pragma solidity")` also fired on identifiers that merely started with the directive text. Fix: `strip_directive_value` only matches when the remainder is empty or starts with whitespace (#224).
+
+### Docs
+
+- README gained a Skills section documenting the bundled agent skills.
+
+- `cargo build --features dhat-heap` was broken — `Cargo.toml` still declared a `[[bin]] dhat-profile` target pointing at `src/bin/dhat_profile.rs`, a file deleted back in `5008780` ("chore: remove dhat profiling config and binary"). The stanza's `required-features = ["dhat-heap"]` masked it for default builds, so the breakage only appeared when the feature was actually enabled: `error: couldn't read src/bin/dhat_profile.rs`. Fix: drop the stale `[[bin]]` stanza. The `dhat-heap` feature itself stays — it's still live in `src/main.rs`, gating the heap profiler on the main binary.
+
+### Chore
+
+- Bumped `quinn-proto` 0.11.14 → 0.11.16 (#227).
+- Cleared the full backlog of `cargo clippy --all-targets` warnings — 73 in the lib plus 5 across the test targets, now zero. Mostly mechanical (`collapsible_if`, `map_or`, `iter().values()`, `needless_range_loop`, `cloned_ref_to_slice_refs`, `unnecessary_filter_map`, `while_let_loop`, `question_mark`, `needless_update`); the one signature change is `rename::find_foreign`, which dropped its unused `source: &str` parameter. No behavior changes — all 659 tests pass unchanged.
+
+### Tests
+
+- 659 tests, 0 failures, 0 build warnings, 0 clippy warnings
+
 ## v0.1.34
 
 ### Fixes
