@@ -92,6 +92,16 @@ It is a speed/coverage tradeoff: better latency in the editor, but visibility de
 - `fallback_receive_definition` names are synthesized as `fallback` or `receive` from node text.
 - Import symbols are rendered as `import <literal>` where `<literal>` is the raw Solidity string token including its surrounding quote characters — e.g. `import "./Pool.sol"` produces the symbol name `import "./Pool.sol"`.
 - For nodes that do not expose a `name` field, symbol extraction falls back to the first `identifier` child.
+- Ranges are reported in the encoding negotiated during `initialize` — UTF-16
+  code units unless the client asked for UTF-8. Tree-sitter counts columns in
+  bytes, so each column is converted via `utils::byte_column_to_position()`,
+  which measures only the current line's prefix rather than rescanning the file
+  (a whole-tree walk would otherwise be quadratic). Rows are taken from
+  tree-sitter unchanged, keeping positions in the same line model as the tree
+  they describe. Still unconverted: `folding.rs`, `semantic_tokens.rs` (which
+  encodes byte *lengths* as well as columns), `inlay_hints.rs`, and the
+  cursor-resolution side of `selection.rs` — its output columns convert, but
+  it builds its tree-sitter `Point` from `position.character`.
 
 ## Tree-sitter node coverage
 
