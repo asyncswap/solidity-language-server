@@ -32,18 +32,24 @@ jobs:
         run: timeout 25m cargo test --release
 
       - name: Install lsp-bench
-        run: cargo install lsp-bench --version 0.2.7 --locked
+        run: cargo install lsp-bench --version 0.3.3 --locked
+
+      # lsp-bench --verify reports "0/0 expectations passed" and exits 0 when the
+      # server never answers, so a binary that builds but dies on startup would
+      # sail through both steps below. Check it runs before relying on them.
+      - name: Smoke-check the server binary
+        run: ./target/release/solidity-language-server --version
 
       - name: Run lsp-bench verify
         run: |
-          lsp-bench \
+          timeout 10m lsp-bench \
             -c benchmarks/ci-verify.yaml \
             -s benchmarks/servers.ci.yaml \
             --verify
 
       - name: Run lsp-bench workspace file-ops
         run: |
-          lsp-bench \
+          timeout 10m lsp-bench \
             -c benchmarks/ci-file-ops-verify.yaml \
             -s benchmarks/servers.ci.yaml \
             --verify
