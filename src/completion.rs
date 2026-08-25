@@ -1480,9 +1480,26 @@ fn strip_type_suffix(type_id: &str) -> &str {
 /// Look up using-for completions for a type, trying suffix variants.
 /// The AST stores types with different suffixes (_storage_ptr, _storage, _memory_ptr, etc.)
 /// across different contexts, so we try multiple forms.
-fn lookup_using_for(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+fn lookup_using_for(
+    cache: &CompletionCache,
+    type_id: &str,
+    node_id: Option<NodeId>,
+) -> Vec<CompletionItem> {
     // Exact match first
     if let Some(items) = cache.using_for.get(type_id) {
+        return items.clone();
+    }
+
+    // A contract name that has no entry in `type_to_node` resolves to the
+    // synthetic `__node_id_N` marker, which can never match a real key like
+    // `t_contract$_IHooks_$1840`. Recover by matching on the node id instead.
+    if let Some(nid) = node_id
+        && type_id.starts_with("__node_id_")
+        && let Some((_, items)) = cache
+            .using_for
+            .iter()
+            .find(|(tid, _)| extract_node_id_from_type(tid.as_str()) == Some(nid))
+    {
         return items.clone();
     }
 
@@ -1567,7 +1584,11 @@ const SELECTOR_MEMBER_TYPE: &str = "__selector_member";
 
 /// Collect completions available for a given typeIdentifier.
 /// Includes node_members, method_identifiers, using_for, and using_for_wildcard.
-fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+fn completions_for_type(
+    cache: &CompletionCache,
+    type_id: &str,
+    receiver: ReceiverKind,
+) -> Vec<CompletionItem> {
     if type_id == SELECTOR_MEMBER_TYPE {
         return vec![builtin_member(
             "selector",
@@ -1621,16 +1642,17 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
         }
     }
 
-    // Add using-for library functions, but only for value types — not for
-    // contract/library/interface names. When you type `Lock.`, you want Lock's
-    // own members, not functions from `using Pool for *` or `using SafeCast for *`.
-    let is_contract_name = resolved_node_id
-        .map(|nid| cache.contract_kinds.contains_key(&nid))
-        .unwrap_or(false);
-
-    if !is_contract_name {
+    // Add using-for library functions, but only when the receiver is a value —
+    // not when it names a type. Typing `Lock.` should offer Lock's own members,
+    // not functions from `using Pool for *` or `using SafeCast for *`.
+    //
+    // This has to come from the caller. Deriving it from the type (`is this a
+    // contract?`) conflated `IERC20.` with a `paymentToken` declared as
+    // `IERC20`, because both carry the same typeIdentifier — which meant
+    // `using SafeERC20 for IERC20` extensions never showed up on the value.
+    if receiver == ReceiverKind::Value {
         // Try exact match first, then try normalized variants (storage_ptr vs storage vs memory_ptr etc.)
-        let uf_items = lookup_using_for(cache, type_id);
+        let uf_items = lookup_using_for(cache, type_id, resolved_node_id);
         for item in &uf_items {
             if !seen_labels.contains(&item.label) {
                 seen_labels.insert(item.label.clone());
@@ -1650,22 +1672,41 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
     items
 }
 
-/// Resolve a type identifier for a name, considering name_to_type and name_to_node_id.
-fn resolve_name_to_type_id(cache: &CompletionCache, name: &str) -> Option<String> {
-    // Direct type lookup
+/// Whether the expression before the dot *names a type* or *is a value* of one.
+///
+/// Both produce the same `typeIdentifier` — `IERC20.` and a `paymentToken`
+/// declared as `IERC20` both resolve to `t_contract$_IERC20_$N` — so the
+/// distinction cannot be recovered from the type alone and has to be carried
+/// down from wherever the receiver was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverKind {
+    /// `IERC20.` — the contract/library/interface itself.
+    TypeName,
+    /// `paymentToken.` — a value whose type is that contract.
+    Value,
+}
+
+/// Resolve a type identifier for a name, considering name_to_type and
+/// name_to_node_id, reporting whether the name was a variable (a value) or a
+/// contract/library/interface name (a type).
+fn resolve_name_to_type_id_kind(
+    cache: &CompletionCache,
+    name: &str,
+) -> Option<(String, ReceiverKind)> {
+    // Direct type lookup — the name is a variable, so this is a value.
     if let Some(tid) = cache.name_to_type.get(name) {
-        return Some(tid.to_string());
+        return Some((tid.to_string(), ReceiverKind::Value));
     }
     // Contract/library/interface name → synthesize a type id from node id
     if let Some(node_id) = cache.name_to_node_id.get(name) {
         // Find a matching typeIdentifier in type_to_node (reverse lookup)
         for (tid, nid) in &cache.type_to_node {
             if nid == node_id {
-                return Some(tid.to_string());
+                return Some((tid.to_string(), ReceiverKind::TypeName));
             }
         }
         // Fallback: use a synthetic marker so completions_for_type can resolve via node_id
-        return Some(format!("__node_id_{}", node_id));
+        return Some((format!("__node_id_{}", node_id), ReceiverKind::TypeName));
     }
     None
 }
@@ -1800,7 +1841,7 @@ pub fn find_innermost_scope(
 /// declarations for a matching name. If not found, follow `scope_parent` to the
 /// next enclosing scope and check again. Stop at the first match.
 ///
-/// Falls back to `resolve_name_to_type_id` (flat lookup) if scope resolution
+/// Falls back to `resolve_name_to_type_id_kind` (flat lookup) if scope resolution
 /// finds nothing, or if the scope data is unavailable.
 pub fn resolve_name_in_scope(
     cache: &CompletionCache,
@@ -1808,10 +1849,21 @@ pub fn resolve_name_in_scope(
     byte_pos: usize,
     file_id: FileId,
 ) -> Option<String> {
+    resolve_name_in_scope_kind(cache, name, byte_pos, file_id).map(|(tid, _)| tid)
+}
+
+/// Like [`resolve_name_in_scope`], but also reports whether the resolved name
+/// was a declaration in scope (a value) or a contract name (a type).
+fn resolve_name_in_scope_kind(
+    cache: &CompletionCache,
+    name: &str,
+    byte_pos: usize,
+    file_id: FileId,
+) -> Option<(String, ReceiverKind)> {
     let mut found = None;
     walk_visible_declarations(cache, byte_pos, file_id, |decl| {
         if decl.name == name {
-            found = Some(decl.type_id.clone());
+            found = Some((decl.type_id.clone(), ReceiverKind::Value));
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -1819,7 +1871,7 @@ pub fn resolve_name_in_scope(
 
     // Not declared in scope (or the cursor is in no known scope): fall back to
     // the flat lookup, which also covers contract/library names.
-    found.or_else(|| resolve_name_to_type_id(cache, name))
+    found.or_else(|| resolve_name_to_type_id_kind(cache, name))
 }
 
 /// Resolve a name within a type context to get the member's type.
@@ -1914,10 +1966,19 @@ fn resolve_name(
     name: &str,
     scope_ctx: Option<&ScopeContext>,
 ) -> Option<String> {
+    resolve_name_kind(cache, name, scope_ctx).map(|(tid, _)| tid)
+}
+
+/// Like [`resolve_name`], but also reports whether the name was a value or a type.
+fn resolve_name_kind(
+    cache: &CompletionCache,
+    name: &str,
+    scope_ctx: Option<&ScopeContext>,
+) -> Option<(String, ReceiverKind)> {
     if let Some(ctx) = scope_ctx {
-        resolve_name_in_scope(cache, name, ctx.byte_pos, ctx.file_id)
+        resolve_name_in_scope_kind(cache, name, ctx.byte_pos, ctx.file_id)
     } else {
-        resolve_name_to_type_id(cache, name)
+        resolve_name_to_type_id_kind(cache, name)
     }
 }
 
@@ -1935,11 +1996,10 @@ pub fn get_dot_completions(
         return items.clone();
     }
 
-    // Try to resolve the identifier's type
-    let type_id = resolve_name(cache, identifier, scope_ctx);
-
-    if let Some(tid) = type_id {
-        return completions_for_type(cache, &tid);
+    // Plain access, so a contract name stays a type name and a variable stays
+    // a value — exactly the distinction using-for extensions hinge on.
+    if let Some((tid, receiver)) = resolve_name_kind(cache, identifier, scope_ctx) {
+        return completions_for_type(cache, &tid, receiver);
     }
 
     vec![]
@@ -1972,13 +2032,15 @@ pub fn get_chain_completions(
                 }
                 // foo(). — could be a function call or a type cast like IFoo(addr).
                 // First check if it's a type cast: name matches a contract/interface/library
+                // A cast yields a *value* of that type, so extensions apply even
+                // though the name itself is a contract.
                 if let Some(type_id) = resolve_name(cache, &seg.name, scope_ctx) {
-                    return completions_for_type(cache, &type_id);
+                    return completions_for_type(cache, &type_id, ReceiverKind::Value);
                 }
                 // Otherwise look up as a function call — check all function_return_types
                 for ((_, fn_name), ret_type) in &cache.function_return_types {
                     if fn_name == &seg.name {
-                        return completions_for_type(cache, ret_type);
+                        return completions_for_type(cache, ret_type, ReceiverKind::Value);
                     }
                 }
                 return vec![];
@@ -1988,7 +2050,7 @@ pub fn get_chain_completions(
                 if let Some(tid) = resolve_name(cache, &seg.name, scope_ctx)
                     && let Some(val_type) = index_result_type(&tid)
                 {
-                    return completions_for_type(cache, &val_type);
+                    return completions_for_type(cache, &val_type, ReceiverKind::Value);
                 }
                 return vec![];
             }
@@ -2027,9 +2089,10 @@ pub fn get_chain_completions(
         current_type = resolve_member_type(cache, &ctx_type, &seg.name, &seg.kind);
     }
 
-    // Return completions for the final resolved type
+    // Return completions for the final resolved type. Anything reached by
+    // walking members is a value, never a type name.
     match current_type {
-        Some(tid) => completions_for_type(cache, &tid),
+        Some(tid) => completions_for_type(cache, &tid, ReceiverKind::Value),
         None => vec![],
     }
 }

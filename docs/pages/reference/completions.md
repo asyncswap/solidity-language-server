@@ -85,6 +85,14 @@ Final member set is composed from:
 - `using_for` matches,
 - `using_for_wildcard`.
 
+The last two are included only when the receiver is a **value**, not when it
+names a type: `paymentToken.` (declared as `IERC20`) gets `using SafeERC20 for
+IERC20` extensions, while `IERC20.` gets only the interface's own members. Both
+carry the same `typeIdentifier`, so the distinction is carried down from name
+resolution — a `name_to_type` hit is a value, a `name_to_node_id` hit is a type
+name. Casts (`IERC20(addr).`), mapping and array indexes, and chained members are values
+regardless of the name in front of them.
+
 A bare type name first checks `type_name_members`, so `Currency.` on `type Currency is address` offers `wrap` and `unwrap`. Values of the type do not get them.
 
 Built-in members (`abi.`, `msg.`, address members, `bytes.concat`, …) are labelled with the bare name, so accepting `encode` inserts `encode`. The parameter list (`(...)`, `(bytes memory)`) is in `labelDetails.detail`, which clients show beside the label but never insert.
