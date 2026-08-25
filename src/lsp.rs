@@ -804,14 +804,13 @@ impl ForgeLsp {
                 );
                 match solc {
                     Ok(data) => {
-                        // Extract diagnostics from the same solc output
-                        let content = tokio::fs::read_to_string(&file_path)
-                            .await
-                            .unwrap_or_default();
+                        // Extract diagnostics from the same live buffer text
+                        // passed to solc so byte offsets and LSP ranges stay
+                        // aligned with the editor, not a stale on-disk file.
                         let build_diags = crate::build::build_output_to_diagnostics(
                             &data,
                             &file_path,
-                            &content,
+                            &params.text,
                             &foundry_cfg.ignored_error_codes,
                         );
                         (Some(lint), Ok(build_diags), Ok(data))
@@ -839,13 +838,10 @@ impl ForgeLsp {
                     .await;
                 match solc_future.await {
                     Ok(data) => {
-                        let content = tokio::fs::read_to_string(&file_path)
-                            .await
-                            .unwrap_or_default();
                         let build_diags = crate::build::build_output_to_diagnostics(
                             &data,
                             &file_path,
-                            &content,
+                            &params.text,
                             &foundry_cfg.ignored_error_codes,
                         );
                         (None, Ok(build_diags), Ok(data))

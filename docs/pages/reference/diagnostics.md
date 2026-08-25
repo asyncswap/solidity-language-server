@@ -43,6 +43,22 @@ Diagnostic fields:
 - `code`: numeric solc error code (e.g. `2072`)
 - `severity`: mapped from solc severity string (`"error"` → `ERROR`, `"warning"` → `WARNING`, `"info"` → `INFORMATION`)
 
+#### Which text offsets are resolved against
+
+solc reports locations as byte offsets into the source it was given, so each
+offset must be converted using that same text — otherwise the reported range
+drifts.
+
+- **The file being compiled**: its offsets are resolved against the buffer text
+  passed to `solc_ast()`, which is what the editor currently shows. Resolving
+  them against the file on disk instead puts every range in the file at the
+  wrong position whenever the buffer has unsaved edits, which happens routinely
+  because `run_did_save()` falls back to the text cache when a client omits the
+  optional `text` field on `didSave`.
+- **Its imports**: those reach solc as `"urls"` rather than inlined content, so
+  solc reads them from disk itself and `build::cross_file_error_diagnostics()`
+  correctly resolves their offsets against disk.
+
 ### Source 2: forge lint
 
 Lint diagnostics come from `forge lint --json`.
