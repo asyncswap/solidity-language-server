@@ -32,13 +32,13 @@ pub fn document_highlights(source: &str, position: Position) -> Vec<DocumentHigh
 ///
 /// Descends to the deepest named node at the position, then walks up to
 /// find the nearest `identifier` node.
-fn find_identifier_at<'a>(root: Node<'a>, _source: &str, position: Position) -> Option<Node<'a>> {
-    let point = tree_sitter::Point {
-        row: position.line as usize,
-        column: position.character as usize,
-    };
+fn find_identifier_at<'a>(root: Node<'a>, source: &str, position: Position) -> Option<Node<'a>> {
+    // LSP columns are in the negotiated encoding, tree-sitter points are in
+    // bytes, so resolve the cursor through a byte offset instead of building a
+    // `Point` straight from `position.character`.
+    let offset = crate::utils::position_to_byte_offset(source, position);
 
-    let node = root.descendant_for_point_range(point, point)?;
+    let node = root.descendant_for_byte_range(offset, offset)?;
 
     // If we landed directly on an identifier, use it.
     if node.kind() == "identifier" {
@@ -64,12 +64,12 @@ fn find_identifier_at<'a>(root: Node<'a>, _source: &str, position: Position) -> 
     let mut cursor = parent.walk();
     parent
         .children(&mut cursor)
-        .find(|child| child.kind() == "identifier" && contains_point(*child, point))
+        .find(|child| child.kind() == "identifier" && contains_offset(*child, offset))
 }
 
-/// Check if a node's range contains the given point.
-fn contains_point(node: Node, point: tree_sitter::Point) -> bool {
-    node.start_position() <= point && point <= node.end_position()
+/// Check if a node's byte range contains the given offset.
+fn contains_offset(node: Node, offset: usize) -> bool {
+    node.start_byte() <= offset && offset <= node.end_byte()
 }
 
 /// Recursively collect all identifier nodes matching `name`, classifying
@@ -83,7 +83,7 @@ fn collect_matching_identifiers(
     if node.kind() == "identifier" && &source[node.byte_range()] == name {
         let kind = classify_highlight(node, source);
         out.push(DocumentHighlight {
-            range: range(node),
+            range: range(node, source),
             kind: Some(kind),
         });
         return; // identifiers have no children
@@ -258,12 +258,17 @@ fn parse(source: &str) -> Option<tree_sitter::Tree> {
     parser.parse(source, None)
 }
 
-fn range(node: Node) -> Range {
+/// Tree-sitter reports columns in bytes; LSP expects them in the negotiated
+/// encoding (UTF-16 unless the client opted into UTF-8). Convert through
+/// `byte_column_to_position`, which measures only the current line's prefix —
+/// converting via absolute byte offsets here would rescan the file per node and
+/// make whole-tree walks quadratic.
+fn range(node: Node, source: &str) -> Range {
     let s = node.start_position();
     let e = node.end_position();
     Range {
-        start: Position::new(s.row as u32, s.column as u32),
-        end: Position::new(e.row as u32, e.column as u32),
+        start: crate::utils::byte_column_to_position(source, s.row, s.column, node.start_byte()),
+        end: crate::utils::byte_column_to_position(source, e.row, e.column, node.end_byte()),
     }
 }
 
@@ -561,5 +566,57 @@ mod tests {
             highlights_from_decl.len(),
             "clicking on usage vs declaration should find the same set"
         );
+    }
+
+    /// The cursor arrives in UTF-16 code units, so a non-ASCII literal earlier
+    /// on the line must not stop us from resolving the identifier under it.
+    #[test]
+    fn test_cursor_resolves_at_utf16_column() {
+        // `é` is 2 bytes / 1 UTF-16 unit, `🚀` is 4 bytes / 2 units.
+        let line = r#"    string greeting = unicode"héllo 🚀"; uint256 priceTotal;"#;
+        let source = format!("contract C {{\n{line}\n}}");
+
+        let char_idx = line.find("priceTotal").unwrap();
+        let utf16_col = line[..char_idx].encode_utf16().count() as u32;
+        assert_eq!(
+            line[..char_idx].len() as u32,
+            utf16_col + 3,
+            "fixture no longer exercises the gap"
+        );
+
+        let highlights = highlights_at(&source, 1, utf16_col + 2);
+        assert!(
+            !highlights.is_empty(),
+            "cursor inside `priceTotal` at its UTF-16 column found nothing"
+        );
+        assert_eq!(highlights[0].0, 1);
+        assert_eq!(highlights[0].1, utf16_col);
+    }
+
+    /// Emitted ranges are UTF-16 too, for every occurrence on the line.
+    #[test]
+    fn test_highlight_ranges_are_utf16() {
+        let line = r#"    string label = unicode"状态"; uint256 counterA;"#;
+        let source = format!(
+            "contract C {{\n{line}\n    function f() public view returns (uint256) {{ return counterA; }}\n}}"
+        );
+
+        let char_idx = line.find("counterA").unwrap();
+        let utf16_col = line[..char_idx].encode_utf16().count() as u32;
+        assert_eq!(line[..char_idx].len() as u32, utf16_col + 4);
+
+        let highlights = highlights_at(&source, 1, utf16_col + 1);
+        assert_eq!(highlights.len(), 2, "declaration plus one usage");
+        assert_eq!(highlights[0].1, utf16_col);
+    }
+
+    /// A pure-ASCII line must behave exactly as before.
+    #[test]
+    fn test_highlight_ascii_unchanged() {
+        let source =
+            "contract C {\n    uint256 counter;\n    function f() public { counter = 1; }\n}";
+        let highlights = highlights_at(source, 1, 13);
+        assert_eq!(highlights.len(), 2);
+        assert_eq!(highlights[0].1, 12);
     }
 }

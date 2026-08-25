@@ -64,6 +64,39 @@ impl From<PositionEncoding> for PositionEncodingKind {
 // Byte-offset to LSP Position conversion
 // ---------------------------------------------------------------------------
 
+/// Convert a tree-sitter node boundary into a [`Position`], without rescanning
+/// the file.
+///
+/// [`byte_offset_to_position`] walks from byte 0 on every call, which is fine
+/// once per request but quadratic when a whole syntax tree is converted node by
+/// node. Tree-sitter already reports `row` and a `byte_column` measured from the
+/// start of that row, so the line begins at `byte_offset - byte_column` and only
+/// that prefix has to be measured.
+///
+/// Taking `row` from tree-sitter also keeps the result in the same line model as
+/// the tree being walked; `TextIndex` treats U+2028/U+2029 as line terminators
+/// and tree-sitter does not, so deriving the row here instead would put symbols
+/// on a different line than the node they came from.
+pub fn byte_column_to_position(
+    source: &str,
+    row: usize,
+    byte_column: usize,
+    byte_offset: usize,
+) -> Position {
+    let column = match encoding() {
+        PositionEncoding::Utf8 => byte_column as u32,
+        PositionEncoding::Utf16 => {
+            let line_start = byte_offset.saturating_sub(byte_column);
+            source
+                .get(line_start..byte_offset)
+                .map_or(byte_column as u32, |prefix| {
+                    prefix.encode_utf16().count() as u32
+                })
+        }
+    };
+    Position::new(row as u32, column)
+}
+
 /// Convert a byte offset in `source` to a [`Position`] whose column unit depends
 /// on the negotiated [`PositionEncoding`].
 pub fn byte_offset_to_position(source: &str, byte_offset: usize) -> Position {
