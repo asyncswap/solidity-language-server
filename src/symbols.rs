@@ -1,8 +1,6 @@
 #![allow(deprecated)]
 
-use tower_lsp::lsp_types::{
-    DocumentSymbol, Location, Position, Range, SymbolInformation, SymbolKind, Url,
-};
+use tower_lsp::lsp_types::{DocumentSymbol, Location, Range, SymbolInformation, SymbolKind, Url};
 use tree_sitter::{Node, Parser};
 
 // ── Document symbols (hierarchical, single file) ───────────────────────────
@@ -39,11 +37,14 @@ fn collect_contract_members(body: Node, source: &str) -> Vec<DocumentSymbol> {
     named_children(body)
         .filter_map(|child| match child.kind() {
             "function_definition" => function_symbol(child, source),
-            "constructor_definition" => Some(leaf("constructor", SymbolKind::CONSTRUCTOR, child)),
+            "constructor_definition" => {
+                Some(leaf("constructor", SymbolKind::CONSTRUCTOR, child, source))
+            }
             "fallback_receive_definition" => Some(leaf(
                 &fallback_or_receive(child, source),
                 SymbolKind::FUNCTION,
                 child,
+                source,
             )),
             "state_variable_declaration" => id_symbol(child, source, SymbolKind::FIELD),
             "event_definition" | "error_declaration" => id_symbol(child, source, SymbolKind::EVENT),
@@ -69,8 +70,8 @@ fn contract_symbol(node: Node, source: &str, kind: SymbolKind) -> Option<Documen
         name: name.into(),
         detail: None,
         kind,
-        range: range(node),
-        selection_range: child_id_range(node)?,
+        range: range(node, source),
+        selection_range: child_id_range(node, source)?,
         children,
         tags: None,
         deprecated: None,
@@ -83,8 +84,8 @@ fn function_symbol(node: Node, source: &str) -> Option<DocumentSymbol> {
         name: name.into(),
         detail: Some(function_detail(node, source)),
         kind: SymbolKind::FUNCTION,
-        range: range(node),
-        selection_range: child_id_range(node)?,
+        range: range(node, source),
+        selection_range: child_id_range(node, source)?,
         children: None,
         tags: None,
         deprecated: None,
@@ -106,8 +107,8 @@ fn struct_symbol(node: Node, source: &str) -> Option<DocumentSymbol> {
         name: name.into(),
         detail: None,
         kind: SymbolKind::STRUCT,
-        range: range(node),
-        selection_range: child_id_range(node)?,
+        range: range(node, source),
+        selection_range: child_id_range(node, source)?,
         children,
         tags: None,
         deprecated: None,
@@ -120,7 +121,7 @@ fn enum_symbol(node: Node, source: &str) -> Option<DocumentSymbol> {
         .map(|body| {
             named_children(body)
                 .filter(|c| c.kind() == "enum_value")
-                .map(|c| leaf(&source[c.byte_range()], SymbolKind::ENUM_MEMBER, c))
+                .map(|c| leaf(&source[c.byte_range()], SymbolKind::ENUM_MEMBER, c, source))
                 .collect::<Vec<_>>()
         })
         .filter(|c| !c.is_empty());
@@ -129,8 +130,8 @@ fn enum_symbol(node: Node, source: &str) -> Option<DocumentSymbol> {
         name: name.into(),
         detail: None,
         kind: SymbolKind::ENUM,
-        range: range(node),
-        selection_range: child_id_range(node)?,
+        range: range(node, source),
+        selection_range: child_id_range(node, source)?,
         children,
         tags: None,
         deprecated: None,
@@ -144,8 +145,8 @@ fn id_symbol(node: Node, source: &str, kind: SymbolKind) -> Option<DocumentSymbo
         name: name.into(),
         detail: None,
         kind,
-        range: range(node),
-        selection_range: child_id_range(node).unwrap_or(range(node)),
+        range: range(node, source),
+        selection_range: child_id_range(node, source).unwrap_or_else(|| range(node, source)),
         children: None,
         tags: None,
         deprecated: None,
@@ -155,7 +156,7 @@ fn id_symbol(node: Node, source: &str, kind: SymbolKind) -> Option<DocumentSymbo
 /// Symbol whose name is the full node text (pragmas, using directives).
 fn text_symbol(node: Node, source: &str, kind: SymbolKind) -> DocumentSymbol {
     let text = source[node.byte_range()].trim_end_matches(';').trim();
-    leaf(text, kind, node)
+    leaf(text, kind, node, source)
 }
 
 fn import_symbol(node: Node, source: &str) -> DocumentSymbol {
@@ -167,17 +168,17 @@ fn import_symbol(node: Node, source: &str) -> DocumentSymbol {
                 .trim()
                 .into()
         });
-    leaf(&name, SymbolKind::MODULE, node)
+    leaf(&name, SymbolKind::MODULE, node, source)
 }
 
 /// Leaf symbol with no children — range equals selection_range.
-fn leaf(name: &str, kind: SymbolKind, node: Node) -> DocumentSymbol {
+fn leaf(name: &str, kind: SymbolKind, node: Node, source: &str) -> DocumentSymbol {
     DocumentSymbol {
         name: name.into(),
         detail: None,
         kind,
-        range: range(node),
-        selection_range: range(node),
+        range: range(node, source),
+        selection_range: range(node, source),
         children: None,
         tags: None,
         deprecated: None,
@@ -241,7 +242,7 @@ fn collect_workspace_symbols(
                     _ => SymbolKind::CLASS,
                 };
                 if let Some(name) = child_id_text(child, source) {
-                    push_info(out, name, kind, child, uri, container);
+                    push_info(out, name, kind, child, source, uri, container);
                     if let Some(body) = find_child(child, "contract_body") {
                         collect_workspace_symbols(body, source, uri, Some(name), out);
                     }
@@ -249,7 +250,7 @@ fn collect_workspace_symbols(
             }
             "struct_declaration" => {
                 if let Some(name) = child_id_text(child, source) {
-                    push_info(out, name, SymbolKind::STRUCT, child, uri, container);
+                    push_info(out, name, SymbolKind::STRUCT, child, source, uri, container);
                     if let Some(body) = find_child(child, "struct_body") {
                         collect_workspace_symbols(body, source, uri, Some(name), out);
                     }
@@ -257,7 +258,7 @@ fn collect_workspace_symbols(
             }
             "enum_declaration" => {
                 if let Some(name) = child_id_text(child, source) {
-                    push_info(out, name, SymbolKind::ENUM, child, uri, container);
+                    push_info(out, name, SymbolKind::ENUM, child, source, uri, container);
                     if let Some(body) = find_child(child, "enum_body") {
                         collect_workspace_symbols(body, source, uri, Some(name), out);
                     }
@@ -272,6 +273,7 @@ fn collect_workspace_symbols(
                 "constructor",
                 SymbolKind::CONSTRUCTOR,
                 child,
+                source,
                 uri,
                 container,
             ),
@@ -289,6 +291,7 @@ fn collect_workspace_symbols(
                 &source[child.byte_range()],
                 SymbolKind::ENUM_MEMBER,
                 child,
+                source,
                 uri,
                 container,
             ),
@@ -314,7 +317,7 @@ fn push_id(
     container: Option<&str>,
 ) {
     if let Some(name) = child_id_text(node, source) {
-        push_info(out, name, kind, node, uri, container);
+        push_info(out, name, kind, node, source, uri, container);
     }
 }
 
@@ -323,6 +326,7 @@ fn push_info(
     name: &str,
     kind: SymbolKind,
     node: Node,
+    source: &str,
     uri: &Url,
     container: Option<&str>,
 ) {
@@ -333,7 +337,7 @@ fn push_info(
         deprecated: None,
         location: Location {
             uri: uri.clone(),
-            range: range(node),
+            range: range(node, source),
         },
         container_name: container.map(Into::into),
     });
@@ -349,12 +353,17 @@ fn parse(source: &str) -> Option<tree_sitter::Tree> {
     parser.parse(source, None)
 }
 
-fn range(node: Node) -> Range {
+/// Tree-sitter reports columns in bytes; LSP expects them in the negotiated
+/// encoding (UTF-16 unless the client opted into UTF-8). Convert through
+/// `byte_column_to_position`, which measures only the current line's prefix —
+/// converting via absolute byte offsets here would rescan the file per node and
+/// make whole-tree walks quadratic.
+fn range(node: Node, source: &str) -> Range {
     let s = node.start_position();
     let e = node.end_position();
     Range {
-        start: Position::new(s.row as u32, s.column as u32),
-        end: Position::new(e.row as u32, e.column as u32),
+        start: crate::utils::byte_column_to_position(source, s.row, s.column, node.start_byte()),
+        end: crate::utils::byte_column_to_position(source, e.row, e.column, node.end_byte()),
     }
 }
 
@@ -374,11 +383,11 @@ fn child_id_text<'a>(node: Node<'a>, source: &'a str) -> Option<&'a str> {
         .map(|c| &source[c.byte_range()])
 }
 
-fn child_id_range(node: Node) -> Option<Range> {
+fn child_id_range(node: Node, source: &str) -> Option<Range> {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .find(|c| c.kind() == "identifier" && c.is_named())
-        .map(|c| range(c))
+        .map(|c| range(c, source))
 }
 
 fn find_child<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
@@ -620,5 +629,94 @@ library SafeMath { function add(uint256 a, uint256 b) internal pure returns (uin
         assert!(detail.contains("uint256 x"));
         assert!(detail.contains("address y"));
         assert!(detail.contains("returns"));
+    }
+
+    /// Columns are reported in UTF-16 code units (the LSP default), not bytes,
+    /// so a non-ASCII literal earlier on the line must not shift later symbols.
+    #[test]
+    fn test_symbol_columns_are_utf16_not_bytes() {
+        // `é` is 2 bytes / 1 UTF-16 unit, `🚀` is 4 bytes / 2 units, so the
+        // byte column of `priceTotal` runs 3 ahead of its UTF-16 column.
+        let line = r#"    string greeting = unicode"héllo 🚀"; uint256 priceTotal;"#;
+        let source = format!("contract C {{\n{line}\n}}");
+
+        let char_idx = line.find("priceTotal").unwrap();
+        let utf16_col = line[..char_idx].encode_utf16().count() as u32;
+        let byte_col = line[..char_idx].len() as u32;
+        assert_eq!(
+            byte_col,
+            utf16_col + 3,
+            "fixture no longer exercises the gap"
+        );
+
+        let members = extract_document_symbols(&source)[0]
+            .children
+            .clone()
+            .unwrap();
+        let var = members.iter().find(|c| c.name == "priceTotal").unwrap();
+
+        assert_eq!(var.selection_range.start.line, 1);
+        assert_eq!(var.selection_range.start.character, utf16_col);
+    }
+
+    /// Rows stay in tree-sitter's line model. `TextIndex` treats U+2028 as a
+    /// line terminator and tree-sitter does not, so deriving the row from an
+    /// absolute byte offset would report the symbol on the following line.
+    #[test]
+    fn test_symbol_line_uses_tree_sitter_line_model() {
+        let line = "    string a = unicode\"x\u{2028}y\"; uint256 counter;";
+        let source = format!("contract C {{\n{line}\n}}");
+        let char_idx = line.find("counter").unwrap();
+        let utf16_col = line[..char_idx].encode_utf16().count() as u32;
+
+        let members = extract_document_symbols(&source)[0]
+            .children
+            .clone()
+            .unwrap();
+        let var = members.iter().find(|c| c.name == "counter").unwrap();
+
+        assert_eq!(var.selection_range.start.line, 1, "U+2028 split the line");
+        assert_eq!(var.selection_range.start.character, utf16_col);
+    }
+
+    /// A pure-ASCII line must be unaffected by the conversion.
+    #[test]
+    fn test_symbol_columns_unchanged_for_ascii() {
+        let line = "    string plain = \"ascii\"; uint256 counter;";
+        let source = format!("contract C {{\n{line}\n}}");
+        let expected = line.find("counter").unwrap() as u32;
+
+        let members = extract_document_symbols(&source)[0]
+            .children
+            .clone()
+            .unwrap();
+        let var = members.iter().find(|c| c.name == "counter").unwrap();
+
+        assert_eq!(var.selection_range.start.character, expected);
+    }
+
+    /// Workspace symbols share the same conversion path. Their location spans
+    /// the whole declaration, so anchor on where that declaration starts.
+    #[test]
+    fn test_workspace_symbol_columns_are_utf16() {
+        let line = r#"    string label = unicode"状态"; uint256 counterA;"#;
+        let source = format!("contract C {{\n{line}\n}}");
+
+        // `状态` is 6 bytes / 2 UTF-16 units, so the declaration's byte column
+        // runs 4 ahead of its UTF-16 column.
+        let decl_idx = line.find("uint256 counterA").unwrap();
+        let utf16_col = line[..decl_idx].encode_utf16().count() as u32;
+        assert_eq!(
+            line[..decl_idx].len() as u32,
+            utf16_col + 4,
+            "fixture no longer exercises the gap"
+        );
+
+        let uri = Url::parse("file:///tmp/C.sol").unwrap();
+        let symbols = extract_workspace_symbols(&[(uri, source)]);
+        let var = symbols.iter().find(|s| s.name == "counterA").unwrap();
+
+        assert_eq!(var.location.range.start.line, 1);
+        assert_eq!(var.location.range.start.character, utf16_col);
     }
 }
