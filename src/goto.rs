@@ -1207,11 +1207,14 @@ pub fn goto_declaration_by_name(
         let start = src_loc.offset;
         let length = src_loc.length;
 
-        if start + length > built_source.len() {
+        // These offsets come from a previous solc build while `built_source` is
+        // read fresh from disk, so they can be stale as well as out of range.
+        // On a file with multi-byte text a stale offset can land inside a
+        // character, and slicing there panics the whole server, so skip the
+        // candidate the same way an unparseable `src` is skipped.
+        let Some(node_text) = built_source.get(start..start + length) else {
             continue;
-        }
-
-        let node_text = &built_source[start..start + length];
+        };
 
         // Check if this node's text matches the name we're looking for.
         // For simple identifiers, the text equals the name directly.
@@ -1328,10 +1331,15 @@ pub fn validate_goto_target(target_source: &str, location: &Location, expected_n
     let start_col = location.range.start.character as usize;
     let end_col = location.range.end.character as usize;
 
+    // `get` rather than indexing: these columns are LSP character offsets, so
+    // on a line with multi-byte text they can land inside a character or past
+    // its end, and slicing there panics — which takes the whole server down,
+    // not just this request. An unusable range falls through to the same
+    // "can't read target" answer as an unreadable file.
     if let Some(line_text) = target_source.lines().nth(line)
-        && end_col <= line_text.len()
+        && let Some(slice) = line_text.get(start_col..end_col)
     {
-        return &line_text[start_col..end_col] == expected_name;
+        return slice == expected_name;
     }
     // Can't read target — assume valid
     true
@@ -2868,6 +2876,100 @@ contract B { uint256 public x; }
         assert_eq!(deserialized.referenced_declaration, Some(NodeId(42)));
         assert_eq!(deserialized.scope, Some(NodeId(10)));
         assert_eq!(deserialized.base_functions.len(), 2);
+    }
+
+    // ── Non-ASCII slicing ──────────────────────────────────────────────
+
+    /// `validate_goto_target` slices the target line by LSP columns. Those are
+    /// UTF-16 units, so on a line with multi-byte text they can land inside a
+    /// character — which used to panic and kill the whole server process.
+    #[test]
+    fn validate_goto_target_survives_a_column_inside_a_character() {
+        let source = "contract C {\n    // 状態\n    uint256 total;\n}";
+        // Columns that fall inside the multi-byte comment on line 1.
+        let location = Location {
+            uri: Url::parse("file:///tmp/C.sol").unwrap(),
+            range: Range {
+                start: Position::new(1, 8),
+                end: Position::new(1, 9),
+            },
+        };
+
+        // Must not panic. Either verdict is acceptable; surviving is the point.
+        let _ = validate_goto_target(source, &location, "total");
+    }
+
+    /// The same guard for a range that starts past its end, which the byte
+    /// bound alone never rejected.
+    #[test]
+    fn validate_goto_target_survives_an_inverted_range() {
+        let source = "contract C {\n    uint256 total;\n}";
+        let location = Location {
+            uri: Url::parse("file:///tmp/C.sol").unwrap(),
+            range: Range {
+                start: Position::new(1, 12),
+                end: Position::new(1, 4),
+            },
+        };
+
+        let _ = validate_goto_target(source, &location, "total");
+    }
+
+    /// `goto_declaration_by_name` slices the on-disk file with offsets from a
+    /// previous build. Those can be stale, and on a file with multi-byte text a
+    /// stale offset can land inside a character — which used to panic.
+    #[test]
+    fn goto_declaration_by_name_survives_a_stale_offset_inside_a_character() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("C.sol");
+        // `状` occupies bytes 21..24, so an offset of 22 is mid-character.
+        std::fs::write(&file, "contract C {\n    // 状態\n}\n").expect("write");
+        let abs = file.to_string_lossy().to_string();
+
+        let ast = serde_json::json!({
+            "sources": {
+                &abs: {
+                    "id": 0,
+                    "ast": {
+                        "id": 1,
+                        "nodeType": "SourceUnit",
+                        "src": "0:30:0",
+                        "absolutePath": &abs,
+                        "nodes": [{
+                            "id": 2,
+                            "nodeType": "Identifier",
+                            "name": "total",
+                            // Deliberately mid-character and overlong.
+                            "src": "22:5:0",
+                            "referencedDeclaration": 3
+                        }]
+                    }
+                }
+            },
+            "source_id_to_path": { "0": &abs }
+        });
+
+        let build = CachedBuild::new(ast, 1, None);
+        let uri = Url::from_file_path(&file).expect("uri");
+
+        // Must not panic. A None result is a perfectly good answer here.
+        let _ = goto_declaration_by_name(&build, &uri, "total", 22);
+    }
+
+    /// An ASCII line still validates exactly as before.
+    #[test]
+    fn validate_goto_target_still_matches_on_ascii() {
+        let source = "contract C {\n    uint256 total;\n}";
+        let location = Location {
+            uri: Url::parse("file:///tmp/C.sol").unwrap(),
+            range: Range {
+                start: Position::new(1, 12),
+                end: Position::new(1, 17),
+            },
+        };
+
+        assert!(validate_goto_target(source, &location, "total"));
+        assert!(!validate_goto_target(source, &location, "other"));
     }
 }
 // temp
