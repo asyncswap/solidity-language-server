@@ -3690,3 +3690,78 @@ fn test_type_meta_items_have_detail() {
     let iid_item = items.iter().find(|i| i.label == "interfaceId").unwrap();
     assert_eq!(iid_item.detail.as_deref(), Some("bytes4"));
 }
+
+// ── using-for extensions on values (issue #225) ────────────────────────────
+
+/// `using Hooks for IHooks` must offer the library's functions on a *value*
+/// typed `IHooks`. Previously the receiver's kind was inferred from its
+/// typeIdentifier, and because `IHooks` is a contract the extensions were
+/// suppressed on values as well as on the type name.
+#[test]
+fn test_using_for_extensions_appear_on_a_contract_typed_value() {
+    let cache = load_cache();
+
+    let labels: Vec<String> = get_dot_completions(&cache, "hooks", None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    assert!(
+        !labels.is_empty(),
+        "`hooks` (declared as IHooks) resolved to nothing"
+    );
+    // `hasPermission` and `isValidHookAddress` exist only on the Hooks library,
+    // not on the IHooks interface, so they can only have arrived via using-for.
+    for expected in ["hasPermission", "isValidHookAddress"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "`hooks.` is missing the `using Hooks for IHooks` extension {expected:?}; got {labels:?}"
+        );
+    }
+}
+
+/// The flip side: typing the *type name* must not pull in library extensions,
+/// which is the behavior the original suppression was written to protect.
+#[test]
+fn test_using_for_extensions_absent_on_the_type_name() {
+    let cache = load_cache();
+
+    let labels: Vec<String> = get_dot_completions(&cache, "IHooks", None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    // Library-only names must not leak onto the type. Names such as `beforeSwap`
+    // are deliberately not asserted here: IHooks declares them itself, so they
+    // legitimately appear either way.
+    for unexpected in ["hasPermission", "isValidHookAddress"] {
+        assert!(
+            !labels.iter().any(|l| l == unexpected),
+            "`IHooks.` should not offer the library extension {unexpected:?}; got {labels:?}"
+        );
+    }
+}
+
+/// A cast produces a value, so `IHooks(addr).` gets the extensions even though
+/// the name before the parenthesis is a contract.
+#[test]
+fn test_using_for_extensions_appear_after_a_cast() {
+    use solidity_language_server::completion::get_chain_completions;
+
+    let cache = load_cache();
+    let chain = vec![DotSegment {
+        name: "IHooks".to_string(),
+        kind: AccessKind::Call,
+        call_args: Some("addr".to_string()),
+    }];
+
+    let labels: Vec<String> = get_chain_completions(&cache, &chain, None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    assert!(
+        labels.iter().any(|l| l == "hasPermission"),
+        "`IHooks(addr).` should offer library extensions; got {labels:?}"
+    );
+}
