@@ -60,7 +60,7 @@ Non-dot requests return prebuilt general completions and then append tail candid
 
 General completions include:
 
-- named AST symbols,
+- named declarations that can be written as bare names (contracts, structs, enums, functions, events, errors, state variables). Struct fields, function and event parameters, and locals are excluded from this flat list. Parameters and locals are added only when the cursor is inside their scope. Struct fields appear only as dot-completion members,
 - Solidity keywords,
 - magic globals,
 - units and type helpers.

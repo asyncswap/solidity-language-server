@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, CompletionTextEdit,
@@ -49,7 +49,9 @@ pub struct ScopeRange {
 /// Completion cache built from the AST.
 #[derive(Debug)]
 pub struct CompletionCache {
-    /// All named identifiers as completion items (flat, unscoped).
+    /// Named identifiers offered as non-dot completions.
+    /// Struct fields, parameters, and locals are omitted. Parameters and locals
+    /// are added for the cursor's scope in `append_scoped_variables`.
     pub names: Vec<CompletionItem>,
 
     /// name → typeIdentifier (for dot-completion: look up what type a variable is).
@@ -416,6 +418,10 @@ pub fn build_completion_cache(
         HashMap::with_capacity(est_contracts);
     let mut top_level_importables_by_file: HashMap<RelPath, Vec<TopLevelImportable>> =
         HashMap::with_capacity(est_names);
+    // SourceUnit and ContractDefinition ids. A variable whose scope is one of
+    // these is a file-level or state variable. Parameters, locals, struct
+    // fields, and event/error parameters use some other scope.
+    let mut bare_var_scopes: HashSet<NodeId> = HashSet::new();
 
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
@@ -524,8 +530,43 @@ pub fn build_completion_cache(
                             });
                     }
 
+                    if matches!(node_type, "SourceUnit" | "ContractDefinition")
+                        && let Some(id) = node_id
+                    {
+                        bare_var_scopes.insert(id);
+                    }
+
+                    // Only declarations that can be written as bare names belong in
+                    // the non-dot list. Identifier / MemberAccess / Yul names are
+                    // uses. Struct fields, function and event parameters, and
+                    // locals are not global names; parameters and locals are added
+                    // back at request time when the cursor is in their scope.
+                    let is_hidden_variable = node_type == "VariableDeclaration"
+                        && tree
+                            .get("scope")
+                            .and_then(|v| v.as_i64())
+                            .map(NodeId)
+                            .is_some_and(|scope| !bare_var_scopes.contains(&scope));
+                    let is_bare_name_decl = matches!(
+                        node_type,
+                        "ContractDefinition"
+                            | "StructDefinition"
+                            | "EnumDefinition"
+                            | "UserDefinedValueTypeDefinition"
+                            | "FunctionDefinition"
+                            | "ModifierDefinition"
+                            | "EventDefinition"
+                            | "ErrorDefinition"
+                            | "VariableDeclaration"
+                            | "ImportDirective"
+                    );
+
                     // Collect named nodes as completion items
-                    if !name.is_empty() && !seen_names.contains_key(name) {
+                    if !name.is_empty()
+                        && is_bare_name_decl
+                        && !is_hidden_variable
+                        && !seen_names.contains_key(name)
+                    {
                         let type_string = tree
                             .get("typeDescriptions")
                             .and_then(|td| td.get("typeString"))
@@ -1384,6 +1425,53 @@ fn resolve_name_to_type_id(cache: &CompletionCache, name: &str) -> Option<String
     None
 }
 
+/// Add parameters and locals declared in the scopes that enclose `ctx`.
+///
+/// These names are omitted from the flat general list, so a parameter like
+/// `startAt` on another function or event does not show up everywhere.
+/// Struct fields and event parameters stay out: their scopes are not on this chain.
+fn append_scoped_variables(cache: &CompletionCache, items: &mut Vec<CompletionItem>, ctx: &ScopeContext) {
+    let Some(mut current) = find_innermost_scope(cache, ctx.byte_pos, ctx.file_id) else {
+        return;
+    };
+    let mut seen: std::collections::HashSet<String> =
+        items.iter().map(|item| item.label.clone()).collect();
+
+    for _ in 0..64 {
+        push_scope_variables(cache, current, items, &mut seen);
+        if let Some(bases) = cache.linearized_base_contracts.get(&current) {
+            for &base_id in bases.iter().skip(1) {
+                push_scope_variables(cache, base_id, items, &mut seen);
+            }
+        }
+        match cache.scope_parent.get(&current).copied() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+}
+
+fn push_scope_variables(
+    cache: &CompletionCache,
+    scope: NodeId,
+    items: &mut Vec<CompletionItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Some(decls) = cache.scope_declarations.get(&scope) else {
+        return;
+    };
+    for decl in decls {
+        if !seen.insert(decl.name.clone()) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: decl.name.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            ..Default::default()
+        });
+    }
+}
+
 /// Find the innermost scope node that contains the given byte position and file.
 /// `scope_ranges` must be sorted by span size ascending (smallest first).
 /// Returns the node_id of the smallest scope enclosing the position.
@@ -2157,7 +2245,11 @@ pub fn handle_completion_with_tail_candidates(
     } else {
         match cache {
             Some(c) => {
-                append_auto_import_candidates_last(c.general_completions.clone(), tail_candidates)
+                let mut items = c.general_completions.clone();
+                if let Some(ctx) = scope_ctx.as_ref() {
+                    append_scoped_variables(c, &mut items, ctx);
+                }
+                append_auto_import_candidates_last(items, tail_candidates)
             }
             None => get_static_completions(),
         }
@@ -2468,9 +2560,9 @@ fn make_import_item(label: String, typed_range: Option<(u32, u32, u32)>) -> Comp
 mod tests {
     use super::{
         CompletionCache, TopLevelImportable, append_auto_import_candidates_last,
-        build_completion_cache, extract_top_level_importables_for_file,
+        build_completion_cache, extract_top_level_importables_for_file, handle_completion,
     };
-    use crate::types::SymbolName;
+    use crate::types::{FileId, SymbolName};
     use serde_json::json;
     use std::collections::HashMap;
     use tower_lsp::lsp_types::CompletionItemKind;
@@ -2544,6 +2636,179 @@ mod tests {
         assert!(file_names.contains(&"C"));
         assert!(file_names.contains(&"TOP_CONST"));
         assert!(!file_names.contains(&"Alias"));
+    }
+
+    fn start_at_sources() -> serde_json::Value {
+        json!({
+            "/tmp/A.sol": {
+                "id": 0,
+                "ast": {
+                    "id": 1,
+                    "nodeType": "SourceUnit",
+                    "src": "0:200:0",
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "nodeType": "StructDefinition",
+                            "name": "Contract",
+                            "scope": 1,
+                            "src": "0:30:0",
+                            "members": [
+                                {
+                                    "id": 11,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "startAt",
+                                    "scope": 10,
+                                    "src": "10:7:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint32",
+                                        "typeIdentifier": "t_uint32"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "id": 30,
+                            "nodeType": "EventDefinition",
+                            "name": "Started",
+                            "scope": 1,
+                            "src": "31:20:0",
+                            "parameters": {
+                                "id": 31,
+                                "nodeType": "ParameterList",
+                                "src": "40:10:0",
+                                "parameters": [
+                                    {
+                                        "id": 32,
+                                        "nodeType": "VariableDeclaration",
+                                        "name": "startAt",
+                                        "scope": 30,
+                                        "src": "40:7:0",
+                                        "typeDescriptions": {
+                                            "typeString": "uint32",
+                                            "typeIdentifier": "t_uint32"
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "id": 40,
+                            "nodeType": "ContractDefinition",
+                            "name": "Pool",
+                            "scope": 1,
+                            "src": "60:140:0",
+                            "nodes": [
+                                {
+                                    "id": 41,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "stateVar",
+                                    "scope": 40,
+                                    "src": "70:8:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint256",
+                                        "typeIdentifier": "t_uint256"
+                                    }
+                                },
+                                {
+                                    "id": 50,
+                                    "nodeType": "FunctionDefinition",
+                                    "name": "onStart",
+                                    "scope": 40,
+                                    "src": "90:100:0",
+                                    "parameters": {
+                                        "id": 49,
+                                        "nodeType": "ParameterList",
+                                        "src": "95:12:0",
+                                        "parameters": [
+                                            {
+                                                "id": 51,
+                                                "nodeType": "VariableDeclaration",
+                                                "name": "startAt",
+                                                "scope": 50,
+                                                "src": "100:7:0",
+                                                "typeDescriptions": {
+                                                    "typeString": "uint32",
+                                                    "typeIdentifier": "t_uint32"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "body": {
+                                        "id": 60,
+                                        "nodeType": "Block",
+                                        "scope": 50,
+                                        "src": "110:70:0"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        })
+    }
+
+    fn labels_of(resp: Option<CompletionResponse>) -> Vec<String> {
+        match resp {
+            Some(CompletionResponse::List(list)) => {
+                list.items.into_iter().map(|item| item.label).collect()
+            }
+            Some(CompletionResponse::Array(items)) => {
+                items.into_iter().map(|item| item.label).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn general_completions_omit_struct_fields_and_params() {
+        let cache = build_completion_cache(&start_at_sources(), None, None);
+        let labels: Vec<&str> = cache
+            .general_completions
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+
+        assert!(labels.contains(&"Contract"));
+        assert!(labels.contains(&"Pool"));
+        assert!(labels.contains(&"onStart"));
+        assert!(labels.contains(&"Started"));
+        assert!(labels.contains(&"stateVar"));
+        assert!(!labels.contains(&"startAt"));
+        assert!(!cache.name_to_type.contains_key("startAt"));
+
+        let members = cache.node_members.get(&crate::types::NodeId(10)).unwrap();
+        assert!(members.iter().any(|item| item.label == "startAt"));
+    }
+
+    #[test]
+    fn param_completion_only_inside_its_function() {
+        let cache = build_completion_cache(&start_at_sources(), None, None);
+        let source = " ".repeat(200);
+        let outside = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: 10,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+        let inside = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: 120,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+
+        assert!(!outside.iter().any(|label| label == "startAt"));
+        assert!(inside.iter().any(|label| label == "startAt"));
     }
 
     #[test]
