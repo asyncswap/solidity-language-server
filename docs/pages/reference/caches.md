@@ -111,7 +111,7 @@ This means after a warm-load, cross-file goto-definition, references, call hiera
 
 | Field | Purpose |
 |---|---|
-| `names` | Flat list of all named identifiers (unscoped) |
+| `names` | Flat list of named identifiers for non-dot completion (unscoped). Struct fields are excluded; they are offered only from `node_members` after `.` |
 | `name_to_type` | `SymbolName` → `TypeIdentifier`; used for dot-completion |
 | `type_to_node` | `TypeIdentifier` → defining node id |
 | `node_members` | struct/contract/enum/library member completion items |
