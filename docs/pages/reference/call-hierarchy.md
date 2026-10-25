@@ -101,7 +101,7 @@ For outgoing calls, the same principle works in reverse: find all reference node
 
 ### Equivalence via `base_function_implementation`
 
-When `base_function_implementation` is populated, incoming calls expand the target to include all equivalent IDs (interface <-> implementation). This means:
+When `base_function_implementation` is populated, incoming calls expand the target to include all equivalent IDs (interface \<-> implementation). This means:
 
 - Incoming calls for `PoolManager.swap` includes callers referencing `IPoolManager.swap`
 - Incoming calls for `IPoolManager.swap` includes callers referencing `PoolManager.swap`

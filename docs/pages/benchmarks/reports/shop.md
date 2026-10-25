@@ -136,7 +136,7 @@ Benchmarked against `example` — `Shop.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 1.8ms ⚡ | **15.2 MB** | [{"kind":3,"range":{"end":{"character":1... |
+| **mmsaki** | 1.8ms ⚡ | **15.2 MB** | `[{"kind":3,"range":{"end":{"character":1...` |
 
 ### textDocument/documentLink
 
@@ -154,13 +154,13 @@ Benchmarked against `example` — `Shop.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 2.2ms ⚡ | **10.1 MB** | [{"endCharacter":1,"endLine":53,"startCh... |
+| **mmsaki** | 2.2ms ⚡ | **10.1 MB** | `[{"endCharacter":1,"endLine":53,"startCh...` |
 
 ### textDocument/selectionRange
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 2.1ms ⚡ | **10.0 MB** | [{"parent":{"parent":{"parent":{"parent"... |
+| **mmsaki** | 2.1ms ⚡ | **10.0 MB** | `[{"parent":{"parent":{"parent":{"parent"...` |
 
 ### textDocument/inlayHint
 
@@ -208,13 +208,13 @@ Benchmarked against `example` — `Shop.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 0.3ms ⚡ | **10.1 MB** | {"success":true} |
+| **mmsaki** | 0.3ms ⚡ | **10.1 MB** | `{"success":true}` |
 
 ### textDocument/codeAction
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 1.1ms ⚡ | **15.1 MB** | [{"diagnostics":[{"code":"unused-import"... |
+| **mmsaki** | 1.1ms ⚡ | **15.1 MB** | `[{"diagnostics":[{"code":"unused-import"...` |
 
 ---
 

@@ -136,7 +136,7 @@ Benchmarked against `v4-core` — `src/libraries/Pool.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 3.1ms ⚡ | **28.6 MB** | [{"kind":2,"range":{"end":{"character":1... |
+| **mmsaki** | 3.1ms ⚡ | **28.6 MB** | `[{"kind":2,"range":{"end":{"character":1...` |
 
 ### textDocument/documentLink
 
@@ -154,13 +154,13 @@ Benchmarked against `v4-core` — `src/libraries/Pool.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 5.0ms ⚡ | **10.3 MB** | [{"endCharacter":1,"endLine":612,"startC... |
+| **mmsaki** | 5.0ms ⚡ | **10.3 MB** | `[{"endCharacter":1,"endLine":612,"startC...` |
 
 ### textDocument/selectionRange
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 8.9ms ⚡ | **10.2 MB** | [{"parent":{"parent":{"parent":{"parent"... |
+| **mmsaki** | 8.9ms ⚡ | **10.2 MB** | `[{"parent":{"parent":{"parent":{"parent"...` |
 
 ### textDocument/inlayHint
 
@@ -202,13 +202,13 @@ Benchmarked against `v4-core` — `src/libraries/Pool.sol`.
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 232.9ms ⚡ | **28.4 MB** | {"changes":{"file:///Users/meek/develope... |
+| **mmsaki** | 232.9ms ⚡ | **28.4 MB** | `{"changes":{"file:///Users/meek/develope...` |
 
 ### workspace/executeCommand
 
 | Server | p95 | RSS | Result |
 |--------|-----|-----|--------|
-| **mmsaki** | 0.1ms ⚡ | **10.3 MB** | {"success":true} |
+| **mmsaki** | 0.1ms ⚡ | **10.3 MB** | `{"success":true}` |
 
 ### textDocument/codeAction
 
