@@ -73,7 +73,7 @@ jobs:
           toolchain: stable
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@a502f66dedae6774c819ff3c80406c7e8266dad2
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
 
       - name: Download all artifacts
         uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
