@@ -31,6 +31,16 @@ fn response_labels(resp: Option<CompletionResponse>) -> Vec<String> {
     }
 }
 
+/// Label plus the parameter list shown beside it, e.g. `encode` + `(...)`.
+fn signature_of(item: &CompletionItem) -> String {
+    let params = item
+        .label_details
+        .as_ref()
+        .and_then(|d| d.detail.as_deref())
+        .unwrap_or("");
+    format!("{}{}", item.label, params)
+}
+
 fn response_items(resp: Option<CompletionResponse>) -> Vec<CompletionItem> {
     match resp {
         Some(CompletionResponse::List(list)) => list.items,
@@ -610,10 +620,14 @@ fn test_dot_completion_abi() {
     let cache = load_cache();
     let items = get_dot_completions(&cache, "abi", None);
     let names: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+    let sigs: Vec<String> = items.iter().map(signature_of).collect();
 
-    assert!(names.contains(&"encode(...)"), "abi.encode");
-    assert!(names.contains(&"encodePacked(...)"), "abi.encodePacked");
-    assert!(names.contains(&"decode(bytes memory, (...))"), "abi.decode");
+    // Labels are bare names so accepting inserts `encode`, not `encode(...)`.
+    assert!(names.contains(&"encode"), "abi.encode");
+    assert!(names.contains(&"encodePacked"), "abi.encodePacked");
+    assert!(names.contains(&"decode"), "abi.decode");
+    assert!(sigs.contains(&"encode(...)".to_string()));
+    assert!(sigs.contains(&"decode(bytes memory, (...))".to_string()));
 }
 
 // --- dot completions on AST types ---
@@ -1803,9 +1817,10 @@ fn test_dot_completion_bytes_concat() {
     let cache = load_cache();
     let items = get_dot_completions(&cache, "bytes", None);
     let names: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert!(names.contains(&"concat(...)"), "bytes.concat");
+    assert!(names.contains(&"concat"), "bytes.concat");
 
-    let concat = items.iter().find(|c| c.label == "concat(...)").unwrap();
+    let concat = items.iter().find(|c| c.label == "concat").unwrap();
+    assert_eq!(signature_of(concat), "concat(...)");
     assert_eq!(concat.detail.as_deref(), Some("bytes memory"));
 }
 
@@ -1814,9 +1829,10 @@ fn test_dot_completion_string_concat() {
     let cache = load_cache();
     let items = get_dot_completions(&cache, "string", None);
     let names: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert!(names.contains(&"concat(...)"), "string.concat");
+    assert!(names.contains(&"concat"), "string.concat");
 
-    let concat = items.iter().find(|c| c.label == "concat(...)").unwrap();
+    let concat = items.iter().find(|c| c.label == "concat").unwrap();
+    assert_eq!(signature_of(concat), "concat(...)");
     assert_eq!(concat.detail.as_deref(), Some("string memory"));
 }
 
@@ -1824,7 +1840,8 @@ fn test_dot_completion_string_concat() {
 fn test_dot_completion_abi_full_signatures() {
     let cache = load_cache();
     let items = get_dot_completions(&cache, "abi", None);
-    let names: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+    let sigs: Vec<String> = items.iter().map(signature_of).collect();
+    let names: Vec<&str> = sigs.iter().map(String::as_str).collect();
 
     assert!(
         names.contains(&"encodeWithSelector(bytes4, ...)"),
@@ -3751,12 +3768,14 @@ fn test_try_returns_variable_resolves_in_its_clause_scope() {
 
 #[test]
 fn test_scope_lookup_survives_unsaved_lines_above_cursor() {
-    // The cache was built from SCOPED_LOCALS_SRC; the buffer now has a new,
-    // not-yet-compiled function above `loop`. The cursor's live offset is past
-    // the end of the for statement in the compiled text, so it has to be mapped
-    // back before the scope lookup.
+    // The cache was built from SCOPED_LOCALS_SRC; the buffer now has unsaved
+    // text above `loop`, sized so the unmapped live offset lands exactly as far
+    // into `attempt` as the cursor is into `loop`. There `item` is the state
+    // variable `Outer item`, so without mapping the lookup offers `outerField`.
     let cache = load_scoped_locals_cache();
-    let padding = "    function added() external pure returns (uint256 total) {\n        total = 1;\n    }\n\n".repeat(3);
+    let drift = SCOPED_LOCALS_SRC.find("out = got.").unwrap()
+        - SCOPED_LOCALS_SRC.find("sum += item.").unwrap();
+    let padding = format!("    //{}\n", "x".repeat(drift - 7));
     let live = SCOPED_LOCALS_SRC.replacen(
         "    function loop(",
         &format!("{padding}    function loop("),
@@ -3765,7 +3784,7 @@ fn test_scope_lookup_survives_unsaved_lines_above_cursor() {
 
     let unmapped = scoped_dot_labels(&cache, &live, None, "sum += item.");
     assert!(
-        !unmapped.contains(&"innerField".to_string()),
+        unmapped.contains(&"outerField".to_string()),
         "fixture no longer exercises the drift: {unmapped:?}"
     );
 
@@ -3791,4 +3810,66 @@ fn test_map_live_offset_to_compiled() {
     // Deletion: offsets after it shift forward.
     let live = "aaaa{}cccc";
     assert_eq!(map(live, compiled, 6), 10);
+}
+
+// --- Built-in and inherited members (#242) ---
+
+fn assert_labels(needle: &str, present: &[&str], absent: &[&str]) {
+    let cache = load_scoped_locals_cache();
+    let labels = scoped_dot_labels(&cache, SCOPED_LOCALS_SRC, None, needle);
+    for p in present {
+        assert!(
+            labels.iter().any(|l| l == p),
+            "{needle} missing {p}: {labels:?}"
+        );
+    }
+    for a in absent {
+        assert!(
+            !labels.iter().any(|l| l == a),
+            "{needle} offers {a}: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn test_storage_array_offers_length_push_pop() {
+    assert_labels("stored.", &["length", "push", "pop"], &[]);
+}
+
+#[test]
+fn test_memory_array_and_bytes_offer_length_only() {
+    assert_labels("stored.push(list.", &["length"], &["push", "pop"]);
+    assert_labels("Wad.wrap(raw.", &["length"], &["push"]);
+    assert_labels("word.", &["length"], &[]);
+}
+
+#[test]
+fn test_array_index_resolves_element_type() {
+    assert_labels("list[0].", &["innerField"], &["length"]);
+}
+
+#[test]
+fn test_value_type_name_offers_wrap_unwrap() {
+    assert_labels("return Wad.", &["wrap", "unwrap"], &[]);
+}
+
+#[test]
+fn test_function_and_error_members_offer_selector() {
+    assert_labels("ISource.fetch.", &["selector"], &[]);
+    assert_labels("Derived.Bad.", &["selector"], &[]);
+}
+
+#[test]
+fn test_private_base_member_is_not_inherited() {
+    // Derived linearizes as [Derived, HiddenBase, VisibleBase]; HiddenBase's
+    // `Outer private hidden` comes first but is invisible to Derived.
+    assert_labels("+ hidden.", &["innerField"], &["outerField"]);
+}
+
+#[test]
+fn test_builtin_members_insert_bare_names() {
+    let cache = load_cache();
+    for item in get_dot_completions(&cache, "abi", None) {
+        assert!(!item.label.contains('('), "label {:?}", item.label);
+    }
 }
