@@ -3690,3 +3690,105 @@ fn test_type_meta_items_have_detail() {
     let iid_item = items.iter().find(|i| i.label == "interfaceId").unwrap();
     assert_eq!(iid_item.detail.as_deref(), Some("bytes4"));
 }
+
+// --- Local variable scopes (for-init, try/catch, stale AST offsets) ---
+
+const SCOPED_LOCALS_SRC: &str = include_str!("../example/ScopedLocals.sol");
+
+fn load_scoped_locals_cache() -> solidity_language_server::completion::CompletionCache {
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string("scoped_locals.json").unwrap()).unwrap();
+    let ast_data = solidity_language_server::solc::normalize_solc_output(raw, None);
+    build_completion_cache(ast_data.get("sources").unwrap(), None, None)
+}
+
+/// Position just after the `.` of the first `needle` (which must end in `.`).
+fn position_after(text: &str, needle: &str) -> Position {
+    let offset = text.find(needle).expect("needle in text") + needle.len();
+    let before = &text[..offset];
+    let line = before.matches('\n').count() as u32;
+    let character = (offset - before.rfind('\n').map_or(0, |i| i + 1)) as u32;
+    Position { line, character }
+}
+
+fn scoped_dot_labels(
+    cache: &solidity_language_server::completion::CompletionCache,
+    live: &str,
+    compiled: Option<&str>,
+    needle: &str,
+) -> Vec<String> {
+    response_labels(
+        solidity_language_server::completion::handle_completion_with_tail_candidates(
+            Some(cache),
+            live,
+            position_after(live, needle),
+            Some("."),
+            Some(FileId(0)),
+            compiled,
+            vec![],
+        ),
+    )
+}
+
+#[test]
+fn test_for_init_variable_resolves_in_its_for_scope() {
+    // `item` in `for (Inner memory item = ...)` is scoped to the ForStatement.
+    // The state variable `Outer item` must not win.
+    let cache = load_scoped_locals_cache();
+    let labels = scoped_dot_labels(&cache, SCOPED_LOCALS_SRC, None, "sum += item.");
+    assert!(labels.contains(&"innerField".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"outerField".to_string()), "{labels:?}");
+}
+
+#[test]
+fn test_try_returns_variable_resolves_in_its_clause_scope() {
+    // `got` in `try ... returns (Inner memory got)` is scoped to the TryCatchClause.
+    let cache = load_scoped_locals_cache();
+    let labels = scoped_dot_labels(&cache, SCOPED_LOCALS_SRC, None, "out = got.");
+    assert!(labels.contains(&"innerField".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"outerField".to_string()), "{labels:?}");
+}
+
+#[test]
+fn test_scope_lookup_survives_unsaved_lines_above_cursor() {
+    // The cache was built from SCOPED_LOCALS_SRC; the buffer now has a new,
+    // not-yet-compiled function above `loop`. The cursor's live offset is past
+    // the end of the for statement in the compiled text, so it has to be mapped
+    // back before the scope lookup.
+    let cache = load_scoped_locals_cache();
+    let padding = "    function added() external pure returns (uint256 total) {\n        total = 1;\n    }\n\n".repeat(3);
+    let live = SCOPED_LOCALS_SRC.replacen(
+        "    function loop(",
+        &format!("{padding}    function loop("),
+        1,
+    );
+
+    let unmapped = scoped_dot_labels(&cache, &live, None, "sum += item.");
+    assert!(
+        !unmapped.contains(&"innerField".to_string()),
+        "fixture no longer exercises the drift: {unmapped:?}"
+    );
+
+    let mapped = scoped_dot_labels(&cache, &live, Some(SCOPED_LOCALS_SRC), "sum += item.");
+    assert!(mapped.contains(&"innerField".to_string()), "{mapped:?}");
+    assert!(!mapped.contains(&"outerField".to_string()), "{mapped:?}");
+}
+
+#[test]
+fn test_map_live_offset_to_compiled() {
+    use solidity_language_server::completion::map_live_offset_to_compiled as map;
+    let compiled = "aaaa{bbbb}cccc";
+    // Identical text: identity.
+    assert_eq!(map(compiled, compiled, 7), 7);
+    // Insertion of "XYZ" at 2: before is unchanged, after shifts back by 3.
+    let live = "aaXYZaa{bbbb}cccc";
+    assert_eq!(map(live, compiled, 1), 1);
+    assert_eq!(map(live, compiled, 10), 7);
+    assert_eq!(map(live, compiled, live.len()), compiled.len());
+    // Cursor at the end of freshly typed text maps to where that text was inserted.
+    let live = "aaaa{bbbb.}cccc";
+    assert_eq!(map(live, compiled, 10), 9);
+    // Deletion: offsets after it shift forward.
+    let live = "aaaa{}cccc";
+    assert_eq!(map(live, compiled, 6), 10);
+}

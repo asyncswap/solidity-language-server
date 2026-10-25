@@ -55,6 +55,7 @@ pub const CHILD_KEYS: &[&str] = &[
     "baseType",
     "block",
     "body",
+    "clauses",
     "components",
     "condition",
     "declarations",

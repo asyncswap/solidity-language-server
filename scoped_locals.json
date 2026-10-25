@@ -1,0 +1,929 @@
+{
+  "sources": {
+    "ScopedLocals.sol": {
+      "ast": {
+        "absolutePath": "ScopedLocals.sol",
+        "exportedSymbols": {
+          "ISource": [
+            14
+          ],
+          "Inner": [
+            4
+          ],
+          "Outer": [
+            7
+          ],
+          "ScopedLocals": [
+            77
+          ]
+        },
+        "id": 78,
+        "license": "MIT",
+        "nodeType": "SourceUnit",
+        "nodes": [
+          {
+            "id": 1,
+            "literals": [
+              "solidity",
+              "^",
+              "0.8",
+              ".0"
+            ],
+            "nodeType": "PragmaDirective",
+            "src": "32:23:0"
+          },
+          {
+            "canonicalName": "Inner",
+            "id": 4,
+            "members": [
+              {
+                "constant": false,
+                "id": 3,
+                "mutability": "mutable",
+                "name": "innerField",
+                "nameLocation": "84:10:0",
+                "nodeType": "VariableDeclaration",
+                "scope": 4,
+                "src": "76:18:0",
+                "stateVariable": false,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_uint256",
+                  "typeString": "uint256"
+                },
+                "typeName": {
+                  "id": 2,
+                  "name": "uint256",
+                  "nodeType": "ElementaryTypeName",
+                  "src": "76:7:0",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_uint256",
+                    "typeString": "uint256"
+                  }
+                },
+                "visibility": "internal"
+              }
+            ],
+            "name": "Inner",
+            "nameLocation": "64:5:0",
+            "nodeType": "StructDefinition",
+            "scope": 78,
+            "src": "57:40:0",
+            "visibility": "public"
+          },
+          {
+            "canonicalName": "Outer",
+            "id": 7,
+            "members": [
+              {
+                "constant": false,
+                "id": 6,
+                "mutability": "mutable",
+                "name": "outerField",
+                "nameLocation": "126:10:0",
+                "nodeType": "VariableDeclaration",
+                "scope": 7,
+                "src": "118:18:0",
+                "stateVariable": false,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_uint256",
+                  "typeString": "uint256"
+                },
+                "typeName": {
+                  "id": 5,
+                  "name": "uint256",
+                  "nodeType": "ElementaryTypeName",
+                  "src": "118:7:0",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_uint256",
+                    "typeString": "uint256"
+                  }
+                },
+                "visibility": "internal"
+              }
+            ],
+            "name": "Outer",
+            "nameLocation": "106:5:0",
+            "nodeType": "StructDefinition",
+            "scope": 78,
+            "src": "99:40:0",
+            "visibility": "public"
+          },
+          {
+            "abstract": false,
+            "baseContracts": [],
+            "canonicalName": "ISource",
+            "contractDependencies": [],
+            "contractKind": "interface",
+            "fullyImplemented": false,
+            "id": 14,
+            "linearizedBaseContracts": [
+              14
+            ],
+            "name": "ISource",
+            "nameLocation": "151:7:0",
+            "nodeType": "ContractDefinition",
+            "nodes": [
+              {
+                "functionSelector": "a95c372d",
+                "id": 13,
+                "implemented": false,
+                "kind": "function",
+                "modifiers": [],
+                "name": "fetch",
+                "nameLocation": "174:5:0",
+                "nodeType": "FunctionDefinition",
+                "parameters": {
+                  "id": 8,
+                  "nodeType": "ParameterList",
+                  "parameters": [],
+                  "src": "179:2:0"
+                },
+                "returnParameters": {
+                  "id": 12,
+                  "nodeType": "ParameterList",
+                  "parameters": [
+                    {
+                      "constant": false,
+                      "id": 11,
+                      "mutability": "mutable",
+                      "name": "",
+                      "nameLocation": "-1:-1:-1",
+                      "nodeType": "VariableDeclaration",
+                      "scope": 13,
+                      "src": "200:12:0",
+                      "stateVariable": false,
+                      "storageLocation": "memory",
+                      "typeDescriptions": {
+                        "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                        "typeString": "struct Inner"
+                      },
+                      "typeName": {
+                        "id": 10,
+                        "nodeType": "UserDefinedTypeName",
+                        "pathNode": {
+                          "id": 9,
+                          "name": "Inner",
+                          "nameLocations": [
+                            "200:5:0"
+                          ],
+                          "nodeType": "IdentifierPath",
+                          "referencedDeclaration": 4,
+                          "src": "200:5:0"
+                        },
+                        "referencedDeclaration": 4,
+                        "src": "200:5:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_struct$_Inner_$4_storage_ptr",
+                          "typeString": "struct Inner"
+                        }
+                      },
+                      "visibility": "internal"
+                    }
+                  ],
+                  "src": "199:14:0"
+                },
+                "scope": 14,
+                "src": "165:49:0",
+                "stateMutability": "nonpayable",
+                "virtual": false,
+                "visibility": "external"
+              }
+            ],
+            "scope": 78,
+            "src": "141:75:0",
+            "usedErrors": [],
+            "usedEvents": []
+          },
+          {
+            "abstract": false,
+            "baseContracts": [],
+            "canonicalName": "ScopedLocals",
+            "contractDependencies": [],
+            "contractKind": "contract",
+            "fullyImplemented": true,
+            "id": 77,
+            "linearizedBaseContracts": [
+              77
+            ],
+            "name": "ScopedLocals",
+            "nameLocation": "227:12:0",
+            "nodeType": "ContractDefinition",
+            "nodes": [
+              {
+                "constant": false,
+                "id": 17,
+                "mutability": "mutable",
+                "name": "item",
+                "nameLocation": "401:4:0",
+                "nodeType": "VariableDeclaration",
+                "scope": 77,
+                "src": "395:10:0",
+                "stateVariable": true,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_struct$_Outer_$7_storage",
+                  "typeString": "struct Outer"
+                },
+                "typeName": {
+                  "id": 16,
+                  "nodeType": "UserDefinedTypeName",
+                  "pathNode": {
+                    "id": 15,
+                    "name": "Outer",
+                    "nameLocations": [
+                      "395:5:0"
+                    ],
+                    "nodeType": "IdentifierPath",
+                    "referencedDeclaration": 7,
+                    "src": "395:5:0"
+                  },
+                  "referencedDeclaration": 7,
+                  "src": "395:5:0",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_struct$_Outer_$7_storage_ptr",
+                    "typeString": "struct Outer"
+                  }
+                },
+                "visibility": "internal"
+              },
+              {
+                "constant": false,
+                "id": 20,
+                "mutability": "mutable",
+                "name": "got",
+                "nameLocation": "417:3:0",
+                "nodeType": "VariableDeclaration",
+                "scope": 77,
+                "src": "411:9:0",
+                "stateVariable": true,
+                "storageLocation": "default",
+                "typeDescriptions": {
+                  "typeIdentifier": "t_struct$_Outer_$7_storage",
+                  "typeString": "struct Outer"
+                },
+                "typeName": {
+                  "id": 19,
+                  "nodeType": "UserDefinedTypeName",
+                  "pathNode": {
+                    "id": 18,
+                    "name": "Outer",
+                    "nameLocations": [
+                      "411:5:0"
+                    ],
+                    "nodeType": "IdentifierPath",
+                    "referencedDeclaration": 7,
+                    "src": "411:5:0"
+                  },
+                  "referencedDeclaration": 7,
+                  "src": "411:5:0",
+                  "typeDescriptions": {
+                    "typeIdentifier": "t_struct$_Outer_$7_storage_ptr",
+                    "typeString": "struct Outer"
+                  }
+                },
+                "visibility": "internal"
+              },
+              {
+                "body": {
+                  "id": 49,
+                  "nodeType": "Block",
+                  "src": "499:114:0",
+                  "statements": [
+                    {
+                      "body": {
+                        "id": 47,
+                        "nodeType": "Block",
+                        "src": "560:47:0",
+                        "statements": [
+                          {
+                            "expression": {
+                              "id": 45,
+                              "isConstant": false,
+                              "isLValue": false,
+                              "isPure": false,
+                              "lValueRequested": false,
+                              "leftHandSide": {
+                                "id": 42,
+                                "name": "sum",
+                                "nodeType": "Identifier",
+                                "overloadedDeclarations": [],
+                                "referencedDeclaration": 27,
+                                "src": "574:3:0",
+                                "typeDescriptions": {
+                                  "typeIdentifier": "t_uint256",
+                                  "typeString": "uint256"
+                                }
+                              },
+                              "nodeType": "Assignment",
+                              "operator": "+=",
+                              "rightHandSide": {
+                                "expression": {
+                                  "id": 43,
+                                  "name": "item",
+                                  "nodeType": "Identifier",
+                                  "overloadedDeclarations": [],
+                                  "referencedDeclaration": 31,
+                                  "src": "581:4:0",
+                                  "typeDescriptions": {
+                                    "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                                    "typeString": "struct Inner memory"
+                                  }
+                                },
+                                "id": 44,
+                                "isConstant": false,
+                                "isLValue": true,
+                                "isPure": false,
+                                "lValueRequested": false,
+                                "memberLocation": "586:10:0",
+                                "memberName": "innerField",
+                                "nodeType": "MemberAccess",
+                                "referencedDeclaration": 3,
+                                "src": "581:15:0",
+                                "typeDescriptions": {
+                                  "typeIdentifier": "t_uint256",
+                                  "typeString": "uint256"
+                                }
+                              },
+                              "src": "574:22:0",
+                              "typeDescriptions": {
+                                "typeIdentifier": "t_uint256",
+                                "typeString": "uint256"
+                              }
+                            },
+                            "id": 46,
+                            "nodeType": "ExpressionStatement",
+                            "src": "574:22:0"
+                          }
+                        ]
+                      },
+                      "condition": {
+                        "commonType": {
+                          "typeIdentifier": "t_uint256",
+                          "typeString": "uint256"
+                        },
+                        "id": 38,
+                        "isConstant": false,
+                        "isLValue": false,
+                        "isPure": false,
+                        "lValueRequested": false,
+                        "leftExpression": {
+                          "id": 36,
+                          "name": "sum",
+                          "nodeType": "Identifier",
+                          "overloadedDeclarations": [],
+                          "referencedDeclaration": 27,
+                          "src": "544:3:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_uint256",
+                            "typeString": "uint256"
+                          }
+                        },
+                        "nodeType": "BinaryOperation",
+                        "operator": "<",
+                        "rightExpression": {
+                          "hexValue": "33",
+                          "id": 37,
+                          "isConstant": false,
+                          "isLValue": false,
+                          "isPure": true,
+                          "kind": "number",
+                          "lValueRequested": false,
+                          "nodeType": "Literal",
+                          "src": "550:1:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_rational_3_by_1",
+                            "typeString": "int_const 3"
+                          },
+                          "value": "3"
+                        },
+                        "src": "544:7:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_bool",
+                          "typeString": "bool"
+                        }
+                      },
+                      "id": 48,
+                      "initializationExpression": {
+                        "assignments": [
+                          31
+                        ],
+                        "declarations": [
+                          {
+                            "constant": false,
+                            "id": 31,
+                            "mutability": "mutable",
+                            "name": "item",
+                            "nameLocation": "527:4:0",
+                            "nodeType": "VariableDeclaration",
+                            "scope": 48,
+                            "src": "514:17:0",
+                            "stateVariable": false,
+                            "storageLocation": "memory",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                              "typeString": "struct Inner"
+                            },
+                            "typeName": {
+                              "id": 30,
+                              "nodeType": "UserDefinedTypeName",
+                              "pathNode": {
+                                "id": 29,
+                                "name": "Inner",
+                                "nameLocations": [
+                                  "514:5:0"
+                                ],
+                                "nodeType": "IdentifierPath",
+                                "referencedDeclaration": 4,
+                                "src": "514:5:0"
+                              },
+                              "referencedDeclaration": 4,
+                              "src": "514:5:0",
+                              "typeDescriptions": {
+                                "typeIdentifier": "t_struct$_Inner_$4_storage_ptr",
+                                "typeString": "struct Inner"
+                              }
+                            },
+                            "visibility": "internal"
+                          }
+                        ],
+                        "id": 35,
+                        "initialValue": {
+                          "baseExpression": {
+                            "id": 32,
+                            "name": "items",
+                            "nodeType": "Identifier",
+                            "overloadedDeclarations": [],
+                            "referencedDeclaration": 24,
+                            "src": "534:5:0",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_array$_t_struct$_Inner_$4_memory_ptr_$dyn_memory_ptr",
+                              "typeString": "struct Inner memory[] memory"
+                            }
+                          },
+                          "id": 34,
+                          "indexExpression": {
+                            "hexValue": "30",
+                            "id": 33,
+                            "isConstant": false,
+                            "isLValue": false,
+                            "isPure": true,
+                            "kind": "number",
+                            "lValueRequested": false,
+                            "nodeType": "Literal",
+                            "src": "540:1:0",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_rational_0_by_1",
+                              "typeString": "int_const 0"
+                            },
+                            "value": "0"
+                          },
+                          "isConstant": false,
+                          "isLValue": true,
+                          "isPure": false,
+                          "lValueRequested": false,
+                          "nodeType": "IndexAccess",
+                          "src": "534:8:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                            "typeString": "struct Inner memory"
+                          }
+                        },
+                        "nodeType": "VariableDeclarationStatement",
+                        "src": "514:28:0"
+                      },
+                      "isSimpleCounterLoop": false,
+                      "loopExpression": {
+                        "expression": {
+                          "id": 40,
+                          "isConstant": false,
+                          "isLValue": false,
+                          "isPure": false,
+                          "lValueRequested": false,
+                          "nodeType": "UnaryOperation",
+                          "operator": "++",
+                          "prefix": false,
+                          "src": "553:5:0",
+                          "subExpression": {
+                            "id": 39,
+                            "name": "sum",
+                            "nodeType": "Identifier",
+                            "overloadedDeclarations": [],
+                            "referencedDeclaration": 27,
+                            "src": "553:3:0",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_uint256",
+                              "typeString": "uint256"
+                            }
+                          },
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_uint256",
+                            "typeString": "uint256"
+                          }
+                        },
+                        "id": 41,
+                        "nodeType": "ExpressionStatement",
+                        "src": "553:5:0"
+                      },
+                      "nodeType": "ForStatement",
+                      "src": "509:98:0"
+                    }
+                  ]
+                },
+                "functionSelector": "7b1fc13a",
+                "id": 50,
+                "implemented": true,
+                "kind": "function",
+                "modifiers": [],
+                "name": "loop",
+                "nameLocation": "436:4:0",
+                "nodeType": "FunctionDefinition",
+                "parameters": {
+                  "id": 25,
+                  "nodeType": "ParameterList",
+                  "parameters": [
+                    {
+                      "constant": false,
+                      "id": 24,
+                      "mutability": "mutable",
+                      "name": "items",
+                      "nameLocation": "456:5:0",
+                      "nodeType": "VariableDeclaration",
+                      "scope": 50,
+                      "src": "441:20:0",
+                      "stateVariable": false,
+                      "storageLocation": "memory",
+                      "typeDescriptions": {
+                        "typeIdentifier": "t_array$_t_struct$_Inner_$4_memory_ptr_$dyn_memory_ptr",
+                        "typeString": "struct Inner[]"
+                      },
+                      "typeName": {
+                        "baseType": {
+                          "id": 22,
+                          "nodeType": "UserDefinedTypeName",
+                          "pathNode": {
+                            "id": 21,
+                            "name": "Inner",
+                            "nameLocations": [
+                              "441:5:0"
+                            ],
+                            "nodeType": "IdentifierPath",
+                            "referencedDeclaration": 4,
+                            "src": "441:5:0"
+                          },
+                          "referencedDeclaration": 4,
+                          "src": "441:5:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_struct$_Inner_$4_storage_ptr",
+                            "typeString": "struct Inner"
+                          }
+                        },
+                        "id": 23,
+                        "nodeType": "ArrayTypeName",
+                        "src": "441:7:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_array$_t_struct$_Inner_$4_storage_$dyn_storage_ptr",
+                          "typeString": "struct Inner[]"
+                        }
+                      },
+                      "visibility": "internal"
+                    }
+                  ],
+                  "src": "440:22:0"
+                },
+                "returnParameters": {
+                  "id": 28,
+                  "nodeType": "ParameterList",
+                  "parameters": [
+                    {
+                      "constant": false,
+                      "id": 27,
+                      "mutability": "mutable",
+                      "name": "sum",
+                      "nameLocation": "494:3:0",
+                      "nodeType": "VariableDeclaration",
+                      "scope": 50,
+                      "src": "486:11:0",
+                      "stateVariable": false,
+                      "storageLocation": "default",
+                      "typeDescriptions": {
+                        "typeIdentifier": "t_uint256",
+                        "typeString": "uint256"
+                      },
+                      "typeName": {
+                        "id": 26,
+                        "name": "uint256",
+                        "nodeType": "ElementaryTypeName",
+                        "src": "486:7:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_uint256",
+                          "typeString": "uint256"
+                        }
+                      },
+                      "visibility": "internal"
+                    }
+                  ],
+                  "src": "485:13:0"
+                },
+                "scope": 77,
+                "src": "427:186:0",
+                "stateMutability": "pure",
+                "virtual": false,
+                "visibility": "external"
+              },
+              {
+                "body": {
+                  "id": 75,
+                  "nodeType": "Block",
+                  "src": "680:113:0",
+                  "statements": [
+                    {
+                      "clauses": [
+                        {
+                          "block": {
+                            "id": 70,
+                            "nodeType": "Block",
+                            "src": "733:45:0",
+                            "statements": [
+                              {
+                                "expression": {
+                                  "id": 68,
+                                  "isConstant": false,
+                                  "isLValue": false,
+                                  "isPure": false,
+                                  "lValueRequested": false,
+                                  "leftHandSide": {
+                                    "id": 65,
+                                    "name": "out",
+                                    "nodeType": "Identifier",
+                                    "overloadedDeclarations": [],
+                                    "referencedDeclaration": 56,
+                                    "src": "747:3:0",
+                                    "typeDescriptions": {
+                                      "typeIdentifier": "t_uint256",
+                                      "typeString": "uint256"
+                                    }
+                                  },
+                                  "nodeType": "Assignment",
+                                  "operator": "=",
+                                  "rightHandSide": {
+                                    "expression": {
+                                      "id": 66,
+                                      "name": "got",
+                                      "nodeType": "Identifier",
+                                      "overloadedDeclarations": [],
+                                      "referencedDeclaration": 63,
+                                      "src": "753:3:0",
+                                      "typeDescriptions": {
+                                        "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                                        "typeString": "struct Inner memory"
+                                      }
+                                    },
+                                    "id": 67,
+                                    "isConstant": false,
+                                    "isLValue": true,
+                                    "isPure": false,
+                                    "lValueRequested": false,
+                                    "memberLocation": "757:10:0",
+                                    "memberName": "innerField",
+                                    "nodeType": "MemberAccess",
+                                    "referencedDeclaration": 3,
+                                    "src": "753:14:0",
+                                    "typeDescriptions": {
+                                      "typeIdentifier": "t_uint256",
+                                      "typeString": "uint256"
+                                    }
+                                  },
+                                  "src": "747:20:0",
+                                  "typeDescriptions": {
+                                    "typeIdentifier": "t_uint256",
+                                    "typeString": "uint256"
+                                  }
+                                },
+                                "id": 69,
+                                "nodeType": "ExpressionStatement",
+                                "src": "747:20:0"
+                              }
+                            ]
+                          },
+                          "errorName": "",
+                          "id": 71,
+                          "nodeType": "TryCatchClause",
+                          "parameters": {
+                            "id": 64,
+                            "nodeType": "ParameterList",
+                            "parameters": [
+                              {
+                                "constant": false,
+                                "id": 63,
+                                "mutability": "mutable",
+                                "name": "got",
+                                "nameLocation": "728:3:0",
+                                "nodeType": "VariableDeclaration",
+                                "scope": 71,
+                                "src": "715:16:0",
+                                "stateVariable": false,
+                                "storageLocation": "memory",
+                                "typeDescriptions": {
+                                  "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                                  "typeString": "struct Inner"
+                                },
+                                "typeName": {
+                                  "id": 62,
+                                  "nodeType": "UserDefinedTypeName",
+                                  "pathNode": {
+                                    "id": 61,
+                                    "name": "Inner",
+                                    "nameLocations": [
+                                      "715:5:0"
+                                    ],
+                                    "nodeType": "IdentifierPath",
+                                    "referencedDeclaration": 4,
+                                    "src": "715:5:0"
+                                  },
+                                  "referencedDeclaration": 4,
+                                  "src": "715:5:0",
+                                  "typeDescriptions": {
+                                    "typeIdentifier": "t_struct$_Inner_$4_storage_ptr",
+                                    "typeString": "struct Inner"
+                                  }
+                                },
+                                "visibility": "internal"
+                              }
+                            ],
+                            "src": "714:18:0"
+                          },
+                          "src": "706:72:0"
+                        },
+                        {
+                          "block": {
+                            "id": 72,
+                            "nodeType": "Block",
+                            "src": "785:2:0",
+                            "statements": []
+                          },
+                          "errorName": "",
+                          "id": 73,
+                          "nodeType": "TryCatchClause",
+                          "src": "779:8:0"
+                        }
+                      ],
+                      "externalCall": {
+                        "arguments": [],
+                        "expression": {
+                          "argumentTypes": [],
+                          "expression": {
+                            "id": 58,
+                            "name": "src",
+                            "nodeType": "Identifier",
+                            "overloadedDeclarations": [],
+                            "referencedDeclaration": 53,
+                            "src": "694:3:0",
+                            "typeDescriptions": {
+                              "typeIdentifier": "t_contract$_ISource_$14",
+                              "typeString": "contract ISource"
+                            }
+                          },
+                          "id": 59,
+                          "isConstant": false,
+                          "isLValue": false,
+                          "isPure": false,
+                          "lValueRequested": false,
+                          "memberLocation": "698:5:0",
+                          "memberName": "fetch",
+                          "nodeType": "MemberAccess",
+                          "referencedDeclaration": 13,
+                          "src": "694:9:0",
+                          "typeDescriptions": {
+                            "typeIdentifier": "t_function_external_nonpayable$__$returns$_t_struct$_Inner_$4_memory_ptr_$",
+                            "typeString": "function () external returns (struct Inner memory)"
+                          }
+                        },
+                        "id": 60,
+                        "isConstant": false,
+                        "isLValue": false,
+                        "isPure": false,
+                        "kind": "functionCall",
+                        "lValueRequested": false,
+                        "nameLocations": [],
+                        "names": [],
+                        "nodeType": "FunctionCall",
+                        "src": "694:11:0",
+                        "tryCall": true,
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_struct$_Inner_$4_memory_ptr",
+                          "typeString": "struct Inner memory"
+                        }
+                      },
+                      "id": 74,
+                      "nodeType": "TryStatement",
+                      "src": "690:97:0"
+                    }
+                  ]
+                },
+                "functionSelector": "0b41e37f",
+                "id": 76,
+                "implemented": true,
+                "kind": "function",
+                "modifiers": [],
+                "name": "attempt",
+                "nameLocation": "628:7:0",
+                "nodeType": "FunctionDefinition",
+                "parameters": {
+                  "id": 54,
+                  "nodeType": "ParameterList",
+                  "parameters": [
+                    {
+                      "constant": false,
+                      "id": 53,
+                      "mutability": "mutable",
+                      "name": "src",
+                      "nameLocation": "644:3:0",
+                      "nodeType": "VariableDeclaration",
+                      "scope": 76,
+                      "src": "636:11:0",
+                      "stateVariable": false,
+                      "storageLocation": "default",
+                      "typeDescriptions": {
+                        "typeIdentifier": "t_contract$_ISource_$14",
+                        "typeString": "contract ISource"
+                      },
+                      "typeName": {
+                        "id": 52,
+                        "nodeType": "UserDefinedTypeName",
+                        "pathNode": {
+                          "id": 51,
+                          "name": "ISource",
+                          "nameLocations": [
+                            "636:7:0"
+                          ],
+                          "nodeType": "IdentifierPath",
+                          "referencedDeclaration": 14,
+                          "src": "636:7:0"
+                        },
+                        "referencedDeclaration": 14,
+                        "src": "636:7:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_contract$_ISource_$14",
+                          "typeString": "contract ISource"
+                        }
+                      },
+                      "visibility": "internal"
+                    }
+                  ],
+                  "src": "635:13:0"
+                },
+                "returnParameters": {
+                  "id": 57,
+                  "nodeType": "ParameterList",
+                  "parameters": [
+                    {
+                      "constant": false,
+                      "id": 56,
+                      "mutability": "mutable",
+                      "name": "out",
+                      "nameLocation": "675:3:0",
+                      "nodeType": "VariableDeclaration",
+                      "scope": 76,
+                      "src": "667:11:0",
+                      "stateVariable": false,
+                      "storageLocation": "default",
+                      "typeDescriptions": {
+                        "typeIdentifier": "t_uint256",
+                        "typeString": "uint256"
+                      },
+                      "typeName": {
+                        "id": 55,
+                        "name": "uint256",
+                        "nodeType": "ElementaryTypeName",
+                        "src": "667:7:0",
+                        "typeDescriptions": {
+                          "typeIdentifier": "t_uint256",
+                          "typeString": "uint256"
+                        }
+                      },
+                      "visibility": "internal"
+                    }
+                  ],
+                  "src": "666:13:0"
+                },
+                "scope": 77,
+                "src": "619:174:0",
+                "stateMutability": "nonpayable",
+                "virtual": false,
+                "visibility": "external"
+              }
+            ],
+            "scope": 78,
+            "src": "218:577:0",
+            "usedErrors": [],
+            "usedEvents": []
+          }
+        ],
+        "src": "32:764:0"
+      },
+      "id": 0
+    }
+  }
+}
