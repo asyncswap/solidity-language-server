@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::Path;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, CompletionTextEdit,
@@ -34,6 +35,12 @@ pub struct ScopedDeclaration {
     /// `visibility: private`. Private members are not visible in derived
     /// contracts, so lookups through `linearized_base_contracts` skip them.
     pub is_private: bool,
+    /// typeString, shown as the completion item's detail (e.g. "uint256").
+    pub type_string: Option<String>,
+    /// Byte offset of a local declared inside a block, `for` header, or
+    /// `try`/`catch` clause. Such a local is only visible after this point;
+    /// `None` for parameters, state variables, and functions.
+    pub declared_at: Option<usize>,
 }
 
 /// A byte range identifying a scope-creating AST node.
@@ -87,6 +94,14 @@ pub struct CompletionCache {
     /// Pre-built general completions (AST names + keywords + globals + units).
     /// Built once, returned by reference on every non-dot completion request.
     pub general_completions: Vec<CompletionItem>,
+
+    /// Labels in `general_completions`, so scoped parameters and locals can be
+    /// deduplicated against it without rehashing the list on every request.
+    pub general_labels: HashSet<String>,
+
+    /// Parameters and locals as flat items (first declaration per name). Offered
+    /// only when the cursor's scope cannot be resolved, e.g. no file id.
+    pub unscoped_variables: Vec<CompletionItem>,
 
     /// scope node_id → declarations in that scope.
     /// Each scope (Block, FunctionDefinition, ContractDefinition, SourceUnit)
@@ -427,10 +442,14 @@ pub fn build_completion_cache(
         HashMap::with_capacity(est_contracts);
     let mut top_level_importables_by_file: HashMap<RelPath, Vec<TopLevelImportable>> =
         HashMap::with_capacity(est_names);
-    // SourceUnit and ContractDefinition ids. A variable whose scope is one of
-    // these is a file-level or state variable. Parameters, locals, struct
-    // fields, and event/error parameters use some other scope.
-    let mut bare_var_scopes: HashSet<NodeId> = HashSet::new();
+    // Node type of every scope a variable can declare into, recorded as the
+    // walk reaches it (always before the declarations it contains). It tells a
+    // file-level or state variable (SourceUnit/ContractDefinition scope) from
+    // a parameter (function/modifier) or a local (block, `for`, `try` clause).
+    // Struct fields and event/error parameters have scopes not recorded here.
+    let mut var_scope_kinds: HashMap<NodeId, &str> = HashMap::new();
+    let mut unscoped_variables: Vec<CompletionItem> = Vec::new();
+    let mut seen_unscoped: HashSet<String> = HashSet::new();
 
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
@@ -525,6 +544,12 @@ pub fn build_completion_cache(
                                 type_id: tid.to_string(),
                                 is_private: tree.get("visibility").and_then(|v| v.as_str())
                                     == Some("private"),
+                                type_string: type_string_of(tree),
+                                declared_at: var_scope_kinds
+                                    .get(&NodeId(scope_raw))
+                                    .filter(|k| is_statement_scope(k))
+                                    .and(parse_src(tree))
+                                    .map(|loc| loc.offset),
                             });
                     }
 
@@ -545,13 +570,21 @@ pub fn build_completion_cache(
                                 type_id: tid.to_string(),
                                 is_private: tree.get("visibility").and_then(|v| v.as_str())
                                     == Some("private"),
+                                type_string: type_string_of(tree),
+                                declared_at: None,
                             });
                     }
 
-                    if matches!(node_type, "SourceUnit" | "ContractDefinition")
+                    if (matches!(
+                        node_type,
+                        "SourceUnit"
+                            | "ContractDefinition"
+                            | "FunctionDefinition"
+                            | "ModifierDefinition"
+                    ) || is_statement_scope(node_type))
                         && let Some(id) = node_id
                     {
-                        bare_var_scopes.insert(id);
+                        var_scope_kinds.insert(id, node_type);
                     }
 
                     // Only declarations that can be written as bare names belong in
@@ -559,12 +592,32 @@ pub fn build_completion_cache(
                     // uses. Struct fields, function and event parameters, and
                     // locals are not global names; parameters and locals are added
                     // back at request time when the cursor is in their scope.
-                    let is_hidden_variable = node_type == "VariableDeclaration"
-                        && tree
-                            .get("scope")
+                    let var_scope_kind = if node_type == "VariableDeclaration" {
+                        tree.get("scope")
                             .and_then(|v| v.as_i64())
-                            .map(NodeId)
-                            .is_some_and(|scope| !bare_var_scopes.contains(&scope));
+                            .map(|scope| var_scope_kinds.get(&NodeId(scope)).copied())
+                    } else {
+                        None
+                    };
+                    let is_hidden_variable = var_scope_kind.is_some_and(|kind| {
+                        !matches!(kind, Some("SourceUnit" | "ContractDefinition"))
+                    });
+
+                    // Parameters and locals, kept as a flat fallback for requests
+                    // whose scope cannot be resolved.
+                    if !name.is_empty()
+                        && var_scope_kind.flatten().is_some_and(|kind| {
+                            !matches!(kind, "SourceUnit" | "ContractDefinition")
+                        })
+                        && seen_unscoped.insert(name.to_string())
+                    {
+                        unscoped_variables.push(CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: type_string_of(tree),
+                            ..Default::default()
+                        });
+                    }
                     let is_bare_name_decl = matches!(
                         node_type,
                         "ContractDefinition"
@@ -591,11 +644,6 @@ pub fn build_completion_cache(
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
 
-                        let type_id = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeIdentifier"))
-                            .and_then(|v| v.as_str());
-
                         let kind = node_type_to_completion_kind(node_type);
 
                         let item = CompletionItem {
@@ -608,10 +656,42 @@ pub fn build_completion_cache(
                         let idx = names.len();
                         names.push(item);
                         seen_names.insert(SymbolName::new(name), idx);
+                    }
 
-                        // Store name → typeIdentifier mapping
-                        if let Some(tid) = type_id {
-                            name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
+                    // name → typeIdentifier for every named node, including the
+                    // struct fields, parameters, and locals left out of `names`:
+                    // chain resolution looks member types up here (`a.field.`),
+                    // and it is the fallback when the cursor's scope is unknown.
+                    if !name.is_empty()
+                        && !name_to_type.contains_key(name)
+                        && let Some(tid) = tree
+                            .get("typeDescriptions")
+                            .and_then(|td| td.get("typeIdentifier"))
+                            .and_then(|v| v.as_str())
+                    {
+                        name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
+                    }
+
+                    // Import aliases (`import {Test as MyTest}`, `import "x" as X`)
+                    // are only named on uses, which `names` no longer collects.
+                    if node_type == "ImportDirective" {
+                        let symbol_aliases = tree
+                            .get("symbolAliases")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|a| a.get("local").and_then(|v| v.as_str()));
+                        let unit_alias = tree.get("unitAlias").and_then(|v| v.as_str());
+                        for alias in symbol_aliases.chain(unit_alias) {
+                            if alias.is_empty() || seen_names.contains_key(alias) {
+                                continue;
+                            }
+                            seen_names.insert(SymbolName::new(alias), names.len());
+                            names.push(CompletionItem {
+                                label: alias.to_string(),
+                                kind: Some(CompletionItemKind::MODULE),
+                                ..Default::default()
+                            });
                         }
                     }
 
@@ -963,6 +1043,10 @@ pub fn build_completion_cache(
     // Pre-build the general completions list (names + statics) once
     let mut general_completions = names.clone();
     general_completions.extend(get_static_completions());
+    let general_labels: HashSet<String> = general_completions
+        .iter()
+        .map(|item| item.label.clone())
+        .collect();
 
     // Sort scope_ranges by span size ascending (smallest first) for innermost-scope lookup
     scope_ranges.sort_by_key(|r| r.end - r.start);
@@ -1016,6 +1100,8 @@ pub fn build_completion_cache(
         using_for,
         using_for_wildcard,
         general_completions,
+        general_labels,
+        unscoped_variables,
         scope_declarations,
         scope_parent,
         scope_ranges,
@@ -1026,6 +1112,21 @@ pub fn build_completion_cache(
         top_level_importables_by_name,
         top_level_importables_by_file,
     }
+}
+
+/// Scopes whose variables are locals: visible only after their declaration.
+fn is_statement_scope(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "Block" | "UncheckedBlock" | "ForStatement" | "TryCatchClause"
+    )
+}
+
+fn type_string_of(node: &Value) -> Option<String> {
+    node.get("typeDescriptions")
+        .and_then(|td| td.get("typeString"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Magic type member definitions (msg, block, tx, abi, address).
@@ -1600,50 +1701,80 @@ pub fn map_live_offset_to_compiled(live: &str, compiled: &str, pos: usize) -> us
     shifted.clamp(prefix, c.len() - suffix)
 }
 
-/// Add parameters and locals declared in the scopes that enclose `ctx`.
+/// Add the parameters and locals visible at the cursor.
 ///
 /// These names are omitted from the flat general list, so a parameter like
 /// `startAt` on another function or event does not show up everywhere.
 /// Struct fields and event parameters stay out: their scopes are not on this chain.
-fn append_scoped_variables(cache: &CompletionCache, items: &mut Vec<CompletionItem>, ctx: &ScopeContext) {
-    let Some(mut current) = find_innermost_scope(cache, ctx.byte_pos, ctx.file_id) else {
-        return;
-    };
-    let mut seen: std::collections::HashSet<String> =
-        items.iter().map(|item| item.label.clone()).collect();
-
-    for _ in 0..64 {
-        push_scope_variables(cache, current, items, &mut seen);
-        if let Some(bases) = cache.linearized_base_contracts.get(&current) {
-            for &base_id in bases.iter().skip(1) {
-                push_scope_variables(cache, base_id, items, &mut seen);
+/// Without a resolvable scope, every parameter and local is offered instead.
+fn append_scoped_variables(
+    cache: &CompletionCache,
+    items: &mut Vec<CompletionItem>,
+    ctx: Option<&ScopeContext>,
+) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut scoped = Vec::new();
+    let in_scope = ctx.is_some_and(|ctx| {
+        walk_visible_declarations(cache, ctx.byte_pos, ctx.file_id, |decl| {
+            if !cache.general_labels.contains(&decl.name) && seen.insert(&decl.name) {
+                scoped.push(CompletionItem {
+                    label: decl.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: decl.type_string.clone(),
+                    ..Default::default()
+                });
             }
-        }
-        match cache.scope_parent.get(&current).copied() {
-            Some(parent) => current = parent,
-            None => break,
-        }
+            ControlFlow::Continue(())
+        })
+    });
+    if in_scope {
+        items.extend(scoped);
+    } else {
+        items.extend(cache.unscoped_variables.iter().cloned());
     }
 }
 
-fn push_scope_variables(
-    cache: &CompletionCache,
-    scope: NodeId,
-    items: &mut Vec<CompletionItem>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    let Some(decls) = cache.scope_declarations.get(&scope) else {
-        return;
+/// Visit every declaration visible at `byte_pos`, innermost scope first: each
+/// scope's own declarations, then (for a contract) the non-private ones of its
+/// bases in C3 order, then the enclosing scope. Locals declared after
+/// `byte_pos` are skipped, since a Solidity local is visible only after its
+/// declaration. `visit` can stop the walk early with `ControlFlow::Break`.
+///
+/// Returns false when `byte_pos` is in no known scope.
+fn walk_visible_declarations<'a>(
+    cache: &'a CompletionCache,
+    byte_pos: usize,
+    file_id: FileId,
+    mut visit: impl FnMut(&'a ScopedDeclaration) -> ControlFlow<()>,
+) -> bool {
+    let Some(mut current) = find_innermost_scope(cache, byte_pos, file_id) else {
+        return false;
     };
-    for decl in decls {
-        if !seen.insert(decl.name.clone()) {
-            continue;
+    let declared_before =
+        |decl: &ScopedDeclaration| decl.declared_at.is_none_or(|at| at < byte_pos);
+    loop {
+        for decl in cache.scope_declarations.get(&current).into_iter().flatten() {
+            if declared_before(decl) && visit(decl).is_break() {
+                return true;
+            }
         }
-        items.push(CompletionItem {
-            label: decl.name.clone(),
-            kind: Some(CompletionItemKind::VARIABLE),
-            ..Default::default()
-        });
+        for &base in cache
+            .linearized_base_contracts
+            .get(&current)
+            .into_iter()
+            .flatten()
+            .skip(1)
+        {
+            for decl in cache.scope_declarations.get(&base).into_iter().flatten() {
+                if !decl.is_private && visit(decl).is_break() {
+                    return true;
+                }
+            }
+        }
+        match cache.scope_parent.get(&current) {
+            Some(&parent) => current = parent,
+            None => return true,
+        }
     }
 }
 
@@ -1677,44 +1808,18 @@ pub fn resolve_name_in_scope(
     byte_pos: usize,
     file_id: FileId,
 ) -> Option<String> {
-    let mut current_scope = find_innermost_scope(cache, byte_pos, file_id)?;
-
-    // Walk up the scope chain
-    loop {
-        // Check declarations in this scope
-        if let Some(decls) = cache.scope_declarations.get(&current_scope) {
-            for decl in decls {
-                if decl.name == name {
-                    return Some(decl.type_id.clone());
-                }
-            }
+    let mut found = None;
+    walk_visible_declarations(cache, byte_pos, file_id, |decl| {
+        if decl.name == name {
+            found = Some(decl.type_id.clone());
+            return ControlFlow::Break(());
         }
+        ControlFlow::Continue(())
+    });
 
-        // If this scope is a contract, also search inherited contracts
-        // in C3 linearization order (skipping index 0 which is the contract itself,
-        // since we already checked its declarations above).
-        if let Some(bases) = cache.linearized_base_contracts.get(&current_scope) {
-            for &base_id in bases.iter().skip(1) {
-                if let Some(decls) = cache.scope_declarations.get(&base_id) {
-                    for decl in decls {
-                        if decl.name == name && !decl.is_private {
-                            return Some(decl.type_id.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Move up to parent scope
-        match cache.scope_parent.get(&current_scope) {
-            Some(&parent_id) => current_scope = parent_id,
-            None => break, // reached the top (SourceUnit has no parent)
-        }
-    }
-
-    // Scope walk found nothing — fall back to flat lookup
-    // (handles contract/library names which aren't in scope_declarations)
-    resolve_name_to_type_id(cache, name)
+    // Not declared in scope (or the cursor is in no known scope): fall back to
+    // the flat lookup, which also covers contract/library names.
+    found.or_else(|| resolve_name_to_type_id(cache, name))
 }
 
 /// Resolve a name within a type context to get the member's type.
@@ -2405,12 +2510,13 @@ pub fn handle_completion_with_tail_candidates(
         file_id: fid,
     });
 
-    let items = if trigger_char == Some(".") || is_member_completion(line, col_byte) {
+    let triggered_by_dot = trigger_char == Some(".");
+    let member_items = if triggered_by_dot || is_member_completion(line, col_byte) {
         let chain = parse_dot_chain(line, col_byte);
-        if chain.is_empty() {
+        if chain.is_empty() && triggered_by_dot {
             return None;
         }
-        match cache {
+        Some(match cache {
             Some(c) => get_chain_completions(c, &chain, scope_ctx.as_ref()),
             None => {
                 // No cache yet — serve magic dot completions (msg., block., etc.)
@@ -2428,18 +2534,24 @@ pub fn handle_completion_with_tail_candidates(
                     vec![]
                 }
             }
-        }
+        })
     } else {
-        match cache {
+        None
+    };
+
+    let items = match member_items {
+        // A member position nothing resolves on (`1.`, `/// see Foo.bar`, a local
+        // the cache has not seen yet) still gets the general list when completion
+        // was invoked rather than triggered by typing `.`.
+        Some(items) if triggered_by_dot || !items.is_empty() => items,
+        _ => match cache {
             Some(c) => {
                 let mut items = c.general_completions.clone();
-                if let Some(ctx) = scope_ctx.as_ref() {
-                    append_scoped_variables(c, &mut items, ctx);
-                }
+                append_scoped_variables(c, &mut items, scope_ctx.as_ref());
                 append_auto_import_candidates_last(items, tail_candidates)
             }
             None => get_static_completions(),
-        }
+        },
     };
 
     Some(CompletionResponse::List(CompletionList {
@@ -2752,7 +2864,7 @@ mod tests {
     };
     use crate::types::{FileId, SymbolName};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use tower_lsp::lsp_types::CompletionItemKind;
     use tower_lsp::lsp_types::{CompletionItem, CompletionResponse, Position, Range, TextEdit};
 
@@ -2768,6 +2880,8 @@ mod tests {
             using_for: HashMap::new(),
             using_for_wildcard: vec![],
             general_completions: vec![],
+            general_labels: HashSet::new(),
+            unscoped_variables: vec![],
             scope_declarations: HashMap::new(),
             scope_parent: HashMap::new(),
             scope_ranges: vec![],
@@ -2965,7 +3079,9 @@ mod tests {
         assert!(labels.contains(&"Started"));
         assert!(labels.contains(&"stateVar"));
         assert!(!labels.contains(&"startAt"));
-        assert!(!cache.name_to_type.contains_key("startAt"));
+        // Hidden from the general list, but still typed: chains through a
+        // struct field (`obj.startAt.`) resolve the member through `name_to_type`.
+        assert!(cache.name_to_type.contains_key("startAt"));
 
         let members = cache.node_members.get(&crate::types::NodeId(10)).unwrap();
         assert!(members.iter().any(|item| item.label == "startAt"));

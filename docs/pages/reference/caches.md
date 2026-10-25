@@ -111,7 +111,7 @@ This means after a warm-load, cross-file goto-definition, references, call hiera
 
 | Field | Purpose |
 |---|---|
-| `names` | Flat list of named identifiers for non-dot completion (unscoped). Struct fields are excluded; they are offered only from `node_members` after `.` |
+| `names` | Flat list of named declarations and import aliases for non-dot completion (unscoped). Struct fields, parameters, and locals are excluded, though `name_to_type` still records their types for chain resolution |
 | `name_to_type` | `SymbolName` → `TypeIdentifier`; used for dot-completion |
 | `type_to_node` | `TypeIdentifier` → defining node id |
 | `node_members` | struct/contract/enum/library member completion items |
@@ -121,7 +121,9 @@ This means after a warm-load, cross-file goto-definition, references, call hiera
 | `using_for` | `TypeIdentifier` → library functions via `using X for T` |
 | `using_for_wildcard` | Functions from `using X for *` |
 | `general_completions` | Pre-built non-dot completion list (AST names + keywords + globals + units) |
-| `scope_declarations` | Declarations per scope node (`ScopedDeclaration`: `name`, `type_id`, `is_private`; private ones are skipped when searching base contracts) |
+| `general_labels` | Labels in `general_completions`, so scoped parameters and locals are deduplicated against it without rehashing the list per request |
+| `unscoped_variables` | Every parameter and local as a flat item (first declaration per name); offered only when the cursor's scope cannot be resolved |
+| `scope_declarations` | Declarations per scope node (`ScopedDeclaration`: `name`, `type_id`, `is_private`, `type_string`, `declared_at`). Private ones are skipped when searching base contracts; locals with `declared_at` are visible only after that offset |
 | `scope_parent` | Scope tree for upward scope walks |
 | `scope_ranges` | All scope byte ranges sorted by span size (innermost-first) |
 | `path_to_file_id` | `RelPath` → AST file id (for scope-aware lookup) |
