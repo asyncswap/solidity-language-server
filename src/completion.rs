@@ -442,8 +442,11 @@ pub fn build_completion_cache(
 
                     // --- Scope-aware data collection ---
 
-                    // Record scope-creating nodes (SourceUnit, ContractDefinition,
-                    // FunctionDefinition, ModifierDefinition, Block) and their byte ranges.
+                    // Record scope-creating nodes and their byte ranges. These are
+                    // every node type solc uses as a VariableDeclaration's `scope`:
+                    // a `for` init variable is scoped to its ForStatement, and
+                    // `try ... returns (x)` / `catch (bytes memory d)` variables to
+                    // their TryCatchClause.
                     let is_scope_node = matches!(
                         node_type,
                         "SourceUnit"
@@ -452,6 +455,8 @@ pub fn build_completion_cache(
                             | "ModifierDefinition"
                             | "Block"
                             | "UncheckedBlock"
+                            | "ForStatement"
+                            | "TryCatchClause"
                     );
                     if is_scope_node && let Some(nid) = node_id {
                         if let Some(src_loc) = parse_src(tree) {
@@ -883,7 +888,7 @@ pub fn build_completion_cache(
     // Sort scope_ranges by span size ascending (smallest first) for innermost-scope lookup
     scope_ranges.sort_by_key(|r| r.end - r.start);
 
-    // Infer parent links for Block/UncheckedBlock/ModifierDefinition nodes.
+    // Infer parent links for Block/UncheckedBlock/ForStatement/TryCatchClause/ModifierDefinition nodes.
     // These AST nodes have no `scope` field, so scope_parent has no entry for them.
     // For each orphan, find the next-larger enclosing scope range in the same file.
     // scope_ranges is sorted smallest-first, so we scan forward from each orphan's
@@ -1382,6 +1387,37 @@ fn resolve_name_to_type_id(cache: &CompletionCache, name: &str) -> Option<String
         return Some(format!("__node_id_{}", node_id));
     }
     None
+}
+
+/// Map a byte offset in the live buffer to the same place in `compiled`, the
+/// text the AST (and so `scope_ranges`) was built from.
+///
+/// Incomplete code like `obj.` rarely compiles, so the cache usually lags the
+/// buffer. Without this, every byte typed above the cursor since the last good
+/// build shifts the scope lookup, and enough of them land it in a sibling
+/// function. The two texts are compared by common prefix and suffix: offsets
+/// before the edited region are unchanged, offsets after it shift by the
+/// length difference. Offsets inside it are mapped from the suffix end, since
+/// the cursor is normally where the most recent typing is.
+pub fn map_live_offset_to_compiled(live: &str, compiled: &str, pos: usize) -> usize {
+    let (l, c) = (live.as_bytes(), compiled.as_bytes());
+    let prefix = l.iter().zip(c).take_while(|(a, b)| a == b).count();
+    if pos <= prefix {
+        return pos;
+    }
+    let max_suffix = l.len().min(c.len()) - prefix;
+    let suffix = l
+        .iter()
+        .rev()
+        .zip(c.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let shifted = (pos + c.len()).saturating_sub(l.len());
+    if pos >= l.len() - suffix {
+        return shifted;
+    }
+    shifted.clamp(prefix, c.len() - suffix)
 }
 
 /// Find the innermost scope node that contains the given byte position and file.
@@ -2102,6 +2138,7 @@ pub fn handle_completion_with_tail_candidates(
     position: Position,
     trigger_char: Option<&str>,
     file_id: Option<FileId>,
+    compiled_text: Option<&str>,
     tail_candidates: Vec<CompletionItem>,
 ) -> Option<CompletionResponse> {
     let lines: Vec<&str> = source_text.lines().collect();
@@ -2124,9 +2161,12 @@ pub fn handle_completion_with_tail_candidates(
         }));
     }
 
-    // Build scope context for scope-aware type resolution
+    // Build scope context for scope-aware type resolution. Scope ranges are
+    // offsets into the compiled text, so translate the live cursor into it.
     let scope_ctx = file_id.map(|fid| ScopeContext {
-        byte_pos: abs_byte,
+        byte_pos: compiled_text.map_or(abs_byte, |ct| {
+            map_live_offset_to_compiled(source_text, ct, abs_byte)
+        }),
         file_id: fid,
     });
 
@@ -2191,6 +2231,7 @@ pub fn handle_completion(
         position,
         trigger_char,
         file_id,
+        None,
         vec![],
     )
 }

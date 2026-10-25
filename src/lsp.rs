@@ -82,6 +82,9 @@ async fn check_for_updates(client: Client) {
     }
 }
 
+/// A per-file completion cache and the buffer text it was compiled from.
+type CompletionSourceText = (Arc<completion::CompletionCache>, Arc<str>);
+
 #[derive(Clone)]
 pub struct ForgeLsp {
     client: Client,
@@ -92,6 +95,11 @@ pub struct ForgeLsp {
     /// The key is the file's URI converted to string, and the value is a tuple of (version, content).
     text_cache: Arc<RwLock<HashMap<DocumentUri, (i32, String)>>>,
     completion_cache: Arc<RwLock<HashMap<DocumentUri, Arc<completion::CompletionCache>>>>,
+    /// The buffer text each per-file completion cache was compiled from, paired
+    /// with that cache. Completion maps the live cursor offset into this text
+    /// before the scope lookup, and only when the cache it is serving is this
+    /// exact `Arc` — any other cache has no matching text.
+    completion_source_text: Arc<RwLock<HashMap<DocumentUri, CompletionSourceText>>>,
     /// Cached lint configuration from `foundry.toml`.
     lint_config: Arc<RwLock<LintConfig>>,
     /// Cached project configuration from `foundry.toml`.
@@ -399,6 +407,7 @@ impl ForgeLsp {
         let ast_cache = Arc::new(RwLock::new(HashMap::new()));
         let text_cache = Arc::new(RwLock::new(HashMap::new()));
         let completion_cache = Arc::new(RwLock::new(HashMap::new()));
+        let completion_source_text = Arc::new(RwLock::new(HashMap::new()));
         let lint_config = Arc::new(RwLock::new(LintConfig::default()));
         let foundry_config = Arc::new(RwLock::new(FoundryConfig::default()));
         let client_capabilities = Arc::new(RwLock::new(None));
@@ -409,6 +418,7 @@ impl ForgeLsp {
             ast_cache,
             text_cache,
             completion_cache,
+            completion_source_text,
             lint_config,
             foundry_config,
             client_capabilities,
@@ -970,6 +980,13 @@ impl ForgeLsp {
                             cached_build.completion_cache.clone(),
                         );
                     }
+                    self.completion_source_text.write().await.insert(
+                        uri.to_string().into(),
+                        (
+                            cached_build.completion_cache.clone(),
+                            Arc::from(params.text.as_str()),
+                        ),
+                    );
                 }
             } else if let Err(e) = ast_result {
                 self.client
@@ -3182,6 +3199,7 @@ impl LanguageServer for ForgeLsp {
                 // 2. Wipe all in-memory caches for a full reset.
                 self.ast_cache.write().await.clear();
                 self.completion_cache.write().await.clear();
+                self.completion_source_text.write().await.clear();
                 self.sub_caches.write().await.clear();
                 self.semantic_token_cache.write().await.clear();
                 *self.path_interner.write().await = crate::types::PathInterner::new();
@@ -3694,6 +3712,7 @@ impl LanguageServer for ForgeLsp {
         self.ast_cache.write().await.remove(&uri);
         self.text_cache.write().await.remove(&uri);
         self.completion_cache.write().await.remove(&uri);
+        self.completion_source_text.write().await.remove(&uri);
         self.client
             .log_message(MessageType::INFO, "file closed, caches cleared.")
             .await;
@@ -3861,6 +3880,18 @@ impl LanguageServer for ForgeLsp {
 
         let cache_ref = cached.as_deref();
 
+        // Text the served cache was compiled from, if we have it.
+        let compiled_text: Option<Arc<str>> = match cached.as_ref() {
+            Some(c) => self
+                .completion_source_text
+                .read()
+                .await
+                .get(&uri.to_string())
+                .filter(|(src_cache, _)| Arc::ptr_eq(src_cache, c))
+                .map(|(_, text)| text.clone()),
+            None => None,
+        };
+
         // Look up the AST file_id for scope-aware resolution
         let file_id = {
             let uri_path = uri.to_file_path().ok();
@@ -3989,6 +4020,7 @@ impl LanguageServer for ForgeLsp {
             position,
             trigger_char,
             file_id,
+            compiled_text.as_deref(),
             tail_candidates,
         );
         Ok(result)
@@ -6002,6 +6034,12 @@ impl LanguageServer for ForgeLsp {
             }
         }
         {
+            let mut cst = self.completion_source_text.write().await;
+            for (old_key, _) in &file_renames {
+                cst.remove(old_key);
+            }
+        }
+        {
             let mut sc = self.semantic_token_cache.write().await;
             for (old_key, _) in &file_renames {
                 sc.remove(old_key);
@@ -6370,6 +6408,12 @@ impl LanguageServer for ForgeLsp {
                 if cc.remove(key).is_some() {
                     removed_completion += 1;
                 }
+            }
+        }
+        {
+            let mut cst = self.completion_source_text.write().await;
+            for key in &deleted_keys {
+                cst.remove(key);
             }
         }
         {

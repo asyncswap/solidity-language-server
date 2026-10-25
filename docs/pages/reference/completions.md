@@ -88,10 +88,15 @@ When resolving a symbol in context, completion walks:
 
 - Start at the innermost scope from `(file_id, byte position)`.
 - Walk outward through `scope_parent`.
+- Scope nodes are every node type solc uses as a `VariableDeclaration`'s `scope`: `SourceUnit`, `ContractDefinition`, `FunctionDefinition`, `ModifierDefinition`, `Block`, `UncheckedBlock`, `ForStatement` (a `for` init variable), and `TryCatchClause` (`try ... returns (x)` and `catch (...)` variables). `Block`, `UncheckedBlock`, `ForStatement`, and `TryCatchClause` carry no `scope` field, so their parent is inferred as the smallest enclosing scope range.
 - Include inherited contracts via `linearized_base_contracts`.
 - Fall back to global maps (`name_to_type`, `name_to_node_id`) when needed.
 
 This is why completion can prioritize locals/params while still finding inherited members.
+
+### Cursor offset vs. compiled text
+
+`scope_ranges` are byte offsets into the text the AST was compiled from. Incomplete code such as `obj.` rarely compiles, so the cache usually lags the buffer. The server keeps that text next to each per-file cache (`ForgeLsp.completion_source_text`, paired with the exact `Arc<CompletionCache>` it belongs to) and passes it to `handle_completion_with_tail_candidates` as `compiled_text`. `map_live_offset_to_compiled()` translates the live cursor offset into it using the common prefix and suffix of the two texts: offsets before the edited region are unchanged, offsets after it shift by the length difference, and offsets inside it are mapped from the suffix end. When no text is paired with the cache in use (for example the project-root fallback), the live offset is used as-is.
 
 ## Auto-import tail candidates
 
