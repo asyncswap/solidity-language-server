@@ -69,7 +69,7 @@ Tail candidates are appended last so local/scope-aware symbols stay prioritized.
 
 ### Dot mode
 
-Dot requests parse the expression chain before the cursor (`parse_dot_chain`) and resolve segment-by-segment (`get_chain_completions`):
+Dot completion runs when the trigger character is `.` and also when the cursor is already in a member position (`obj.|` or `obj.sta|`), because editors re-request completion without the trigger character. The partial identifier after the dot is a filter prefix. The chain is parsed by `parse_dot_chain` and resolved segment-by-segment (`get_chain_completions`):
 
 - **Plain segment**: resolve symbol to type.
 - **Call segment**: use `function_return_types` to continue on return type.

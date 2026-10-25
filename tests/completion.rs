@@ -106,6 +106,24 @@ fn test_extract_identifier_msg() {
 // --- parse_dot_chain ---
 
 #[test]
+fn test_parse_chain_partial_member_is_filter_prefix() {
+    let line = "obj.start";
+    let chain = parse_dot_chain(line, line.len() as u32);
+    assert_eq!(
+        chain,
+        vec![DotSegment {
+            name: "obj".to_string(),
+            kind: AccessKind::Plain,
+            call_args: None,
+        }]
+    );
+    assert!(solidity_language_server::completion::is_member_completion(
+        line,
+        line.len() as u32
+    ));
+}
+
+#[test]
 fn test_parse_chain_simple() {
     let chain = parse_dot_chain("msg.", 4);
     assert_eq!(
