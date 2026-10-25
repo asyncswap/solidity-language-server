@@ -30,7 +30,7 @@ jobs:
           toolchain: stable
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@a502f66dedae6774c819ff3c80406c7e8266dad2
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
 
       - name: Run tests
         run: timeout 20m cargo test
