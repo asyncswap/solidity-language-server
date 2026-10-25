@@ -36,10 +36,10 @@ pub fn load(root: &Path) -> Arc<Vec<Finding>> {
     let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else {
         return Arc::new(vec![]);
     };
-    if let Some((at, f)) = cache().lock().unwrap().get(&file) {
-        if *at == modified {
-            return f.clone();
-        }
+    if let Some((at, f)) = cache().lock().unwrap().get(&file)
+        && *at == modified
+    {
+        return f.clone();
     }
     let parsed = Arc::new(
         std::fs::read_to_string(&file)
@@ -61,10 +61,10 @@ pub fn invalidate(root: &Path) {
 
 /// A result's file: relative to the project root (`uriBaseId`), an absolute path, or a `file://` URI.
 fn resolve(root: &Path, uri: &str) -> PathBuf {
-    if let Ok(u) = tower_lsp::lsp_types::Url::parse(uri) {
-        if let Ok(p) = u.to_file_path() {
-            return p;
-        }
+    if let Ok(u) = tower_lsp::lsp_types::Url::parse(uri)
+        && let Ok(p) = u.to_file_path()
+    {
+        return p;
     }
     let p = Path::new(uri);
     if p.is_absolute() {
