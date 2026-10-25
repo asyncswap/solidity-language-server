@@ -1,9 +1,13 @@
-import { defineConfig } from "vocs";
+import { defineConfig } from "vocs/config";
 
 export default defineConfig({
   title: "Solidity Language Server",
   description: "Documentation and benchmarks for solidity-language-server",
-  rootDir: "docs",
+  // vocs 2 roots the site at this config's directory. Pages live in
+  // docs/pages, not the default docs/src/pages.
+  srcDir: ".",
+  // Cloudflare Pages serves static files, so prerender every page.
+  renderStrategy: "full-static",
   sidebar: [
     {
       text: "Documentation",

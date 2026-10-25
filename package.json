@@ -2,15 +2,20 @@
   "name": "solidity-language-server-docs",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "packageManager": "bun@1.2.21",
   "scripts": {
-    "docs:dev": "vocs dev",
-    "docs:build": "vocs build",
-    "docs:preview": "vocs preview",
-    "docs:publish": "bun run docs:build && wrangler pages deploy docs/dist --project-name solidity-language-server-docs --branch main --commit-dirty=true"
+    "docs:dev": "cd docs && vocs dev",
+    "docs:build": "cd docs && vocs build",
+    "docs:preview": "cd docs && vocs preview",
+    "docs:publish": "bun run docs:build && wrangler pages deploy docs/dist/public --project-name solidity-language-server-docs --branch main --commit-dirty=true"
   },
   "devDependencies": {
-    "vocs": "^1.0.0",
+    "mermaid": "^11",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "vocs": "^2.10.3",
+    "waku": "1.0.0-rc.4",
     "wrangler": "^4.59.2"
   }
 }
