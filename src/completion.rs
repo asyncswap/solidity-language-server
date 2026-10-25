@@ -662,12 +662,16 @@ pub fn build_completion_cache(
                     // struct fields, parameters, and locals left out of `names`:
                     // chain resolution looks member types up here (`a.field.`),
                     // and it is the fallback when the cursor's scope is unknown.
+                    // `t_type$...` is a use of a type name as an expression (the
+                    // `IHooks` in `IHooks(addr)`); recording it would shadow the
+                    // `name_to_node_id` lookup that resolves type names.
                     if !name.is_empty()
                         && !name_to_type.contains_key(name)
                         && let Some(tid) = tree
                             .get("typeDescriptions")
                             .and_then(|td| td.get("typeIdentifier"))
                             .and_then(|v| v.as_str())
+                        && !tid.starts_with("t_type$")
                     {
                         name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
                     }
