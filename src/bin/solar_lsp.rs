@@ -18,8 +18,9 @@ impl SolarLspArgs {
     pub async fn run(self) -> Result<()> {
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
-        let (service, socket) =
-            LspService::new(|client| ForgeLsp::new(client, /* use_solar */ true, /* use_solc */ false));
+        let (service, socket) = LspService::new(|client| {
+            ForgeLsp::new(client, /* use_solar */ true, /* use_solc */ false)
+        });
         Server::new(stdin, stdout, socket).serve(service).await;
 
         Ok(())

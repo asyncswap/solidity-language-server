@@ -4,6 +4,7 @@ pub mod code_actions;
 pub mod completion;
 pub mod config;
 pub mod file_operations;
+pub mod findings;
 pub mod folding;
 pub mod goto;
 pub mod highlight;

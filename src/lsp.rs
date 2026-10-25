@@ -746,6 +746,8 @@ impl ForgeLsp {
 
     async fn on_change(&self, params: TextDocumentItem) {
         let uri = params.uri.clone();
+        // For the findings' diagnostics, which need the line text after the cache takes the buffer.
+        let live_text = params.text.clone();
         let version = params.version;
 
         let file_path = match uri.to_file_path() {
@@ -1056,6 +1058,16 @@ impl ForgeLsp {
                     )
                     .await;
             }
+        }
+
+        // Findings from analysis tools (concolity, Formal Mind's agents): .formal/findings.sarif in the project.
+        {
+            let root = self.foundry_config_for_file(&file_path).await.root;
+            all_diagnostics.extend(crate::findings::diagnostics(
+                &crate::findings::load(&root),
+                &file_path,
+                &live_text,
+            ));
         }
 
         // Sanitize: some LSP clients (e.g. trunk.io) crash on diagnostics with
@@ -2567,6 +2579,13 @@ impl LanguageServer for ForgeLsp {
                                 glob_pattern: GlobPattern::String("**/remappings.txt".to_string()),
                                 kind: Some(WatchKind::all()),
                             },
+                            FileSystemWatcher {
+                                glob_pattern: GlobPattern::String(format!(
+                                    "**/{}",
+                                    crate::findings::FILE
+                                )),
+                                kind: Some(WatchKind::all()),
+                            },
                         ],
                     })
                     .unwrap(),
@@ -3738,6 +3757,34 @@ impl LanguageServer for ForgeLsp {
             };
 
             let filename = path.file_name().and_then(|n| n.to_str());
+
+            // New findings: republish every open file's diagnostics with them.
+            if filename == Some("findings.sarif") {
+                if let Some(root) = path.parent().and_then(|p| p.parent()) {
+                    crate::findings::invalidate(root);
+                }
+                let open: Vec<(Url, i32, String)> = self
+                    .text_cache
+                    .read()
+                    .await
+                    .iter()
+                    .filter_map(|(u, (v, t))| {
+                        Some((Url::parse(&u.to_string()).ok()?, *v, t.clone()))
+                    })
+                    .collect();
+                for (uri, version, text) in open {
+                    if uri.path().ends_with(".sol") {
+                        self.on_change(TextDocumentItem {
+                            uri,
+                            language_id: "solidity".into(),
+                            version,
+                            text,
+                        })
+                        .await;
+                    }
+                }
+                continue;
+            }
 
             if filename == Some("foundry.toml") {
                 let lint_cfg = config::load_lint_config_from_toml(&path);
@@ -5114,18 +5161,43 @@ impl LanguageServer for ForgeLsp {
             }
         };
 
+        // What analysis tools found on this line (.formal/findings.sarif), shown under the symbol's hover.
+        let found = {
+            let root = self.foundry_config_for_file(&file_path).await.root;
+            crate::findings::hover(&crate::findings::load(&root), &file_path, position.line)
+        };
+        let with_found = |h: Option<Hover>| -> Option<Hover> {
+            let Some(found) = &found else { return h };
+            let text = match h.as_ref().map(|h| &h.contents) {
+                Some(HoverContents::Markup(m)) => format!("{}\n\n---\n\n{found}", m.value),
+                _ => found.clone(),
+            };
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: text,
+                }),
+                range: h.and_then(|h| h.range),
+            })
+        };
+
         let source_bytes = match self.get_source_bytes(&uri, &file_path).await {
             Some(bytes) => bytes,
-            None => return Ok(None),
+            None => return Ok(with_found(None)),
         };
 
         let cached_build = self.get_or_fetch_build(&uri, &file_path, false).await;
         let cached_build = match cached_build {
             Some(cb) => cb,
-            None => return Ok(None),
+            None => return Ok(with_found(None)),
         };
 
-        let result = hover::hover_info(&cached_build, &uri, position, &source_bytes);
+        let result = with_found(hover::hover_info(
+            &cached_build,
+            &uri,
+            position,
+            &source_bytes,
+        ));
 
         if result.is_some() {
             self.client
