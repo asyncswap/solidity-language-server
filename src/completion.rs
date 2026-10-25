@@ -1263,6 +1263,20 @@ fn skip_brackets_backwards(bytes: &[u8], pos: usize) -> usize {
 /// e.g. `poolManager.swap(key, params).` → [("poolManager", Plain), ("swap", Call)]
 ///      `_pools[poolId].fee.` → [("_pools", Index), ("fee", Plain)]
 ///      `msg.` → [("msg", Plain)]
+/// True when the cursor is in a member-access completion.
+///
+/// Matches both `obj.|` and `obj.sta|`. The identifier after the dot is a
+/// filter prefix, not a resolved member. Clients re-request completion after
+/// the first `.` without sending the trigger character again.
+pub fn is_member_completion(line: &str, character: u32) -> bool {
+    let bytes = line.as_bytes();
+    let mut pos = (character as usize).min(bytes.len());
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+    pos > 0 && bytes[pos - 1] == b'.'
+}
+
 pub fn parse_dot_chain(line: &str, character: u32) -> Vec<DotSegment> {
     let col = character as usize;
     if col == 0 {
@@ -1272,8 +1286,14 @@ pub fn parse_dot_chain(line: &str, character: u32) -> Vec<DotSegment> {
     let bytes = line.as_bytes();
     let mut segments: Vec<DotSegment> = Vec::new();
 
-    // Start from the cursor position, skip trailing dot
-    let mut pos = col;
+    // Start from the cursor. `obj.sta|` is still a completion on `obj`, so drop
+    // the partial member name before parsing the chain.
+    let mut pos = col.min(bytes.len());
+    if is_member_completion(line, character) {
+        while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+            pos -= 1;
+        }
+    }
     if pos > 0 && pos <= bytes.len() && bytes[pos - 1] == b'.' {
         pos -= 1;
     }
@@ -2385,7 +2405,7 @@ pub fn handle_completion_with_tail_candidates(
         file_id: fid,
     });
 
-    let items = if trigger_char == Some(".") {
+    let items = if trigger_char == Some(".") || is_member_completion(line, col_byte) {
         let chain = parse_dot_chain(line, col_byte);
         if chain.is_empty() {
             return None;
@@ -2978,6 +2998,95 @@ mod tests {
 
         assert!(!outside.iter().any(|label| label == "startAt"));
         assert!(inside.iter().any(|label| label == "startAt"));
+    }
+
+    #[test]
+    fn member_completion_without_trigger_character() {
+        let sources = json!({
+            "/tmp/A.sol": {
+                "id": 0,
+                "ast": {
+                    "id": 1,
+                    "nodeType": "SourceUnit",
+                    "src": "0:80:0",
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "nodeType": "StructDefinition",
+                            "name": "Info",
+                            "scope": 1,
+                            "src": "0:40:0",
+                            "members": [
+                                {
+                                    "id": 11,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "startAt",
+                                    "scope": 10,
+                                    "src": "10:7:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint32",
+                                        "typeIdentifier": "t_uint32"
+                                    }
+                                }
+                            ],
+                            "typeDescriptions": {
+                                "typeIdentifier": "t_struct$_Info_$10_storage"
+                            }
+                        },
+                        {
+                            "id": 40,
+                            "nodeType": "ContractDefinition",
+                            "name": "Pool",
+                            "scope": 1,
+                            "src": "40:40:0",
+                            "nodes": [
+                                {
+                                    "id": 41,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "obj",
+                                    "scope": 40,
+                                    "src": "50:10:0",
+                                    "typeDescriptions": {
+                                        "typeString": "struct Info",
+                                        "typeIdentifier": "t_struct$_Info_$10_storage"
+                                    }
+                                },
+                                {
+                                    "id": 50,
+                                    "nodeType": "FunctionDefinition",
+                                    "name": "run",
+                                    "scope": 40,
+                                    "src": "60:20:0",
+                                    "body": {
+                                        "id": 60,
+                                        "nodeType": "Block",
+                                        "scope": 50,
+                                        "src": "60:20:0"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let cache = build_completion_cache(&sources, None, None);
+        // Cursor is on `obj.start`, and the editor did not send trigger `.`.
+        let source = format!("{:80}", "obj.start");
+        let labels = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: "obj.start".len() as u32,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+        assert!(
+            labels.iter().any(|label| label == "startAt"),
+            "fields missing: {labels:?}"
+        );
     }
 
     #[test]
