@@ -3769,7 +3769,7 @@ impl LanguageServer for ForgeLsp {
                     .await
                     .iter()
                     .filter_map(|(u, (v, t))| {
-                        Some((Url::parse(&u.to_string()).ok()?, *v, t.clone()))
+                        Some((Url::parse(u.as_ref()).ok()?, *v, t.clone()))
                     })
                     .collect();
                 for (uri, version, text) in open {
