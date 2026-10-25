@@ -121,12 +121,13 @@ This means after a warm-load, cross-file goto-definition, references, call hiera
 | `using_for` | `TypeIdentifier` → library functions via `using X for T` |
 | `using_for_wildcard` | Functions from `using X for *` |
 | `general_completions` | Pre-built non-dot completion list (AST names + keywords + globals + units) |
-| `scope_declarations` | Declarations per scope node |
+| `scope_declarations` | Declarations per scope node (`ScopedDeclaration`: `name`, `type_id`, `is_private`; private ones are skipped when searching base contracts) |
 | `scope_parent` | Scope tree for upward scope walks |
 | `scope_ranges` | All scope byte ranges sorted by span size (innermost-first) |
 | `path_to_file_id` | `RelPath` → AST file id (for scope-aware lookup) |
 | `linearized_base_contracts` | C3 linearization per contract (for inherited member lookup) |
 | `contract_kinds` | `"contract"`, `"interface"`, or `"library"` |
+| `type_name_members` | `SymbolName` → members reachable only through a type's name, never a value: `wrap`/`unwrap` for user-defined value types |
 | `top_level_importables_by_name` | Import-on-completion: `SymbolName` → candidates |
 | `top_level_importables_by_file` | Same data keyed by `RelPath` (for incremental invalidation) |
 

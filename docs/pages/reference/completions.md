@@ -73,14 +73,20 @@ Dot requests parse the expression chain before the cursor (`parse_dot_chain`) an
 
 - **Plain segment**: resolve symbol to type.
 - **Call segment**: use `function_return_types` to continue on return type.
-- **Index segment**: peel mapping/array value type and continue.
+- **Index segment**: peel mapping/array value type and continue (`index_result_type`: mapping value, array element, or `bytes1` for `bytes`).
+- **Function, error, or event member** (`X.fn.`, `X.Err.`): continue on a synthetic type whose only member is `selector`.
 
 Final member set is composed from:
 
+- built-in members of the type (`builtin_type_members`): `length` on arrays, `bytes`, and `bytesN`; `push` and `pop` on dynamic arrays and `bytes` in storage. `string` has none,
 - `node_members`,
 - `method_identifiers`,
 - `using_for` matches,
 - `using_for_wildcard`.
+
+A bare type name first checks `type_name_members`, so `Currency.` on `type Currency is address` offers `wrap` and `unwrap`. Values of the type do not get them.
+
+Built-in members (`abi.`, `msg.`, address members, `bytes.concat`, …) are labelled with the bare name, so accepting `encode` inserts `encode`. The parameter list (`(...)`, `(bytes memory)`) is in `labelDetails.detail`, which clients show beside the label but never insert.
 
 ## Scope-aware name resolution
 
@@ -89,7 +95,7 @@ When resolving a symbol in context, completion walks:
 - Start at the innermost scope from `(file_id, byte position)`.
 - Walk outward through `scope_parent`.
 - Scope nodes are every node type solc uses as a `VariableDeclaration`'s `scope`: `SourceUnit`, `ContractDefinition`, `FunctionDefinition`, `ModifierDefinition`, `Block`, `UncheckedBlock`, `ForStatement` (a `for` init variable), and `TryCatchClause` (`try ... returns (x)` and `catch (...)` variables). `Block`, `UncheckedBlock`, `ForStatement`, and `TryCatchClause` carry no `scope` field, so their parent is inferred as the smallest enclosing scope range.
-- Include inherited contracts via `linearized_base_contracts`.
+- Include inherited contracts via `linearized_base_contracts`, skipping `private` declarations: they are not visible in derived contracts. forge-std declares `VmSafe private vm` in `StdUtils` and `StdChains` beside `CommonBase`'s `Vm internal vm`; without the skip, `vm.` resolved to `VmSafe` and lost every cheatcode.
 - Fall back to global maps (`name_to_type`, `name_to_node_id`) when needed.
 
 This is why completion can prioritize locals/params while still finding inherited members.

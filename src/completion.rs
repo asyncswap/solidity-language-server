@@ -31,6 +31,9 @@ pub struct ScopedDeclaration {
     pub name: String,
     /// typeIdentifier from typeDescriptions (e.g. "t_struct$_PoolKey_$8887_memory_ptr").
     pub type_id: String,
+    /// `visibility: private`. Private members are not visible in derived
+    /// contracts, so lookups through `linearized_base_contracts` skip them.
+    pub is_private: bool,
 }
 
 /// A byte range identifying a scope-creating AST node.
@@ -109,6 +112,11 @@ pub struct CompletionCache {
     /// Values are `"contract"`, `"interface"`, or `"library"`.
     /// Used to determine which `type(X).` members to offer.
     pub contract_kinds: HashMap<NodeId, String>,
+
+    /// Type name → members reachable only through that name, never through a
+    /// value of the type: `Currency.wrap` / `Currency.unwrap` for a user-defined
+    /// value type. Kept out of `node_members`, which also serves values.
+    pub type_name_members: HashMap<SymbolName, Vec<CompletionItem>>,
 
     /// Directly-declared importable top-level symbols keyed by symbol name.
     ///
@@ -386,6 +394,7 @@ pub fn build_completion_cache(
         HashMap::with_capacity(est_contracts);
     let mut name_to_node_id: HashMap<SymbolName, NodeId> = HashMap::with_capacity(est_names);
     let mut contract_kinds: HashMap<NodeId, String> = HashMap::with_capacity(est_contracts);
+    let mut type_name_members: HashMap<SymbolName, Vec<CompletionItem>> = HashMap::new();
 
     // Collect (path, contract_name, node_id) during AST walk for methodIdentifiers lookup after.
     let mut contract_locations: Vec<(String, String, NodeId)> = Vec::with_capacity(est_contracts);
@@ -508,6 +517,8 @@ pub fn build_completion_cache(
                             .push(ScopedDeclaration {
                                 name: name.to_string(),
                                 type_id: tid.to_string(),
+                                is_private: tree.get("visibility").and_then(|v| v.as_str())
+                                    == Some("private"),
                             });
                     }
 
@@ -526,6 +537,8 @@ pub fn build_completion_cache(
                             .push(ScopedDeclaration {
                                 name: name.to_string(),
                                 type_id: tid.to_string(),
+                                is_private: tree.get("visibility").and_then(|v| v.as_str())
+                                    == Some("private"),
                             });
                     }
 
@@ -738,6 +751,31 @@ pub fn build_completion_cache(
                         }
                     }
 
+                    // User-defined value types: `Name.wrap(underlying)` / `Name.unwrap(value)`
+                    if node_type == "UserDefinedValueTypeDefinition" && !name.is_empty() {
+                        let underlying = tree
+                            .get("underlyingType")
+                            .and_then(|t| t.get("typeDescriptions"))
+                            .and_then(|td| td.get("typeString"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        type_name_members.insert(
+                            SymbolName::new(name),
+                            vec![
+                                builtin_member(
+                                    &format!("wrap({underlying})"),
+                                    CompletionItemKind::FUNCTION,
+                                    Some(name),
+                                ),
+                                builtin_member(
+                                    &format!("unwrap({name})"),
+                                    CompletionItemKind::FUNCTION,
+                                    Some(underlying),
+                                ),
+                            ],
+                        );
+                    }
+
                     // Collect UsingForDirective: using Library for Type
                     if node_type == "UsingForDirective" {
                         // Get target type (None = wildcard `for *`)
@@ -943,6 +981,7 @@ pub fn build_completion_cache(
         path_to_file_id,
         linearized_base_contracts,
         contract_kinds,
+        type_name_members,
         top_level_importables_by_name,
         top_level_importables_by_file,
     }
@@ -996,14 +1035,36 @@ fn magic_members(name: &str) -> Option<Vec<CompletionItem>> {
     Some(
         items
             .into_iter()
-            .map(|(label, detail)| CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::PROPERTY),
-                detail: Some(detail.to_string()),
-                ..Default::default()
+            .map(|(signature, detail)| {
+                builtin_member(signature, CompletionItemKind::PROPERTY, Some(detail))
             })
             .collect(),
     )
+}
+
+/// A built-in member item. `signature` is the name, optionally followed by its
+/// parameter list (`"encode(...)"`). The label is the bare name, so accepting
+/// the item inserts `encode` and typing `enc` matches it; the parameter list is
+/// shown beside it through `labelDetails`.
+fn builtin_member(
+    signature: &str,
+    kind: CompletionItemKind,
+    detail: Option<&str>,
+) -> CompletionItem {
+    let (name, params) = match signature.find('(') {
+        Some(i) => (&signature[..i], Some(signature[i..].to_string())),
+        None => (signature, None),
+    };
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(kind),
+        detail: detail.filter(|d| !d.is_empty()).map(str::to_string),
+        label_details: params.map(|p| tower_lsp::lsp_types::CompletionItemLabelDetails {
+            detail: Some(p),
+            description: None,
+        }),
+        ..Default::default()
+    }
 }
 
 /// The kind of argument passed to `type(X)`, which determines which
@@ -1109,16 +1170,7 @@ fn address_members() -> Vec<CompletionItem> {
         ),
     ]
     .iter()
-    .map(|(label, detail, kind)| CompletionItem {
-        label: label.to_string(),
-        kind: Some(*kind),
-        detail: if detail.is_empty() {
-            None
-        } else {
-            Some(detail.to_string())
-        },
-        ..Default::default()
-    })
+    .map(|(signature, detail, kind)| builtin_member(signature, *kind, Some(detail)))
     .collect()
 }
 
@@ -1293,9 +1345,75 @@ fn lookup_using_for(cache: &CompletionCache, type_id: &str) -> Vec<CompletionIte
     vec![]
 }
 
+/// Split an array typeIdentifier into its element type and length.
+///
+/// `t_array$_t_uint256_$dyn_memory_ptr` → (`t_uint256`, `dyn`);
+/// `t_array$_t_struct$_Log_$12_memory_ptr_$3_storage` → (`t_struct$_Log_$12_memory_ptr`, `3`).
+/// The outermost length is the last `_$` segment once the location suffix is gone.
+fn split_array_type(type_id: &str) -> Option<(&str, &str)> {
+    let inner = strip_type_suffix(type_id).strip_prefix("t_array$_")?;
+    inner.rsplit_once("_$")
+}
+
+/// The type produced by indexing a value of `type_id`: a mapping's value type,
+/// an array's element type, or `bytes1` for `bytes`.
+fn index_result_type(type_id: &str) -> Option<String> {
+    if type_id.starts_with("t_mapping") {
+        return extract_mapping_value_type(type_id);
+    }
+    if let Some((element, _)) = split_array_type(type_id) {
+        return Some(element.to_string());
+    }
+    if strip_type_suffix(type_id) == "t_bytes" {
+        return Some("t_bytes1".to_string());
+    }
+    None
+}
+
+/// Built-in members of arrays and byte types: `length` everywhere, plus
+/// `push` and `pop` on dynamic arrays and `bytes` in storage. `string` has none.
+fn builtin_type_members(type_id: &str) -> Vec<CompletionItem> {
+    let is_dynamic_bytes = strip_type_suffix(type_id) == "t_bytes";
+    let is_dynamic_array = split_array_type(type_id).is_some_and(|(_, len)| len == "dyn");
+    let is_fixed = split_array_type(type_id).is_some_and(|(_, len)| len != "dyn")
+        || type_id
+            .strip_prefix("t_bytes")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+
+    let mut items = Vec::new();
+    if is_dynamic_bytes || is_dynamic_array || is_fixed {
+        items.push(builtin_member(
+            "length",
+            CompletionItemKind::PROPERTY,
+            Some("uint256"),
+        ));
+    }
+    if (is_dynamic_bytes || is_dynamic_array) && type_id.contains("_storage") {
+        items.push(builtin_member(
+            "push(...)",
+            CompletionItemKind::METHOD,
+            None,
+        ));
+        items.push(builtin_member("pop()", CompletionItemKind::METHOD, None));
+    }
+    items
+}
+
+/// Synthetic type for a function, error, or event reached through a member
+/// access (`X.fn.`): the only member that follows is `selector`.
+const SELECTOR_MEMBER_TYPE: &str = "__selector_member";
+
 /// Collect completions available for a given typeIdentifier.
 /// Includes node_members, method_identifiers, using_for, and using_for_wildcard.
 fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+    if type_id == SELECTOR_MEMBER_TYPE {
+        return vec![builtin_member(
+            "selector",
+            CompletionItemKind::PROPERTY,
+            Some("bytes4"),
+        )];
+    }
+
     // Address type
     if type_id == "t_address" || type_id == "t_address_payable" {
         let mut items = address_members();
@@ -1317,8 +1435,9 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
                 .map(NodeId)
         });
 
-    let mut items = Vec::new();
-    let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut items = builtin_type_members(type_id);
+    let mut seen_labels: std::collections::HashSet<String> =
+        items.iter().map(|item| item.label.clone()).collect();
 
     if let Some(node_id) = resolved_node_id {
         // Method identifiers first — they have full signatures with selectors
@@ -1470,7 +1589,7 @@ pub fn resolve_name_in_scope(
             for &base_id in bases.iter().skip(1) {
                 if let Some(decls) = cache.scope_declarations.get(&base_id) {
                     for decl in decls {
-                        if decl.name == name {
+                        if decl.name == name && !decl.is_private {
                             return Some(decl.type_id.clone());
                         }
                     }
@@ -1527,23 +1646,34 @@ fn resolve_member_type(
                     if member.label == member_name {
                         // Get the typeIdentifier from name_to_type
                         if let Some(tid) = cache.name_to_type.get(member_name) {
-                            if tid.starts_with("t_mapping") {
-                                return extract_mapping_value_type(tid.as_str());
-                            }
-                            return Some(tid.to_string());
+                            return index_result_type(tid.as_str()).or(Some(tid.to_string()));
                         }
                     }
                 }
             }
             // Also check: the identifier itself might be a mapping variable
-            if let Some(tid) = cache.name_to_type.get(member_name)
-                && tid.starts_with("t_mapping")
-            {
-                return extract_mapping_value_type(tid.as_str());
-            }
-            None
+            cache
+                .name_to_type
+                .get(member_name)
+                .and_then(|tid| index_result_type(tid.as_str()))
         }
         AccessKind::Plain => {
+            // `X.fn.`, `X.SomeError.`, `X.SomeEvent.` — only `.selector` follows.
+            let is_callable_member = cache.node_members.get(&node_id).is_some_and(|members| {
+                members.iter().any(|m| {
+                    m.label == member_name
+                        && matches!(
+                            m.kind,
+                            Some(CompletionItemKind::FUNCTION | CompletionItemKind::EVENT)
+                        )
+                })
+            }) || cache
+                .method_identifiers
+                .get(&node_id)
+                .is_some_and(|methods| methods.iter().any(|m| m.label == member_name));
+            if is_callable_member {
+                return Some(SELECTOR_MEMBER_TYPE.to_string());
+            }
             // Look up member's own type from name_to_type
             cache
                 .name_to_type
@@ -1587,6 +1717,9 @@ pub fn get_dot_completions(
     // Simple single-segment case (backward compat) — just use the identifier directly
     if let Some(items) = magic_members(identifier) {
         return items;
+    }
+    if let Some(items) = cache.type_name_members.get(identifier) {
+        return items.clone();
     }
 
     // Try to resolve the identifier's type
@@ -1638,10 +1771,9 @@ pub fn get_chain_completions(
                 return vec![];
             }
             AccessKind::Index => {
-                // foo[key]. — look up foo's type and extract mapping value type
+                // foo[key]. — a mapping's value type or an array's element type
                 if let Some(tid) = resolve_name(cache, &seg.name, scope_ctx)
-                    && tid.starts_with("t_mapping")
-                    && let Some(val_type) = extract_mapping_value_type(&tid)
+                    && let Some(val_type) = index_result_type(&tid)
                 {
                     return completions_for_type(cache, &val_type);
                 }
@@ -1666,14 +1798,9 @@ pub fn get_chain_completions(
             })
         }
         AccessKind::Index => {
-            // Mapping access at the start
-            resolve_name(cache, &first.name, scope_ctx).and_then(|tid| {
-                if tid.starts_with("t_mapping") {
-                    extract_mapping_value_type(&tid)
-                } else {
-                    Some(tid)
-                }
-            })
+            // Mapping or array access at the start
+            resolve_name(cache, &first.name, scope_ctx)
+                .and_then(|tid| index_result_type(&tid).or(Some(tid)))
         }
     };
 
@@ -2535,6 +2662,7 @@ mod tests {
             path_to_file_id: HashMap::new(),
             linearized_base_contracts: HashMap::new(),
             contract_kinds: HashMap::new(),
+            type_name_members: HashMap::new(),
             top_level_importables_by_name: HashMap::new(),
             top_level_importables_by_file: HashMap::new(),
         }
