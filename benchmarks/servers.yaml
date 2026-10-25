@@ -9,6 +9,8 @@ mmsaki:
   cmd: solidity-language-server
   link: https://github.com/asyncswap/solidity-language-server
   versions:
+    # The pinned v0.1.17–v0.1.24 entries below resolve against a local
+    # ~/.solidity-lsp install and only work on a machine that has them.
     v0.1.17:
       cmd: /Users/meek/.solidity-lsp/0.1.17/bin/solidity-language-server
     v0.1.19:
@@ -23,10 +25,15 @@ mmsaki:
       cmd: /Users/meek/.solidity-lsp/0.1.23/bin/solidity-language-server
     v0.1.24:
       cmd: /Users/meek/.solidity-lsp/0.1.24/bin/solidity-language-server
+    # Stale: this points at whatever is built in the checkout, not at v0.1.25,
+    # so the commented-out A/B in pool.yaml and shop.yaml compares a build
+    # against itself. Repoint it at a real v0.1.25 install or drop it.
     v0.1.25:
       cmd: ./target/release/solidity-language-server
+    # Resolved relative to the repo root, so `latest` means "the build in this
+    # checkout" for whoever is running the benchmark.
     latest:
-      cmd: /Users/meek/developer/asyncswap/solidity-language-server/target/release/solidity-language-server
+      cmd: ./target/release/solidity-language-server
 
 solc:
   cmd: solc
