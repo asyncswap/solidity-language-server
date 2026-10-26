@@ -76,6 +76,7 @@ Dot completion runs when the trigger character is `.` and also when the cursor i
 - **Call segment**: use `function_return_types` to continue on return type.
 - **Index segment**: peel mapping/array value type and continue (`index_result_type`: mapping value, array element, or `bytes1` for `bytes`).
 - **Function, error, or event member** (`X.fn.`, `X.Err.`): continue on a synthetic type whose only member is `selector`.
+- **Nested enum** (`Lib.Enum.`): solc gives declarations no `typeDescriptions`, so the enum is found through `nested_types` (container node id + member name → enum node id), recorded while caching the container's members. It names a type, so `using_for_wildcard` extensions are not added.
 
 Final member set is composed from:
 
@@ -126,7 +127,7 @@ AST member lists are useful but do not always carry full external signature deta
 `method_identifiers` from `.contracts` adds:
 
 - canonical signature text,
-- selector metadata in label details,
+- the 4-byte selector in `documentation` (`selector: 0x095ea7b3`), shown in the editor's documentation popup. It is not in `labelDetails.detail`, which editors render flush against the label (`approve0x095ea7b3`),
 - better external/public method display for contract and interface completions.
 
 ## Import path completions

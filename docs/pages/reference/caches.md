@@ -116,6 +116,7 @@ This means after a warm-load, cross-file goto-definition, references, call hiera
 | `type_to_node` | `TypeIdentifier` → defining node id |
 | `node_members` | struct/contract/enum/library member completion items |
 | `name_to_node_id` | `SymbolName` (contract/library/interface name) → node id |
+| `nested_types` | `(container node id, member name)` → node id of an enum declared inside a contract/library/interface, for `Lib.Enum.` chains (declarations carry no `typeDescriptions`) |
 | `method_identifiers` | 4-byte selectors from `evm.methodIdentifiers` |
 | `function_return_types` | `(contract_id, fn_name)` → return typeIdentifier (for `foo().`) |
 | `using_for` | `TypeIdentifier` → library functions via `using X for T` |

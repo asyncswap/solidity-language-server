@@ -59,6 +59,8 @@ flowchart TD
 
 ## Cursor to declaration
 
+The cursor offset comes from the live buffer, but AST spans are offsets into the text the last successful build compiled. Hover maps the cursor into that text with `map_live_offset_to_compiled()` (the same text completion uses, `ForgeLsp.completion_source_text`) and returns no hover when the identifier under the cursor differs there (`cursor_in_compiled()`): after a rename such as `oldToken` → `paymentToken`, the cached AST at that spot describes a different symbol. When no compiled text is paired with the build, hover instead requires the word under the cursor to match the declaration's name (or the member name).
+
 Resolution order is:
 
 - Try Yul bridge first using `externalReferences`.
@@ -115,20 +117,10 @@ Hover markdown is assembled from parts in this order:
 
 - Signature block (or type fallback).
 - Selector line when available.
-- NodeId line for debugging (always shown).
 - Documentation section from doc index or NatSpec fallback.
 - Optional call-site `@param` detail when applicable.
 
 Parts are separated with blank lines for readability.
-
-## NodeId in hover
-
-Hover always includes a `NodeId:` line showing the AST node ID for debugging purposes. Two formats:
-
-- **Declaration hover:** ``NodeId: `2941` `` — shows the node's own ID.
-- **Reference hover:** ``NodeId: `569` referencedDeclaration: `2941` `` — shows the cursor-hit node's ID and the declaration it resolves to.
-
-This is useful for debugging cross-file resolution, verifying that PathInterner canonical IDs are correct, and understanding which AST node the server resolved from a cursor position.
 
 ## Test coverage and confidence
 

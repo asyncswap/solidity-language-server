@@ -1037,20 +1037,43 @@ fn test_method_identifiers_have_selectors() {
     let pm_methods = &cache.method_identifiers[&NodeId(1216)];
 
     let swap_item = pm_methods.iter().find(|c| c.label == "swap").unwrap();
-    let label_details = swap_item.label_details.as_ref().unwrap();
     assert_eq!(
-        label_details.detail.as_deref(),
-        Some("0xf3cd914c"),
+        selector_doc(swap_item),
+        Some("selector: 0xf3cd914c"),
         "swap selector should be 0xf3cd914c"
     );
 
     let settle_item = pm_methods.iter().find(|c| c.label == "settle").unwrap();
-    let settle_details = settle_item.label_details.as_ref().unwrap();
     assert_eq!(
-        settle_details.detail.as_deref(),
-        Some("0x11da60b4"),
+        selector_doc(settle_item),
+        Some("selector: 0x11da60b4"),
         "settle selector should be 0x11da60b4"
     );
+}
+
+/// The selector lives in `documentation` so it doesn't render glued to the label.
+fn selector_doc(item: &CompletionItem) -> Option<&str> {
+    match item.documentation.as_ref()? {
+        tower_lsp::lsp_types::Documentation::String(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+#[test]
+fn test_method_identifiers_label_has_no_selector() {
+    let cache = load_cache();
+    let pm_methods = &cache.method_identifiers[&NodeId(1216)];
+    for item in pm_methods {
+        let label_detail = item
+            .label_details
+            .as_ref()
+            .and_then(|d| d.detail.as_deref());
+        assert_eq!(
+            label_detail, None,
+            "{} should not show a selector after its label",
+            item.label
+        );
+    }
 }
 
 #[test]
@@ -1088,11 +1111,11 @@ fn test_method_identifiers_handles_overloads() {
     // Each should have a different selector
     let selectors: Vec<&str> = extsload_items
         .iter()
-        .map(|c| c.label_details.as_ref().unwrap().detail.as_deref().unwrap())
+        .map(|c| selector_doc(c).unwrap())
         .collect();
-    assert!(selectors.contains(&"0x1e2eaeaf"));
-    assert!(selectors.contains(&"0x35fd631a"));
-    assert!(selectors.contains(&"0xdbd035ff"));
+    assert!(selectors.contains(&"selector: 0x1e2eaeaf"));
+    assert!(selectors.contains(&"selector: 0x35fd631a"));
+    assert!(selectors.contains(&"selector: 0xdbd035ff"));
 }
 
 #[test]
