@@ -73,7 +73,7 @@ jobs:
           toolchain: 1.99.0
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
 
       - name: Download all artifacts
         uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317

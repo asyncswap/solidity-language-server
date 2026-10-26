@@ -116,6 +116,24 @@ fn test_extract_identifier_msg() {
 // --- parse_dot_chain ---
 
 #[test]
+fn test_parse_chain_partial_member_is_filter_prefix() {
+    let line = "obj.start";
+    let chain = parse_dot_chain(line, line.len() as u32);
+    assert_eq!(
+        chain,
+        vec![DotSegment {
+            name: "obj".to_string(),
+            kind: AccessKind::Plain,
+            call_args: None,
+        }]
+    );
+    assert!(solidity_language_server::completion::is_member_completion(
+        line,
+        line.len() as u32
+    ));
+}
+
+#[test]
 fn test_parse_chain_simple() {
     let chain = parse_dot_chain("msg.", 4);
     assert_eq!(
@@ -642,7 +660,9 @@ fn test_dot_completion_on_struct() {
     let pool_key_vars: Vec<&str> = cache
         .name_to_type
         .iter()
-        .filter(|(_, tid)| tid.contains("PoolKey"))
+        // A PoolKey value, not a function whose signature mentions PoolKey
+        // (`_accountPoolBalanceDelta`); HashMap order would otherwise pick at random.
+        .filter(|(_, tid)| tid.starts_with("t_struct$_PoolKey"))
         .map(|(name, _)| name.as_str())
         .collect();
 
@@ -3872,4 +3892,202 @@ fn test_builtin_members_insert_bare_names() {
     for item in get_dot_completions(&cache, "abi", None) {
         assert!(!item.label.contains('('), "label {:?}", item.label);
     }
+}
+
+// --- Scoped plain completion (#240 review) ---
+
+/// Invoked (no trigger character) completion with the cursor right after `needle`.
+fn plain_items_after(needle: &str, file_id: Option<FileId>) -> Vec<CompletionItem> {
+    let cache = load_scoped_locals_cache();
+    let offset = SCOPED_LOCALS_SRC.find(needle).expect("needle in text") + needle.len();
+    let before = &SCOPED_LOCALS_SRC[..offset];
+    let position = Position {
+        line: before.matches('\n').count() as u32,
+        character: (offset - before.rfind('\n').map_or(0, |i| i + 1)) as u32,
+    };
+    response_items(handle_completion(
+        Some(&cache),
+        SCOPED_LOCALS_SRC,
+        position,
+        None,
+        file_id,
+    ))
+}
+
+#[test]
+fn test_struct_field_chain_still_resolves() {
+    // `_pools[id].slot0.`: `slot0` is a Pool.State field whose type Slot0 gets
+    // Slot0Library getters. Struct fields left the general list, not the type map.
+    let cache = load_cache();
+    let chain = vec![
+        DotSegment {
+            name: "_pools".to_string(),
+            kind: AccessKind::Index,
+            call_args: None,
+        },
+        DotSegment {
+            name: "slot0".to_string(),
+            kind: AccessKind::Plain,
+            call_args: None,
+        },
+    ];
+    let labels: Vec<String> = get_chain_completions(&cache, &chain, None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    assert!(labels.iter().any(|l| l == "sqrtPriceX96"), "{labels:?}");
+}
+
+#[test]
+fn test_import_aliases_stay_in_general_completions() {
+    let raw: Value = serde_json::from_str(&fs::read_to_string("alias.json").unwrap()).unwrap();
+    let ast = solidity_language_server::solc::normalize_solc_output(raw, None);
+    let cache = build_completion_cache(ast.get("sources").unwrap(), None, None);
+    assert!(
+        cache
+            .general_completions
+            .iter()
+            .any(|i| i.label == "MyTest"),
+        "`import {{Test as MyTest}}` alias missing"
+    );
+}
+
+#[test]
+fn test_scoped_locals_respect_declaration_order() {
+    // Inside `members`, before `bytes4 sel = ...;` and `bytes4 err = ...;`.
+    let before = plain_items_after("stored.push(", Some(FileId(0)));
+    let labels: Vec<&str> = before.iter().map(|i| i.label.as_str()).collect();
+    for param in ["list", "raw", "word"] {
+        assert!(labels.contains(&param), "missing {param}: {labels:?}");
+    }
+    for later in ["sel", "err"] {
+        assert!(
+            !labels.contains(&later),
+            "{later} offered before it is declared"
+        );
+    }
+    // Another function's parameters stay out.
+    assert!(!labels.contains(&"items"));
+
+    let after = plain_items_after("        return ", Some(FileId(0)));
+    let labels: Vec<&str> = after.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"sel") && labels.contains(&"err"),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn test_scoped_locals_keep_type_detail() {
+    let items = plain_items_after("stored.push(", Some(FileId(0)));
+    let word = items
+        .iter()
+        .find(|i| i.label == "word")
+        .expect("word offered");
+    assert_eq!(word.detail.as_deref(), Some("bytes32"));
+}
+
+#[test]
+fn test_unscoped_request_still_offers_parameters() {
+    // No file id, so the cursor's scope cannot be resolved: fall back to every
+    // parameter and local rather than dropping them all.
+    let items = plain_items_after("stored.push(", None);
+    assert!(items.iter().any(|i| i.label == "list"));
+}
+
+#[test]
+fn test_invoked_completion_at_unresolved_member_gets_general_list() {
+    // `1.` looks like a member position but nothing resolves on `1`.
+    let cache = load_cache();
+    let source = "uint256 a = 1.";
+    let items = response_items(handle_completion(
+        Some(&cache),
+        source,
+        Position {
+            line: 0,
+            character: source.len() as u32,
+        },
+        None,
+        None,
+    ));
+    assert!(
+        items.iter().any(|i| i.label == "uint256"),
+        "{} items",
+        items.len()
+    );
+}
+
+// ── using-for extensions on values (issue #225) ────────────────────────────
+
+/// `using Hooks for IHooks` must offer the library's functions on a *value*
+/// typed `IHooks`. Previously the receiver's kind was inferred from its
+/// typeIdentifier, and because `IHooks` is a contract the extensions were
+/// suppressed on values as well as on the type name.
+#[test]
+fn test_using_for_extensions_appear_on_a_contract_typed_value() {
+    let cache = load_cache();
+
+    let labels: Vec<String> = get_dot_completions(&cache, "hooks", None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    assert!(
+        !labels.is_empty(),
+        "`hooks` (declared as IHooks) resolved to nothing"
+    );
+    // `hasPermission` and `isValidHookAddress` exist only on the Hooks library,
+    // not on the IHooks interface, so they can only have arrived via using-for.
+    for expected in ["hasPermission", "isValidHookAddress"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "`hooks.` is missing the `using Hooks for IHooks` extension {expected:?}; got {labels:?}"
+        );
+    }
+}
+
+/// The flip side: typing the *type name* must not pull in library extensions,
+/// which is the behavior the original suppression was written to protect.
+#[test]
+fn test_using_for_extensions_absent_on_the_type_name() {
+    let cache = load_cache();
+
+    let labels: Vec<String> = get_dot_completions(&cache, "IHooks", None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    // Library-only names must not leak onto the type. Names such as `beforeSwap`
+    // are deliberately not asserted here: IHooks declares them itself, so they
+    // legitimately appear either way.
+    for unexpected in ["hasPermission", "isValidHookAddress"] {
+        assert!(
+            !labels.iter().any(|l| l == unexpected),
+            "`IHooks.` should not offer the library extension {unexpected:?}; got {labels:?}"
+        );
+    }
+}
+
+/// A cast produces a value, so `IHooks(addr).` gets the extensions even though
+/// the name before the parenthesis is a contract.
+#[test]
+fn test_using_for_extensions_appear_after_a_cast() {
+    use solidity_language_server::completion::get_chain_completions;
+
+    let cache = load_cache();
+    let chain = vec![DotSegment {
+        name: "IHooks".to_string(),
+        kind: AccessKind::Call,
+        call_args: Some("addr".to_string()),
+    }];
+
+    let labels: Vec<String> = get_chain_completions(&cache, &chain, None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+
+    assert!(
+        labels.iter().any(|l| l == "hasPermission"),
+        "`IHooks(addr).` should offer library extensions; got {labels:?}"
+    );
 }

@@ -1,5 +1,6 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::Path;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, CompletionTextEdit,
@@ -34,6 +35,12 @@ pub struct ScopedDeclaration {
     /// `visibility: private`. Private members are not visible in derived
     /// contracts, so lookups through `linearized_base_contracts` skip them.
     pub is_private: bool,
+    /// typeString, shown as the completion item's detail (e.g. "uint256").
+    pub type_string: Option<String>,
+    /// Byte offset of a local declared inside a block, `for` header, or
+    /// `try`/`catch` clause. Such a local is only visible after this point;
+    /// `None` for parameters, state variables, and functions.
+    pub declared_at: Option<usize>,
 }
 
 /// A byte range identifying a scope-creating AST node.
@@ -52,7 +59,9 @@ pub struct ScopeRange {
 /// Completion cache built from the AST.
 #[derive(Debug)]
 pub struct CompletionCache {
-    /// All named identifiers as completion items (flat, unscoped).
+    /// Named identifiers offered as non-dot completions.
+    /// Struct fields, parameters, and locals are omitted. Parameters and locals
+    /// are added for the cursor's scope in `append_scoped_variables`.
     pub names: Vec<CompletionItem>,
 
     /// name → typeIdentifier (for dot-completion: look up what type a variable is).
@@ -85,6 +94,14 @@ pub struct CompletionCache {
     /// Pre-built general completions (AST names + keywords + globals + units).
     /// Built once, returned by reference on every non-dot completion request.
     pub general_completions: Vec<CompletionItem>,
+
+    /// Labels in `general_completions`, so scoped parameters and locals can be
+    /// deduplicated against it without rehashing the list on every request.
+    pub general_labels: HashSet<String>,
+
+    /// Parameters and locals as flat items (first declaration per name). Offered
+    /// only when the cursor's scope cannot be resolved, e.g. no file id.
+    pub unscoped_variables: Vec<CompletionItem>,
 
     /// scope node_id → declarations in that scope.
     /// Each scope (Block, FunctionDefinition, ContractDefinition, SourceUnit)
@@ -425,6 +442,14 @@ pub fn build_completion_cache(
         HashMap::with_capacity(est_contracts);
     let mut top_level_importables_by_file: HashMap<RelPath, Vec<TopLevelImportable>> =
         HashMap::with_capacity(est_names);
+    // Node type of every scope a variable can declare into, recorded as the
+    // walk reaches it (always before the declarations it contains). It tells a
+    // file-level or state variable (SourceUnit/ContractDefinition scope) from
+    // a parameter (function/modifier) or a local (block, `for`, `try` clause).
+    // Struct fields and event/error parameters have scopes not recorded here.
+    let mut var_scope_kinds: HashMap<NodeId, &str> = HashMap::new();
+    let mut unscoped_variables: Vec<CompletionItem> = Vec::new();
+    let mut seen_unscoped: HashSet<String> = HashSet::new();
 
     if let Some(sources_obj) = sources.as_object() {
         for (path, source_data) in sources_obj {
@@ -519,6 +544,12 @@ pub fn build_completion_cache(
                                 type_id: tid.to_string(),
                                 is_private: tree.get("visibility").and_then(|v| v.as_str())
                                     == Some("private"),
+                                type_string: type_string_of(tree),
+                                declared_at: var_scope_kinds
+                                    .get(&NodeId(scope_raw))
+                                    .filter(|k| is_statement_scope(k))
+                                    .and(parse_src(tree))
+                                    .map(|loc| loc.offset),
                             });
                     }
 
@@ -539,21 +570,79 @@ pub fn build_completion_cache(
                                 type_id: tid.to_string(),
                                 is_private: tree.get("visibility").and_then(|v| v.as_str())
                                     == Some("private"),
+                                type_string: type_string_of(tree),
+                                declared_at: None,
                             });
                     }
 
+                    if (matches!(
+                        node_type,
+                        "SourceUnit"
+                            | "ContractDefinition"
+                            | "FunctionDefinition"
+                            | "ModifierDefinition"
+                    ) || is_statement_scope(node_type))
+                        && let Some(id) = node_id
+                    {
+                        var_scope_kinds.insert(id, node_type);
+                    }
+
+                    // Only declarations that can be written as bare names belong in
+                    // the non-dot list. Identifier / MemberAccess / Yul names are
+                    // uses. Struct fields, function and event parameters, and
+                    // locals are not global names; parameters and locals are added
+                    // back at request time when the cursor is in their scope.
+                    let var_scope_kind = if node_type == "VariableDeclaration" {
+                        tree.get("scope")
+                            .and_then(|v| v.as_i64())
+                            .map(|scope| var_scope_kinds.get(&NodeId(scope)).copied())
+                    } else {
+                        None
+                    };
+                    let is_hidden_variable = var_scope_kind.is_some_and(|kind| {
+                        !matches!(kind, Some("SourceUnit" | "ContractDefinition"))
+                    });
+
+                    // Parameters and locals, kept as a flat fallback for requests
+                    // whose scope cannot be resolved.
+                    if !name.is_empty()
+                        && var_scope_kind.flatten().is_some_and(|kind| {
+                            !matches!(kind, "SourceUnit" | "ContractDefinition")
+                        })
+                        && seen_unscoped.insert(name.to_string())
+                    {
+                        unscoped_variables.push(CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: type_string_of(tree),
+                            ..Default::default()
+                        });
+                    }
+                    let is_bare_name_decl = matches!(
+                        node_type,
+                        "ContractDefinition"
+                            | "StructDefinition"
+                            | "EnumDefinition"
+                            | "UserDefinedValueTypeDefinition"
+                            | "FunctionDefinition"
+                            | "ModifierDefinition"
+                            | "EventDefinition"
+                            | "ErrorDefinition"
+                            | "VariableDeclaration"
+                            | "ImportDirective"
+                    );
+
                     // Collect named nodes as completion items
-                    if !name.is_empty() && !seen_names.contains_key(name) {
+                    if !name.is_empty()
+                        && is_bare_name_decl
+                        && !is_hidden_variable
+                        && !seen_names.contains_key(name)
+                    {
                         let type_string = tree
                             .get("typeDescriptions")
                             .and_then(|td| td.get("typeString"))
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
-
-                        let type_id = tree
-                            .get("typeDescriptions")
-                            .and_then(|td| td.get("typeIdentifier"))
-                            .and_then(|v| v.as_str());
 
                         let kind = node_type_to_completion_kind(node_type);
 
@@ -567,10 +656,46 @@ pub fn build_completion_cache(
                         let idx = names.len();
                         names.push(item);
                         seen_names.insert(SymbolName::new(name), idx);
+                    }
 
-                        // Store name → typeIdentifier mapping
-                        if let Some(tid) = type_id {
-                            name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
+                    // name → typeIdentifier for every named node, including the
+                    // struct fields, parameters, and locals left out of `names`:
+                    // chain resolution looks member types up here (`a.field.`),
+                    // and it is the fallback when the cursor's scope is unknown.
+                    // `t_type$...` is a use of a type name as an expression (the
+                    // `IHooks` in `IHooks(addr)`); recording it would shadow the
+                    // `name_to_node_id` lookup that resolves type names.
+                    if !name.is_empty()
+                        && !name_to_type.contains_key(name)
+                        && let Some(tid) = tree
+                            .get("typeDescriptions")
+                            .and_then(|td| td.get("typeIdentifier"))
+                            .and_then(|v| v.as_str())
+                        && !tid.starts_with("t_type$")
+                    {
+                        name_to_type.insert(SymbolName::new(name), TypeIdentifier::new(tid));
+                    }
+
+                    // Import aliases (`import {Test as MyTest}`, `import "x" as X`)
+                    // are only named on uses, which `names` no longer collects.
+                    if node_type == "ImportDirective" {
+                        let symbol_aliases = tree
+                            .get("symbolAliases")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|a| a.get("local").and_then(|v| v.as_str()));
+                        let unit_alias = tree.get("unitAlias").and_then(|v| v.as_str());
+                        for alias in symbol_aliases.chain(unit_alias) {
+                            if alias.is_empty() || seen_names.contains_key(alias) {
+                                continue;
+                            }
+                            seen_names.insert(SymbolName::new(alias), names.len());
+                            names.push(CompletionItem {
+                                label: alias.to_string(),
+                                kind: Some(CompletionItemKind::MODULE),
+                                ..Default::default()
+                            });
                         }
                     }
 
@@ -922,6 +1047,10 @@ pub fn build_completion_cache(
     // Pre-build the general completions list (names + statics) once
     let mut general_completions = names.clone();
     general_completions.extend(get_static_completions());
+    let general_labels: HashSet<String> = general_completions
+        .iter()
+        .map(|item| item.label.clone())
+        .collect();
 
     // Sort scope_ranges by span size ascending (smallest first) for innermost-scope lookup
     scope_ranges.sort_by_key(|r| r.end - r.start);
@@ -975,6 +1104,8 @@ pub fn build_completion_cache(
         using_for,
         using_for_wildcard,
         general_completions,
+        general_labels,
+        unscoped_variables,
         scope_declarations,
         scope_parent,
         scope_ranges,
@@ -985,6 +1116,21 @@ pub fn build_completion_cache(
         top_level_importables_by_name,
         top_level_importables_by_file,
     }
+}
+
+/// Scopes whose variables are locals: visible only after their declaration.
+fn is_statement_scope(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "Block" | "UncheckedBlock" | "ForStatement" | "TryCatchClause"
+    )
+}
+
+fn type_string_of(node: &Value) -> Option<String> {
+    node.get("typeDescriptions")
+        .and_then(|td| td.get("typeString"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Magic type member definitions (msg, block, tx, abi, address).
@@ -1222,6 +1368,20 @@ fn skip_brackets_backwards(bytes: &[u8], pos: usize) -> usize {
 /// e.g. `poolManager.swap(key, params).` → [("poolManager", Plain), ("swap", Call)]
 ///      `_pools[poolId].fee.` → [("_pools", Index), ("fee", Plain)]
 ///      `msg.` → [("msg", Plain)]
+/// True when the cursor is in a member-access completion.
+///
+/// Matches both `obj.|` and `obj.sta|`. The identifier after the dot is a
+/// filter prefix, not a resolved member. Clients re-request completion after
+/// the first `.` without sending the trigger character again.
+pub fn is_member_completion(line: &str, character: u32) -> bool {
+    let bytes = line.as_bytes();
+    let mut pos = (character as usize).min(bytes.len());
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+    pos > 0 && bytes[pos - 1] == b'.'
+}
+
 pub fn parse_dot_chain(line: &str, character: u32) -> Vec<DotSegment> {
     let col = character as usize;
     if col == 0 {
@@ -1231,8 +1391,14 @@ pub fn parse_dot_chain(line: &str, character: u32) -> Vec<DotSegment> {
     let bytes = line.as_bytes();
     let mut segments: Vec<DotSegment> = Vec::new();
 
-    // Start from the cursor position, skip trailing dot
-    let mut pos = col;
+    // Start from the cursor. `obj.sta|` is still a completion on `obj`, so drop
+    // the partial member name before parsing the chain.
+    let mut pos = col.min(bytes.len());
+    if is_member_completion(line, character) {
+        while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+            pos -= 1;
+        }
+    }
     if pos > 0 && pos <= bytes.len() && bytes[pos - 1] == b'.' {
         pos -= 1;
     }
@@ -1318,9 +1484,26 @@ fn strip_type_suffix(type_id: &str) -> &str {
 /// Look up using-for completions for a type, trying suffix variants.
 /// The AST stores types with different suffixes (_storage_ptr, _storage, _memory_ptr, etc.)
 /// across different contexts, so we try multiple forms.
-fn lookup_using_for(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+fn lookup_using_for(
+    cache: &CompletionCache,
+    type_id: &str,
+    node_id: Option<NodeId>,
+) -> Vec<CompletionItem> {
     // Exact match first
     if let Some(items) = cache.using_for.get(type_id) {
+        return items.clone();
+    }
+
+    // A contract name that has no entry in `type_to_node` resolves to the
+    // synthetic `__node_id_N` marker, which can never match a real key like
+    // `t_contract$_IHooks_$1840`. Recover by matching on the node id instead.
+    if let Some(nid) = node_id
+        && type_id.starts_with("__node_id_")
+        && let Some((_, items)) = cache
+            .using_for
+            .iter()
+            .find(|(tid, _)| extract_node_id_from_type(tid.as_str()) == Some(nid))
+    {
         return items.clone();
     }
 
@@ -1405,7 +1588,11 @@ const SELECTOR_MEMBER_TYPE: &str = "__selector_member";
 
 /// Collect completions available for a given typeIdentifier.
 /// Includes node_members, method_identifiers, using_for, and using_for_wildcard.
-fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<CompletionItem> {
+fn completions_for_type(
+    cache: &CompletionCache,
+    type_id: &str,
+    receiver: ReceiverKind,
+) -> Vec<CompletionItem> {
     if type_id == SELECTOR_MEMBER_TYPE {
         return vec![builtin_member(
             "selector",
@@ -1459,16 +1646,17 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
         }
     }
 
-    // Add using-for library functions, but only for value types — not for
-    // contract/library/interface names. When you type `Lock.`, you want Lock's
-    // own members, not functions from `using Pool for *` or `using SafeCast for *`.
-    let is_contract_name = resolved_node_id
-        .map(|nid| cache.contract_kinds.contains_key(&nid))
-        .unwrap_or(false);
-
-    if !is_contract_name {
+    // Add using-for library functions, but only when the receiver is a value —
+    // not when it names a type. Typing `Lock.` should offer Lock's own members,
+    // not functions from `using Pool for *` or `using SafeCast for *`.
+    //
+    // This has to come from the caller. Deriving it from the type (`is this a
+    // contract?`) conflated `IERC20.` with a `paymentToken` declared as
+    // `IERC20`, because both carry the same typeIdentifier — which meant
+    // `using SafeERC20 for IERC20` extensions never showed up on the value.
+    if receiver == ReceiverKind::Value {
         // Try exact match first, then try normalized variants (storage_ptr vs storage vs memory_ptr etc.)
-        let uf_items = lookup_using_for(cache, type_id);
+        let uf_items = lookup_using_for(cache, type_id, resolved_node_id);
         for item in &uf_items {
             if !seen_labels.contains(&item.label) {
                 seen_labels.insert(item.label.clone());
@@ -1488,22 +1676,41 @@ fn completions_for_type(cache: &CompletionCache, type_id: &str) -> Vec<Completio
     items
 }
 
-/// Resolve a type identifier for a name, considering name_to_type and name_to_node_id.
-fn resolve_name_to_type_id(cache: &CompletionCache, name: &str) -> Option<String> {
-    // Direct type lookup
+/// Whether the expression before the dot *names a type* or *is a value* of one.
+///
+/// Both produce the same `typeIdentifier` — `IERC20.` and a `paymentToken`
+/// declared as `IERC20` both resolve to `t_contract$_IERC20_$N` — so the
+/// distinction cannot be recovered from the type alone and has to be carried
+/// down from wherever the receiver was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverKind {
+    /// `IERC20.` — the contract/library/interface itself.
+    TypeName,
+    /// `paymentToken.` — a value whose type is that contract.
+    Value,
+}
+
+/// Resolve a type identifier for a name, considering name_to_type and
+/// name_to_node_id, reporting whether the name was a variable (a value) or a
+/// contract/library/interface name (a type).
+fn resolve_name_to_type_id_kind(
+    cache: &CompletionCache,
+    name: &str,
+) -> Option<(String, ReceiverKind)> {
+    // Direct type lookup — the name is a variable, so this is a value.
     if let Some(tid) = cache.name_to_type.get(name) {
-        return Some(tid.to_string());
+        return Some((tid.to_string(), ReceiverKind::Value));
     }
     // Contract/library/interface name → synthesize a type id from node id
     if let Some(node_id) = cache.name_to_node_id.get(name) {
         // Find a matching typeIdentifier in type_to_node (reverse lookup)
         for (tid, nid) in &cache.type_to_node {
             if nid == node_id {
-                return Some(tid.to_string());
+                return Some((tid.to_string(), ReceiverKind::TypeName));
             }
         }
         // Fallback: use a synthetic marker so completions_for_type can resolve via node_id
-        return Some(format!("__node_id_{}", node_id));
+        return Some((format!("__node_id_{}", node_id), ReceiverKind::TypeName));
     }
     None
 }
@@ -1539,6 +1746,83 @@ pub fn map_live_offset_to_compiled(live: &str, compiled: &str, pos: usize) -> us
     shifted.clamp(prefix, c.len() - suffix)
 }
 
+/// Add the parameters and locals visible at the cursor.
+///
+/// These names are omitted from the flat general list, so a parameter like
+/// `startAt` on another function or event does not show up everywhere.
+/// Struct fields and event parameters stay out: their scopes are not on this chain.
+/// Without a resolvable scope, every parameter and local is offered instead.
+fn append_scoped_variables(
+    cache: &CompletionCache,
+    items: &mut Vec<CompletionItem>,
+    ctx: Option<&ScopeContext>,
+) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut scoped = Vec::new();
+    let in_scope = ctx.is_some_and(|ctx| {
+        walk_visible_declarations(cache, ctx.byte_pos, ctx.file_id, |decl| {
+            if !cache.general_labels.contains(&decl.name) && seen.insert(&decl.name) {
+                scoped.push(CompletionItem {
+                    label: decl.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: decl.type_string.clone(),
+                    ..Default::default()
+                });
+            }
+            ControlFlow::Continue(())
+        })
+    });
+    if in_scope {
+        items.extend(scoped);
+    } else {
+        items.extend(cache.unscoped_variables.iter().cloned());
+    }
+}
+
+/// Visit every declaration visible at `byte_pos`, innermost scope first: each
+/// scope's own declarations, then (for a contract) the non-private ones of its
+/// bases in C3 order, then the enclosing scope. Locals declared after
+/// `byte_pos` are skipped, since a Solidity local is visible only after its
+/// declaration. `visit` can stop the walk early with `ControlFlow::Break`.
+///
+/// Returns false when `byte_pos` is in no known scope.
+fn walk_visible_declarations<'a>(
+    cache: &'a CompletionCache,
+    byte_pos: usize,
+    file_id: FileId,
+    mut visit: impl FnMut(&'a ScopedDeclaration) -> ControlFlow<()>,
+) -> bool {
+    let Some(mut current) = find_innermost_scope(cache, byte_pos, file_id) else {
+        return false;
+    };
+    let declared_before =
+        |decl: &ScopedDeclaration| decl.declared_at.is_none_or(|at| at < byte_pos);
+    loop {
+        for decl in cache.scope_declarations.get(&current).into_iter().flatten() {
+            if declared_before(decl) && visit(decl).is_break() {
+                return true;
+            }
+        }
+        for &base in cache
+            .linearized_base_contracts
+            .get(&current)
+            .into_iter()
+            .flatten()
+            .skip(1)
+        {
+            for decl in cache.scope_declarations.get(&base).into_iter().flatten() {
+                if !decl.is_private && visit(decl).is_break() {
+                    return true;
+                }
+            }
+        }
+        match cache.scope_parent.get(&current) {
+            Some(&parent) => current = parent,
+            None => return true,
+        }
+    }
+}
+
 /// Find the innermost scope node that contains the given byte position and file.
 /// `scope_ranges` must be sorted by span size ascending (smallest first).
 /// Returns the node_id of the smallest scope enclosing the position.
@@ -1561,7 +1845,7 @@ pub fn find_innermost_scope(
 /// declarations for a matching name. If not found, follow `scope_parent` to the
 /// next enclosing scope and check again. Stop at the first match.
 ///
-/// Falls back to `resolve_name_to_type_id` (flat lookup) if scope resolution
+/// Falls back to `resolve_name_to_type_id_kind` (flat lookup) if scope resolution
 /// finds nothing, or if the scope data is unavailable.
 pub fn resolve_name_in_scope(
     cache: &CompletionCache,
@@ -1569,44 +1853,29 @@ pub fn resolve_name_in_scope(
     byte_pos: usize,
     file_id: FileId,
 ) -> Option<String> {
-    let mut current_scope = find_innermost_scope(cache, byte_pos, file_id)?;
+    resolve_name_in_scope_kind(cache, name, byte_pos, file_id).map(|(tid, _)| tid)
+}
 
-    // Walk up the scope chain
-    loop {
-        // Check declarations in this scope
-        if let Some(decls) = cache.scope_declarations.get(&current_scope) {
-            for decl in decls {
-                if decl.name == name {
-                    return Some(decl.type_id.clone());
-                }
-            }
+/// Like [`resolve_name_in_scope`], but also reports whether the resolved name
+/// was a declaration in scope (a value) or a contract name (a type).
+fn resolve_name_in_scope_kind(
+    cache: &CompletionCache,
+    name: &str,
+    byte_pos: usize,
+    file_id: FileId,
+) -> Option<(String, ReceiverKind)> {
+    let mut found = None;
+    walk_visible_declarations(cache, byte_pos, file_id, |decl| {
+        if decl.name == name {
+            found = Some((decl.type_id.clone(), ReceiverKind::Value));
+            return ControlFlow::Break(());
         }
+        ControlFlow::Continue(())
+    });
 
-        // If this scope is a contract, also search inherited contracts
-        // in C3 linearization order (skipping index 0 which is the contract itself,
-        // since we already checked its declarations above).
-        if let Some(bases) = cache.linearized_base_contracts.get(&current_scope) {
-            for &base_id in bases.iter().skip(1) {
-                if let Some(decls) = cache.scope_declarations.get(&base_id) {
-                    for decl in decls {
-                        if decl.name == name && !decl.is_private {
-                            return Some(decl.type_id.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Move up to parent scope
-        match cache.scope_parent.get(&current_scope) {
-            Some(&parent_id) => current_scope = parent_id,
-            None => break, // reached the top (SourceUnit has no parent)
-        }
-    }
-
-    // Scope walk found nothing — fall back to flat lookup
-    // (handles contract/library names which aren't in scope_declarations)
-    resolve_name_to_type_id(cache, name)
+    // Not declared in scope (or the cursor is in no known scope): fall back to
+    // the flat lookup, which also covers contract/library names.
+    found.or_else(|| resolve_name_to_type_id_kind(cache, name))
 }
 
 /// Resolve a name within a type context to get the member's type.
@@ -1701,10 +1970,19 @@ fn resolve_name(
     name: &str,
     scope_ctx: Option<&ScopeContext>,
 ) -> Option<String> {
+    resolve_name_kind(cache, name, scope_ctx).map(|(tid, _)| tid)
+}
+
+/// Like [`resolve_name`], but also reports whether the name was a value or a type.
+fn resolve_name_kind(
+    cache: &CompletionCache,
+    name: &str,
+    scope_ctx: Option<&ScopeContext>,
+) -> Option<(String, ReceiverKind)> {
     if let Some(ctx) = scope_ctx {
-        resolve_name_in_scope(cache, name, ctx.byte_pos, ctx.file_id)
+        resolve_name_in_scope_kind(cache, name, ctx.byte_pos, ctx.file_id)
     } else {
-        resolve_name_to_type_id(cache, name)
+        resolve_name_to_type_id_kind(cache, name)
     }
 }
 
@@ -1722,11 +2000,10 @@ pub fn get_dot_completions(
         return items.clone();
     }
 
-    // Try to resolve the identifier's type
-    let type_id = resolve_name(cache, identifier, scope_ctx);
-
-    if let Some(tid) = type_id {
-        return completions_for_type(cache, &tid);
+    // Plain access, so a contract name stays a type name and a variable stays
+    // a value — exactly the distinction using-for extensions hinge on.
+    if let Some((tid, receiver)) = resolve_name_kind(cache, identifier, scope_ctx) {
+        return completions_for_type(cache, &tid, receiver);
     }
 
     vec![]
@@ -1759,13 +2036,15 @@ pub fn get_chain_completions(
                 }
                 // foo(). — could be a function call or a type cast like IFoo(addr).
                 // First check if it's a type cast: name matches a contract/interface/library
+                // A cast yields a *value* of that type, so extensions apply even
+                // though the name itself is a contract.
                 if let Some(type_id) = resolve_name(cache, &seg.name, scope_ctx) {
-                    return completions_for_type(cache, &type_id);
+                    return completions_for_type(cache, &type_id, ReceiverKind::Value);
                 }
                 // Otherwise look up as a function call — check all function_return_types
                 for ((_, fn_name), ret_type) in &cache.function_return_types {
                     if fn_name == &seg.name {
-                        return completions_for_type(cache, ret_type);
+                        return completions_for_type(cache, ret_type, ReceiverKind::Value);
                     }
                 }
                 return vec![];
@@ -1775,7 +2054,7 @@ pub fn get_chain_completions(
                 if let Some(tid) = resolve_name(cache, &seg.name, scope_ctx)
                     && let Some(val_type) = index_result_type(&tid)
                 {
-                    return completions_for_type(cache, &val_type);
+                    return completions_for_type(cache, &val_type, ReceiverKind::Value);
                 }
                 return vec![];
             }
@@ -1814,9 +2093,10 @@ pub fn get_chain_completions(
         current_type = resolve_member_type(cache, &ctx_type, &seg.name, &seg.kind);
     }
 
-    // Return completions for the final resolved type
+    // Return completions for the final resolved type. Anything reached by
+    // walking members is a value, never a type name.
     match current_type {
-        Some(tid) => completions_for_type(cache, &tid),
+        Some(tid) => completions_for_type(cache, &tid, ReceiverKind::Value),
         None => vec![],
     }
 }
@@ -2297,12 +2577,13 @@ pub fn handle_completion_with_tail_candidates(
         file_id: fid,
     });
 
-    let items = if trigger_char == Some(".") {
+    let triggered_by_dot = trigger_char == Some(".");
+    let member_items = if triggered_by_dot || is_member_completion(line, col_byte) {
         let chain = parse_dot_chain(line, col_byte);
-        if chain.is_empty() {
+        if chain.is_empty() && triggered_by_dot {
             return None;
         }
-        match cache {
+        Some(match cache {
             Some(c) => get_chain_completions(c, &chain, scope_ctx.as_ref()),
             None => {
                 // No cache yet — serve magic dot completions (msg., block., etc.)
@@ -2320,14 +2601,24 @@ pub fn handle_completion_with_tail_candidates(
                     vec![]
                 }
             }
-        }
+        })
     } else {
-        match cache {
+        None
+    };
+
+    let items = match member_items {
+        // A member position nothing resolves on (`1.`, `/// see Foo.bar`, a local
+        // the cache has not seen yet) still gets the general list when completion
+        // was invoked rather than triggered by typing `.`.
+        Some(items) if triggered_by_dot || !items.is_empty() => items,
+        _ => match cache {
             Some(c) => {
-                append_auto_import_candidates_last(c.general_completions.clone(), tail_candidates)
+                let mut items = c.general_completions.clone();
+                append_scoped_variables(c, &mut items, scope_ctx.as_ref());
+                append_auto_import_candidates_last(items, tail_candidates)
             }
             None => get_static_completions(),
-        }
+        },
     };
 
     Some(CompletionResponse::List(CompletionList {
@@ -2636,11 +2927,11 @@ fn make_import_item(label: String, typed_range: Option<(u32, u32, u32)>) -> Comp
 mod tests {
     use super::{
         CompletionCache, TopLevelImportable, append_auto_import_candidates_last,
-        build_completion_cache, extract_top_level_importables_for_file,
+        build_completion_cache, extract_top_level_importables_for_file, handle_completion,
     };
-    use crate::types::SymbolName;
+    use crate::types::{FileId, SymbolName};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use tower_lsp::lsp_types::CompletionItemKind;
     use tower_lsp::lsp_types::{CompletionItem, CompletionResponse, Position, Range, TextEdit};
 
@@ -2656,6 +2947,8 @@ mod tests {
             using_for: HashMap::new(),
             using_for_wildcard: vec![],
             general_completions: vec![],
+            general_labels: HashSet::new(),
+            unscoped_variables: vec![],
             scope_declarations: HashMap::new(),
             scope_parent: HashMap::new(),
             scope_ranges: vec![],
@@ -2713,6 +3006,270 @@ mod tests {
         assert!(file_names.contains(&"C"));
         assert!(file_names.contains(&"TOP_CONST"));
         assert!(!file_names.contains(&"Alias"));
+    }
+
+    fn start_at_sources() -> serde_json::Value {
+        json!({
+            "/tmp/A.sol": {
+                "id": 0,
+                "ast": {
+                    "id": 1,
+                    "nodeType": "SourceUnit",
+                    "src": "0:200:0",
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "nodeType": "StructDefinition",
+                            "name": "Contract",
+                            "scope": 1,
+                            "src": "0:30:0",
+                            "members": [
+                                {
+                                    "id": 11,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "startAt",
+                                    "scope": 10,
+                                    "src": "10:7:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint32",
+                                        "typeIdentifier": "t_uint32"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "id": 30,
+                            "nodeType": "EventDefinition",
+                            "name": "Started",
+                            "scope": 1,
+                            "src": "31:20:0",
+                            "parameters": {
+                                "id": 31,
+                                "nodeType": "ParameterList",
+                                "src": "40:10:0",
+                                "parameters": [
+                                    {
+                                        "id": 32,
+                                        "nodeType": "VariableDeclaration",
+                                        "name": "startAt",
+                                        "scope": 30,
+                                        "src": "40:7:0",
+                                        "typeDescriptions": {
+                                            "typeString": "uint32",
+                                            "typeIdentifier": "t_uint32"
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "id": 40,
+                            "nodeType": "ContractDefinition",
+                            "name": "Pool",
+                            "scope": 1,
+                            "src": "60:140:0",
+                            "nodes": [
+                                {
+                                    "id": 41,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "stateVar",
+                                    "scope": 40,
+                                    "src": "70:8:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint256",
+                                        "typeIdentifier": "t_uint256"
+                                    }
+                                },
+                                {
+                                    "id": 50,
+                                    "nodeType": "FunctionDefinition",
+                                    "name": "onStart",
+                                    "scope": 40,
+                                    "src": "90:100:0",
+                                    "parameters": {
+                                        "id": 49,
+                                        "nodeType": "ParameterList",
+                                        "src": "95:12:0",
+                                        "parameters": [
+                                            {
+                                                "id": 51,
+                                                "nodeType": "VariableDeclaration",
+                                                "name": "startAt",
+                                                "scope": 50,
+                                                "src": "100:7:0",
+                                                "typeDescriptions": {
+                                                    "typeString": "uint32",
+                                                    "typeIdentifier": "t_uint32"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "body": {
+                                        "id": 60,
+                                        "nodeType": "Block",
+                                        "scope": 50,
+                                        "src": "110:70:0"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        })
+    }
+
+    fn labels_of(resp: Option<CompletionResponse>) -> Vec<String> {
+        match resp {
+            Some(CompletionResponse::List(list)) => {
+                list.items.into_iter().map(|item| item.label).collect()
+            }
+            Some(CompletionResponse::Array(items)) => {
+                items.into_iter().map(|item| item.label).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn general_completions_omit_struct_fields_and_params() {
+        let cache = build_completion_cache(&start_at_sources(), None, None);
+        let labels: Vec<&str> = cache
+            .general_completions
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+
+        assert!(labels.contains(&"Contract"));
+        assert!(labels.contains(&"Pool"));
+        assert!(labels.contains(&"onStart"));
+        assert!(labels.contains(&"Started"));
+        assert!(labels.contains(&"stateVar"));
+        assert!(!labels.contains(&"startAt"));
+        // Hidden from the general list, but still typed: chains through a
+        // struct field (`obj.startAt.`) resolve the member through `name_to_type`.
+        assert!(cache.name_to_type.contains_key("startAt"));
+
+        let members = cache.node_members.get(&crate::types::NodeId(10)).unwrap();
+        assert!(members.iter().any(|item| item.label == "startAt"));
+    }
+
+    #[test]
+    fn param_completion_only_inside_its_function() {
+        let cache = build_completion_cache(&start_at_sources(), None, None);
+        let source = " ".repeat(200);
+        let outside = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: 10,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+        let inside = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: 120,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+
+        assert!(!outside.iter().any(|label| label == "startAt"));
+        assert!(inside.iter().any(|label| label == "startAt"));
+    }
+
+    #[test]
+    fn member_completion_without_trigger_character() {
+        let sources = json!({
+            "/tmp/A.sol": {
+                "id": 0,
+                "ast": {
+                    "id": 1,
+                    "nodeType": "SourceUnit",
+                    "src": "0:80:0",
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "nodeType": "StructDefinition",
+                            "name": "Info",
+                            "scope": 1,
+                            "src": "0:40:0",
+                            "members": [
+                                {
+                                    "id": 11,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "startAt",
+                                    "scope": 10,
+                                    "src": "10:7:0",
+                                    "typeDescriptions": {
+                                        "typeString": "uint32",
+                                        "typeIdentifier": "t_uint32"
+                                    }
+                                }
+                            ],
+                            "typeDescriptions": {
+                                "typeIdentifier": "t_struct$_Info_$10_storage"
+                            }
+                        },
+                        {
+                            "id": 40,
+                            "nodeType": "ContractDefinition",
+                            "name": "Pool",
+                            "scope": 1,
+                            "src": "40:40:0",
+                            "nodes": [
+                                {
+                                    "id": 41,
+                                    "nodeType": "VariableDeclaration",
+                                    "name": "obj",
+                                    "scope": 40,
+                                    "src": "50:10:0",
+                                    "typeDescriptions": {
+                                        "typeString": "struct Info",
+                                        "typeIdentifier": "t_struct$_Info_$10_storage"
+                                    }
+                                },
+                                {
+                                    "id": 50,
+                                    "nodeType": "FunctionDefinition",
+                                    "name": "run",
+                                    "scope": 40,
+                                    "src": "60:20:0",
+                                    "body": {
+                                        "id": 60,
+                                        "nodeType": "Block",
+                                        "scope": 50,
+                                        "src": "60:20:0"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let cache = build_completion_cache(&sources, None, None);
+        // Cursor is on `obj.start`, and the editor did not send trigger `.`.
+        let source = format!("{:80}", "obj.start");
+        let labels = labels_of(handle_completion(
+            Some(&cache),
+            &source,
+            Position {
+                line: 0,
+                character: "obj.start".len() as u32,
+            },
+            None,
+            Some(FileId(0)),
+        ));
+        assert!(
+            labels.iter().any(|label| label == "startAt"),
+            "fields missing: {labels:?}"
+        );
     }
 
     #[test]

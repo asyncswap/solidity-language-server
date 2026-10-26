@@ -60,7 +60,8 @@ Non-dot requests return prebuilt general completions and then append tail candid
 
 General completions include:
 
-- named AST symbols,
+- named declarations that can be written as bare names (contracts, structs, enums, functions, events, errors, state variables). Struct fields, function and event parameters, and locals are excluded from this flat list. Parameters and locals are added only when the cursor is inside their scope, and a local only after its declaration. Without a resolvable scope (no file id), every parameter and local is offered instead. Struct fields appear only as dot-completion members,
+- import aliases (`import {Test as MyTest}`, `import "x" as X`),
 - Solidity keywords,
 - magic globals,
 - units and type helpers.
@@ -69,7 +70,7 @@ Tail candidates are appended last so local/scope-aware symbols stay prioritized.
 
 ### Dot mode
 
-Dot requests parse the expression chain before the cursor (`parse_dot_chain`) and resolve segment-by-segment (`get_chain_completions`):
+Dot completion runs when the trigger character is `.` and also when the cursor is already in a member position (`obj.|` or `obj.sta|`), because editors re-request completion without the trigger character. The partial identifier after the dot is a filter prefix. The chain is parsed by `parse_dot_chain` and resolved segment-by-segment (`get_chain_completions`):
 
 - **Plain segment**: resolve symbol to type.
 - **Call segment**: use `function_return_types` to continue on return type.
@@ -83,6 +84,14 @@ Final member set is composed from:
 - `method_identifiers`,
 - `using_for` matches,
 - `using_for_wildcard`.
+
+The last two are included only when the receiver is a **value**, not when it
+names a type: `paymentToken.` (declared as `IERC20`) gets `using SafeERC20 for
+IERC20` extensions, while `IERC20.` gets only the interface's own members. Both
+carry the same `typeIdentifier`, so the distinction is carried down from name
+resolution — a `name_to_type` hit is a value, a `name_to_node_id` hit is a type
+name. Casts (`IERC20(addr).`), mapping and array indexes, and chained members are values
+regardless of the name in front of them.
 
 A bare type name first checks `type_name_members`, so `Currency.` on `type Currency is address` offers `wrap` and `unwrap`. Values of the type do not get them.
 
