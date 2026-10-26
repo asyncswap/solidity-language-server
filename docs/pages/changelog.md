@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.37
+
+### Fixes
+
+- Function completions showed the 4-byte selector glued to the name (`approve0x095ea7b3`): it was in `labelDetails.detail`, which editors render flush against the label. The selector moved to the item's `documentation` (`selector: 0x095ea7b3`), shown in the documentation popup.
+- `Lib.Enum.` offered nothing for an enum declared inside a library or contract (`RafluxTypes.ListingStatus.`). solc gives declarations no `typeDescriptions`, so the enum couldn't be resolved through the container; nested enums are now recorded while caching the container's members. `using X for *` extensions are not mixed into the enum values. Reported in [#225](https://github.com/asyncswap/solidity-language-server/issues/225) by @rifuki.
+- Hover could describe an unrelated symbol after unsaved edits: the cursor offset came from the live buffer while AST spans came from the last successful build. The cursor is now mapped into the compiled text, and hover returns nothing when the identifier under the cursor differs there (for example after renaming `oldToken` to `paymentToken`). Reported in [#225](https://github.com/asyncswap/solidity-language-server/issues/225) by @rifuki.
+
+### Changes
+
+- Hover no longer shows the `NodeId:` / `referencedDeclaration:` debugging line.
+
 ## v0.1.36
 
 ### Security
