@@ -13,7 +13,7 @@ The fastest Solidity language server — optimized for low-latency go-to-definit
 ## Install
 
 ```sh
-curl -fsSL https://asyncswap.org/lsp/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/asyncswap/solidity-language-server/main/install.sh | sh
 ```
 
 ### Alternative: Install from Cargo
