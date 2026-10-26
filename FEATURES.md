@@ -3,8 +3,8 @@
 - **Go to Definition** / **Go to Declaration** — jump to any symbol across files, including qualifier segments in qualified type paths (e.g., `Pool` in `Pool.State` navigates to the contract/library)
 - **Find References** — all usages of a symbol across the project, including qualified type path references (e.g., `Pool` in `Pool.State`); interface/implementation equivalence merges references across interface declarations and their implementing functions
 - **Rename** — project-wide symbol rename with prepare support, including qualifier usages in qualified type paths
-- **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution, AST node ID for debugging
-- **Completions** — scope-aware: parameters and locals only where they are visible (after their declaration), struct and contract members after `.`, using-for extensions on values, built-in members (`length`, `push`/`pop`, `wrap`/`unwrap`, `selector`), import paths, and SPDX/pragma directives
+- **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution; no hover when unsaved edits make the last build stale at the cursor
+- **Completions** — scope-aware: parameters and locals only where they are visible (after their declaration), struct and contract members after `.`, enum values through a library or contract (`Lib.Enum.`), using-for extensions on values, built-in members (`length`, `push`/`pop`, `wrap`/`unwrap`, `selector`), import paths, and SPDX/pragma directives
 - **Document Links** — clickable imports, type names, function calls
 - **Document Symbols** / **Workspace Symbols** — outline and search
 - **Formatting** — via `forge fmt`
