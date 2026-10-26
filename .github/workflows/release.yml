@@ -35,7 +35,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: stable
+          toolchain: 1.99.0
           targets: ${{ matrix.target }}
 
       - name: Build release binary
@@ -70,10 +70,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
-          toolchain: stable
+          toolchain: 1.99.0
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@a502f66dedae6774c819ff3c80406c7e8266dad2
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
 
       - name: Download all artifacts
         uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
