@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.1.36
+
+### Security
+
+- Bumped `rustls` 0.23.36 → 0.23.46 for GHSA-2mjx-qc3c-rqvc: TLS 1.3 handshake messages were accepted across encryption-level boundaries. The server uses rustls (through `reqwest` and `svm-rs`) when it downloads solc (#245).
+
+### Features
+
+- Plain completion is scoped to the cursor. Parameters and locals are offered only inside the function or block that declares them, and a local only after its declaration. Struct fields, event and error parameters, and other functions' parameters no longer appear in the general list. Struct fields stay reachable after `.` (#247, superseding #240 by @orionlize).
+- Member completion keeps working when the editor re-requests without the `.` trigger: `obj.|` and `obj.sta|` complete members of `obj` (#247).
+- Arrays, `bytes`, and `bytesN` offer `length`; dynamic arrays and `bytes` in storage also offer `push` and `pop`. Indexing an array (`logs[i].`) completes the element type's members, not only mappings (#241, #242).
+- `Currency.` on `type Currency is address` offers `wrap` and `unwrap`. Values of the type don't get them (#241, #242).
+- `X.fn.`, `X.SomeError.`, and `X.SomeEvent.` offer `selector` (#241, #242).
+- `using Library for Type` functions are offered on values of that type, including contract-typed values: `using SafeERC20 for IERC20` now completes `safeTransfer` on a `paymentToken` declared as `IERC20`. Typing the type name itself (`IERC20.`) still offers only its own members (#248, superseding #233 by @rifuki).
+- Scoped parameters and locals show their type as the completion detail (#247).
+
+### Fixes
+
+- Go-to-definition killed the server on files with non-ASCII text: string slicing landed off a character boundary and panicked (#236, #237).
+- Document symbol and highlight columns were byte offsets instead of the negotiated position encoding (UTF-16 by default), so they drifted on lines with non-ASCII text (#234, #230).
+- Diagnostics landed on the wrong line when the buffer differed from the file on disk. solc compiles the live buffer, but its offsets were mapped through a fresh read of the file from disk; they're now mapped through the same text solc compiled (#235, #231 by @rifuki).
+- Completion resolved local variables in the wrong scope:
+  - `for (X item = ...)` variables (scoped to the `ForStatement`) and `try ... returns (X got)` / `catch (...)` variables (scoped to the `TryCatchClause`) were never found, so lookups fell through to a same-named outer declaration (#241).
+  - Nothing inside `try`/`catch` bodies was walked: `clauses` was missing from the AST child keys, which also affected goto, hover, and inlay hints there (#241).
+  - Unsaved edits above the cursor shifted the scope lookup into the wrong function, because the cursor offset came from the live buffer while scope ranges came from the last successful compile. The cursor is now mapped into the compiled text (#241).
+- `vm.` lost every cheatcode: forge-std declares `VmSafe private vm` beside `CommonBase`'s `Vm internal vm`, and the inherited-member walk picked the private one. Private members of base contracts are now skipped (#241).
+- Built-in members (`abi.encode`, address `call`, `bytes.concat`, …) inserted their signature on accept (`encode(...)`). Labels are now bare names, and the parameter list moves to `labelDetails` (#241).
+- Import aliases (`import {Test as MyTest}`) stay in plain completion, and chains through struct fields (`_pools[id].slot0.`) resolve again (#247).
+- A type name used as an expression (the `IHooks` in `IHooks(addr)`) resolved to a type-of-type identifier with no members (#248).
+
+### Docs
+
+- The docs site builds with vocs 2, which renders Mermaid diagrams in the reader's browser, so the build no longer needs a headless Chromium (#243).
+- `docs/pages/changelog.md` and `docs/pages/docs/features.md` are back in sync with `CHANGELOG.md` and `FEATURES.md`.
+
+### CI
+
+- Pinned `foundry-rs/foundry-toolchain` to v1.9.2. Foundry now ships `foundryup` as a binary, and the old pin ran it with `bash`, so every Test run failed at Install Foundry (#244).
+
+### Tests
+
+- Real-solc fixture `example/ScopedLocals.sol` (`scoped_locals.json`) for `for`/`try` scopes, shadowed names, built-in members, value types, selectors, and private base members.
+- Measured on 97 real dot-completion cases from the `asyncswap/contracts` repo (cursor after each `expr.member` in the solc AST): 74/97 on v0.1.35, 96/97 after #241. The remaining case has AST offsets from forge's preprocessed test source.
+
 ## v0.1.35
 
 ### Features
@@ -109,7 +153,7 @@
 ### Features
 
 - Project-wide `PathInterner` for canonical file IDs — solc assigns file IDs sequentially based on input order, causing cross-compilation reference bugs; the interner assigns deterministic IDs so all builds share the same ID space (#185)
-- `textDocument/hover` — show AST node ID (`NodeId: \`<id>\``) in hover tooltips for debugging; references show ``NodeId: \`<id>\` referencedDeclaration: \`<decl_id>\` ``
+- `textDocument/hover` — show AST node ID (``NodeId: `<id>` ``) in hover tooltips for debugging; references show ``NodeId: `<id>` referencedDeclaration: `<decl_id>` ``
 - `textDocument/references` — qualifier-aware reference resolution; "Find All References" on a container (contract/library/interface) now includes qualified type paths where the container appears as a prefix (e.g., `Pool` in `Pool.State`) (#187)
 - `textDocument/definition` — qualifier segment goto; clicking the qualifier in a qualified type path (e.g., `Pool` in `Pool.State`) navigates to the container declaration instead of the struct/enum (#187)
 - `CachedBuild` gains `qualifier_refs` field (`HashMap<NodeId, Vec<NodeId>>`) — maps container declaration IDs to `IdentifierPath` node IDs used as qualifiers; built at cache time by `build_qualifier_refs()` and merged across builds via `merge_missing_from()` (#187)
