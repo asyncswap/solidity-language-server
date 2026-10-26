@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Install solidity-language-server from GitHub releases
-# Usage: curl -fsSL https://asyncswap.org/lsp/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/asyncswap/solidity-language-server/main/install.sh | sh
 
 set -e
 
