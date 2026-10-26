@@ -1222,12 +1222,62 @@ pub fn signature_help(
     })
 }
 
+/// Identifier (`[A-Za-z0-9_$]+`) touching `pos` in `text`, if any. A cursor just
+/// past the last character still counts as on the word.
+fn identifier_at(text: &str, pos: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let pos = pos.min(bytes.len());
+    let anchor = if pos < bytes.len() && is_ident(bytes[pos]) {
+        pos
+    } else if pos > 0 && is_ident(bytes[pos - 1]) {
+        pos - 1
+    } else {
+        return None;
+    };
+    let start = bytes[..anchor]
+        .iter()
+        .rposition(|&b| !is_ident(b))
+        .map_or(0, |i| i + 1);
+    let end = bytes[anchor..]
+        .iter()
+        .position(|&b| !is_ident(b))
+        .map_or(bytes.len(), |i| anchor + i);
+    Some(&text[start..end])
+}
+
+/// Whether `word` is one of the identifiers in the live text at `src`, the span
+/// of the AST node under the cursor. A stale span reads a different stretch of
+/// the edited buffer (`paymentT` where `oldToken` was), so it doesn't match.
+fn span_names_word(live: &str, src: &str, word: &str) -> bool {
+    crate::types::SourceLoc::parse(src)
+        .and_then(|loc| live.get(loc.offset..loc.end()))
+        .is_some_and(|span| {
+            span.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .any(|part| part == word)
+        })
+}
+
+/// Map a live-buffer offset into `compiled` (the text the AST was built from).
+/// `None` when the identifier under the cursor differs there, meaning the
+/// cached AST no longer describes what the user is pointing at.
+fn cursor_in_compiled(live: &str, compiled: &str, live_pos: usize) -> Option<usize> {
+    let mapped = crate::completion::map_live_offset_to_compiled(live, compiled, live_pos);
+    (identifier_at(live, live_pos) == identifier_at(compiled, mapped)).then_some(mapped)
+}
+
 /// Produce hover information for the symbol at the given position.
+///
+/// `compiled_text` is the buffer the cached AST was built from. The live buffer
+/// usually has unsaved edits, so the cursor is mapped into the compiled text
+/// before the AST lookup, and the hover is dropped when the identifier under
+/// the cursor differs there: a stale AST must not describe an unrelated symbol.
 pub fn hover_info(
     cached_build: &crate::goto::CachedBuild,
     file_uri: &Url,
     position: Position,
     source_bytes: &[u8],
+    compiled_text: Option<&str>,
 ) -> Option<Hover> {
     let nodes = &cached_build.nodes;
     let path_to_abs = &cached_build.path_to_abs;
@@ -1246,7 +1296,13 @@ pub fn hover_info(
         .find(|(k, _)| file_path_str.ends_with(k.as_str()))
         .map(|(_, v)| v.clone())?;
 
-    let byte_pos = pos_to_bytes(source_bytes, position);
+    let live_text = String::from_utf8_lossy(source_bytes);
+    let live_pos = pos_to_bytes(source_bytes, position);
+    let live_word = identifier_at(&live_text, live_pos);
+    let byte_pos = match compiled_text {
+        Some(ct) => cursor_in_compiled(&live_text, ct, live_pos)?,
+        None => live_pos,
+    };
 
     // Resolve: first try Yul external refs, then normal node lookup
     let node_id = byte_to_decl_via_external_refs(external_refs, id_to_path, &abs_path, byte_pos)
@@ -1262,6 +1318,20 @@ pub fn hover_info(
 
     // Typed DeclNode — O(1) from decl_index
     let typed_decl = cached_build.decl_index.get(&decl_id);
+
+    // Without the compiled text the offsets can't be checked, so check names:
+    // the word under the cursor must name the declaration or the member, or be
+    // one of the names in the node's own span — an import alias (`MyTest` for
+    // `Test`) or a path segment (`Pool` in `Pool.State`) names something else.
+    if compiled_text.is_none()
+        && let (Some(word), Some(decl)) = (live_word, typed_decl)
+        && !decl.name().is_empty()
+        && word != decl.name()
+        && node_info.member_name.as_deref() != Some(word)
+        && !span_names_word(&live_text, node_info.src.as_str(), word)
+    {
+        return None;
+    }
 
     // Build hover content
     let mut parts: Vec<String> = Vec::new();
@@ -1279,17 +1349,6 @@ pub fn hover_info(
     // Selector (function, error, or event)
     if let Some(selector) = typed_decl.and_then(|d| d.extract_typed_selector()) {
         parts.push(format!("Selector: `{}`", selector.to_prefixed()));
-    }
-
-    // Node ID for debugging: show the cursor-hit node and the resolved
-    // declaration (if different, e.g. when hovering a reference).
-    if node_id == decl_id {
-        parts.push(format!("NodeId: `{}`", decl_id.0));
-    } else {
-        parts.push(format!(
-            "NodeId: `{}` referencedDeclaration: `{}`",
-            node_id.0, decl_id.0
-        ));
     }
 
     // Storage layout: show slot (and offset if packed) for state variables.
@@ -2350,5 +2409,87 @@ mod tests {
         let ast = load_test_ast();
         let build = crate::goto::CachedBuild::new(ast, 0, None);
         assert!(mapping_signature_help_typed(&build.decl_index, "owner").is_none());
+    }
+
+    #[test]
+    fn identifier_at_finds_word_around_cursor() {
+        let text = "token.paymentToken();";
+        assert_eq!(super::identifier_at(text, 0), Some("token"));
+        assert_eq!(super::identifier_at(text, 5), Some("token")); // just past the word
+        assert_eq!(super::identifier_at(text, 10), Some("paymentToken"));
+        assert_eq!(super::identifier_at("a ( b", 2), None);
+    }
+
+    #[test]
+    fn cursor_in_compiled_maps_through_edits_above() {
+        let compiled = "uint a;\nIERC20 paymentToken;\n";
+        let live = "uint a;\nuint extra;\nIERC20 paymentToken;\n";
+        let live_pos = live.find("paymentToken").unwrap() + 3;
+        let mapped = super::cursor_in_compiled(live, compiled, live_pos).unwrap();
+        assert_eq!(super::identifier_at(compiled, mapped), Some("paymentToken"));
+    }
+
+    #[test]
+    fn span_names_word_accepts_aliases_and_path_segments() {
+        let live = "import {Test as MyTest} from \"./A.sol\"; Pool.State s;";
+        let alias = live.find("MyTest").unwrap();
+        assert!(super::span_names_word(
+            live,
+            &format!("{alias}:6:0"),
+            "MyTest"
+        ));
+        let path = live.find("Pool.State").unwrap();
+        assert!(super::span_names_word(
+            live,
+            &format!("{path}:10:0"),
+            "Pool"
+        ));
+        assert!(super::span_names_word(
+            live,
+            &format!("{path}:10:0"),
+            "State"
+        ));
+        // A stale span over renamed text reads a fragment, not the word.
+        let renamed = "IERC20 paymentToken;";
+        let at = renamed.find("paymentToken").unwrap();
+        assert!(!super::span_names_word(
+            renamed,
+            &format!("{at}:8:0"),
+            "paymentToken"
+        ));
+    }
+
+    #[test]
+    fn hover_on_import_alias_without_compiled_text() {
+        // `MyTest` in example/Alias.sol resolves to struct `Test`; the word
+        // differs from the declaration name but is the node's own name.
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string("alias.json").unwrap()).unwrap();
+        let ast = crate::solc::normalize_solc_output(raw, None);
+        let build = crate::goto::CachedBuild::new(ast, 0, None);
+        let path = std::fs::canonicalize("example/Alias.sol").unwrap();
+        let text = std::fs::read(&path).unwrap();
+        let offset = 175 + 1; // inside `MyTest` (src 175:6)
+        let before = &text[..offset];
+        let position = Position {
+            line: before.iter().filter(|&&b| b == b'\n').count() as u32,
+            character: (offset
+                - before
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |i| i + 1)) as u32,
+        };
+        let uri = Url::from_file_path(&path).unwrap();
+        assert!(super::hover_info(&build, &uri, position, &text, None).is_some());
+    }
+
+    #[test]
+    fn cursor_in_compiled_rejects_stale_identifier() {
+        // The word was renamed since the last successful build: the cached
+        // AST at that spot describes `oldToken`, so hover must not answer.
+        let compiled = "IERC20 oldToken;\n";
+        let live = "IERC20 paymentToken;\n";
+        let live_pos = live.find("paymentToken").unwrap() + 3;
+        assert_eq!(super::cursor_in_compiled(live, compiled, live_pos), None);
     }
 }

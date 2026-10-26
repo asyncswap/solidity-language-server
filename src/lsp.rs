@@ -5153,7 +5153,23 @@ impl LanguageServer for ForgeLsp {
             None => return Ok(None),
         };
 
-        let result = hover::hover_info(&cached_build, &uri, position, &source_bytes);
+        // Text the cached build was compiled from, so hover can map the live
+        // cursor into the AST's offsets and detect a stale match.
+        let compiled_text: Option<Arc<str>> = self
+            .completion_source_text
+            .read()
+            .await
+            .get(&uri.to_string())
+            .filter(|(src_cache, _)| Arc::ptr_eq(src_cache, &cached_build.completion_cache))
+            .map(|(_, text)| text.clone());
+
+        let result = hover::hover_info(
+            &cached_build,
+            &uri,
+            position,
+            &source_bytes,
+            compiled_text.as_deref(),
+        );
 
         if result.is_some() {
             self.client

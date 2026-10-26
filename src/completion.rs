@@ -76,6 +76,11 @@ pub struct CompletionCache {
     /// contract/library/interface name → node id (for direct name dot-completion like `FullMath.`).
     pub name_to_node_id: HashMap<SymbolName, NodeId>,
 
+    /// (container contract/library/interface node id, member name) → node id of an enum
+    /// declared inside it, for `Lib.Enum.` chains. solc gives declarations no
+    /// `typeDescriptions`, so the member can't be resolved through `name_to_type`.
+    pub nested_types: HashMap<(NodeId, SymbolName), NodeId>,
+
     /// node id → Vec<CompletionItem> from methodIdentifiers in .contracts section.
     /// Full function signatures with 4-byte selectors for contracts/interfaces.
     pub method_identifiers: HashMap<NodeId, Vec<CompletionItem>>,
@@ -404,6 +409,7 @@ pub fn build_completion_cache(
     let mut names: Vec<CompletionItem> = Vec::with_capacity(est_names);
     let mut seen_names: HashMap<SymbolName, usize> = HashMap::with_capacity(est_names);
     let mut name_to_type: HashMap<SymbolName, TypeIdentifier> = HashMap::with_capacity(est_names);
+    let mut nested_types: HashMap<(NodeId, SymbolName), NodeId> = HashMap::new();
     let mut node_members: HashMap<NodeId, Vec<CompletionItem>> =
         HashMap::with_capacity(est_contracts);
     let mut type_to_node: HashMap<TypeIdentifier, NodeId> = HashMap::with_capacity(est_contracts);
@@ -757,6 +763,16 @@ pub fn build_completion_cache(
                                     continue;
                                 }
 
+                                if member_type == "EnumDefinition"
+                                    && let Some(member_id) =
+                                        member.get("id").and_then(|v| v.as_i64())
+                                {
+                                    nested_types.insert(
+                                        (id, SymbolName::new(member_name)),
+                                        NodeId(member_id),
+                                    );
+                                }
+
                                 // Build function signature and collect return types for FunctionDefinitions
                                 let (member_detail, label_details) =
                                     if member_type == "FunctionDefinition" {
@@ -1026,13 +1042,21 @@ pub fn build_completion_cache(
                                 }
                             });
 
+                    // The selector goes in `documentation`, not `labelDetails.detail`:
+                    // editors render labelDetails.detail flush against the label
+                    // (`approve0x095ea7b3`), which clutters the completion menu.
                     items.push(CompletionItem {
                         label: fn_name,
                         kind: Some(CompletionItemKind::FUNCTION),
                         detail: Some(signature.clone()),
                         label_details: Some(tower_lsp::lsp_types::CompletionItemLabelDetails {
-                            detail: Some(selector_str),
+                            detail: None,
                             description,
+                        }),
+                        documentation: (!selector_str.is_empty()).then(|| {
+                            tower_lsp::lsp_types::Documentation::String(format!(
+                                "selector: {selector_str}"
+                            ))
                         }),
                         ..Default::default()
                     });
@@ -1096,6 +1120,7 @@ pub fn build_completion_cache(
     CompletionCache {
         names,
         name_to_type,
+        nested_types,
         node_members,
         type_to_node,
         name_to_node_id,
@@ -1943,6 +1968,13 @@ fn resolve_member_type(
             if is_callable_member {
                 return Some(SELECTOR_MEMBER_TYPE.to_string());
             }
+            // `Lib.Enum.` — a nested enum names a type; resolve it to its declaration.
+            if let Some(enum_id) = cache
+                .nested_types
+                .get(&(node_id, SymbolName::new(member_name)))
+            {
+                return Some(format!("__node_id_{}", enum_id));
+            }
             // Look up member's own type from name_to_type
             cache
                 .name_to_type
@@ -2094,9 +2126,17 @@ pub fn get_chain_completions(
     }
 
     // Return completions for the final resolved type. Anything reached by
-    // walking members is a value, never a type name.
+    // walking members is a value, except a nested type (`Lib.Enum.`), which
+    // resolves to a synthetic `__node_id_` marker and names a type.
     match current_type {
-        Some(tid) => completions_for_type(cache, &tid, ReceiverKind::Value),
+        Some(tid) => {
+            let receiver = if tid.starts_with("__node_id_") {
+                ReceiverKind::TypeName
+            } else {
+                ReceiverKind::Value
+            };
+            completions_for_type(cache, &tid, receiver)
+        }
         None => vec![],
     }
 }
@@ -2942,6 +2982,7 @@ mod tests {
             node_members: HashMap::new(),
             type_to_node: HashMap::new(),
             name_to_node_id: HashMap::new(),
+            nested_types: HashMap::new(),
             method_identifiers: HashMap::new(),
             function_return_types: HashMap::new(),
             using_for: HashMap::new(),
@@ -3542,5 +3583,26 @@ mod tests {
             );
         }
         assert!(!items.is_empty(), "should find at least one .sol file");
+    }
+
+    /// Real solc 0.8.26 AST for a library-nested enum. The `EnumDefinition`
+    /// carries no `typeDescriptions`, so `RafluxTypes.ListingStatus.` must
+    /// resolve the enum through the library's members.
+    fn nested_enum_sources() -> serde_json::Value {
+        let ast: serde_json::Value = serde_json::from_str(NESTED_ENUM_AST).unwrap();
+        json!({ "E.sol": { "id": 0, "ast": ast } })
+    }
+
+    const NESTED_ENUM_AST: &str = r#"{"absolutePath":"E.sol","exportedSymbols":{"C":[18],"RafluxTypes":[6]},"id":19,"license":"MIT","nodeType":"SourceUnit","nodes":[{"id":1,"literals":["solidity","^","0.8",".0"],"nodeType":"PragmaDirective","src":"32:23:0"},{"abstract":false,"baseContracts":[],"canonicalName":"RafluxTypes","contractDependencies":[],"contractKind":"library","fullyImplemented":true,"id":6,"linearizedBaseContracts":[6],"name":"RafluxTypes","nameLocation":"64:11:0","nodeType":"ContractDefinition","nodes":[{"canonicalName":"RafluxTypes.ListingStatus","id":5,"members":[{"id":2,"name":"NONE","nameLocation":"103:4:0","nodeType":"EnumValue","src":"103:4:0"},{"id":3,"name":"ACTIVE","nameLocation":"109:6:0","nodeType":"EnumValue","src":"109:6:0"},{"id":4,"name":"SETTLED","nameLocation":"117:7:0","nodeType":"EnumValue","src":"117:7:0"}],"name":"ListingStatus","nameLocation":"87:13:0","nodeType":"EnumDefinition","src":"82:44:0"}],"scope":19,"src":"56:72:0","usedErrors":[],"usedEvents":[]},{"abstract":false,"baseContracts":[],"canonicalName":"C","contractDependencies":[],"contractKind":"contract","fullyImplemented":true,"id":18,"linearizedBaseContracts":[18],"name":"C","nameLocation":"138:1:0","nodeType":"ContractDefinition","nodes":[{"body":{"id":16,"nodeType":"Block","src":"209:56:0","statements":[{"expression":{"expression":{"expression":{"id":12,"name":"RafluxTypes","nodeType":"Identifier","overloadedDeclarations":[],"referencedDeclaration":6,"src":"226:11:0","typeDescriptions":{"typeIdentifier":"t_type$_t_contract$_RafluxTypes_$6_$","typeString":"type(library RafluxTypes)"}},"id":13,"isConstant":false,"isLValue":false,"isPure":false,"lValueRequested":false,"memberLocation":"238:13:0","memberName":"ListingStatus","nodeType":"MemberAccess","referencedDeclaration":5,"src":"226:25:0","typeDescriptions":{"typeIdentifier":"t_type$_t_enum$_ListingStatus_$5_$","typeString":"type(enum RafluxTypes.ListingStatus)"}},"id":14,"isConstant":false,"isLValue":false,"isPure":true,"lValueRequested":false,"memberLocation":"252:6:0","memberName":"ACTIVE","nodeType":"MemberAccess","referencedDeclaration":3,"src":"226:32:0","typeDescriptions":{"typeIdentifier":"t_enum$_ListingStatus_$5","typeString":"enum RafluxTypes.ListingStatus"}},"functionReturnParameters":11,"id":15,"nodeType":"Return","src":"219:39:0"}]},"functionSelector":"26121ff0","id":17,"implemented":true,"kind":"function","modifiers":[],"name":"f","nameLocation":"155:1:0","nodeType":"FunctionDefinition","parameters":{"id":7,"nodeType":"ParameterList","parameters":[],"src":"156:2:0"},"returnParameters":{"id":11,"nodeType":"ParameterList","parameters":[{"constant":false,"id":10,"mutability":"mutable","name":"","nameLocation":"-1:-1:-1","nodeType":"VariableDeclaration","scope":17,"src":"182:25:0","stateVariable":false,"storageLocation":"default","typeDescriptions":{"typeIdentifier":"t_enum$_ListingStatus_$5","typeString":"enum RafluxTypes.ListingStatus"},"typeName":{"id":9,"nodeType":"UserDefinedTypeName","pathNode":{"id":8,"name":"RafluxTypes.ListingStatus","nameLocations":["182:11:0","194:13:0"],"nodeType":"IdentifierPath","referencedDeclaration":5,"src":"182:25:0"},"referencedDeclaration":5,"src":"182:25:0","typeDescriptions":{"typeIdentifier":"t_enum$_ListingStatus_$5","typeString":"enum RafluxTypes.ListingStatus"}},"visibility":"internal"}],"src":"181:27:0"},"scope":18,"src":"146:119:0","stateMutability":"pure","virtual":false,"visibility":"external"}],"scope":19,"src":"129:138:0","usedErrors":[],"usedEvents":[]}],"src":"32:236:0"}"#;
+
+    #[test]
+    fn nested_enum_chain_completes_enum_values() {
+        let cache = build_completion_cache(&nested_enum_sources(), None, None);
+        let chain = crate::completion::parse_dot_chain("        RafluxTypes.ListingStatus.", 34);
+        let labels: Vec<String> = crate::completion::get_chain_completions(&cache, &chain, None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(labels, vec!["NONE", "ACTIVE", "SETTLED"]);
     }
 }
