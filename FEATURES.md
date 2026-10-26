@@ -4,7 +4,7 @@
 - **Find References** — all usages of a symbol across the project, including qualified type path references (e.g., `Pool` in `Pool.State`); interface/implementation equivalence merges references across interface declarations and their implementing functions
 - **Rename** — project-wide symbol rename with prepare support, including qualifier usages in qualified type paths
 - **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution, AST node ID for debugging
-- **Completions** — scope-aware with two modes (fast cache vs full recomputation)
+- **Completions** — scope-aware: parameters and locals only where they are visible (after their declaration), struct and contract members after `.`, using-for extensions on values, built-in members (`length`, `push`/`pop`, `wrap`/`unwrap`, `selector`), import paths, and SPDX/pragma directives
 - **Document Links** — clickable imports, type names, function calls
 - **Document Symbols** / **Workspace Symbols** — outline and search
 - **Formatting** — via `forge fmt`
@@ -18,8 +18,6 @@
 - **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + all in-memory caches, full reset) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
 - **Update Check** — checks GitHub releases on startup and notifies via `window/showMessage` when a newer version is available (`checkForUpdates` setting, default: `true`)
 - **Save Performance** — content hash check skips redundant solc rebuilds when file is unchanged; `collect_import_pragmas` runs on blocking thread pool to avoid stalling the async runtime on large projects
-
-See [FEATURES.md](FEATURES.md) for the full LSP feature set and roadmap.
 
 ### LSP Methods
 

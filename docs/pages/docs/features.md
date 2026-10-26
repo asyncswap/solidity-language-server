@@ -1,4 +1,25 @@
-## LSP Methods
+## Features
+
+- **Go to Definition** / **Go to Declaration** — jump to any symbol across files, including qualifier segments in qualified type paths (e.g., `Pool` in `Pool.State` navigates to the contract/library)
+- **Find References** — all usages of a symbol across the project, including qualified type path references (e.g., `Pool` in `Pool.State`); interface/implementation equivalence merges references across interface declarations and their implementing functions
+- **Rename** — project-wide symbol rename with prepare support, including qualifier usages in qualified type paths
+- **Hover** — signatures, NatSpec docs, function/error/event selectors, `@inheritdoc` resolution, AST node ID for debugging
+- **Completions** — scope-aware: parameters and locals only where they are visible (after their declaration), struct and contract members after `.`, using-for extensions on values, built-in members (`length`, `push`/`pop`, `wrap`/`unwrap`, `selector`), import paths, and SPDX/pragma directives
+- **Document Links** — clickable imports, type names, function calls
+- **Document Symbols** / **Workspace Symbols** — outline and search
+- **Formatting** — via `forge fmt`
+- **Diagnostics** — from `solc` and `forge lint`
+- **Signature Help** — parameter info on function calls, event emits, and mapping access
+- **Inlay Hints** — parameter names at call sites
+- **File Operations** — `workspace/willCreateFiles` scaffolding + `workspace/willRenameFiles`/`workspace/willDeleteFiles` import edits + `workspace/didCreateFiles`/`workspace/didRenameFiles`/`workspace/didDeleteFiles` cache migration/re-index (`fileOperations.templateOnCreate`, `fileOperations.updateImportsOnRename`, `fileOperations.updateImportsOnDelete`)
+- **Go to Implementation** — jump from interface/abstract declarations to their concrete implementations; supports functions, modifiers, and state variables with `baseFunctions`/`baseModifiers`
+- **Call Hierarchy** — `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls` — navigate call graphs across contracts and libraries; tracks function calls, modifier invocations, and base constructor specifiers with narrow call-site ranges; incoming calls include callers via interface-typed references
+- **Code Actions** — `textDocument/codeAction` quickfix engine; handles `unused-import` forge-lint diagnostic with "Remove unused import" action; JSON-driven rule table in `data/error_codes.json`
+- **Execute Commands** — `solidity.clearCache` (wipe on-disk cache + all in-memory caches, full reset) · `solidity.reindex` (evict in-memory AST, trigger background reindex from warm disk cache)
+- **Update Check** — checks GitHub releases on startup and notifies via `window/showMessage` when a newer version is available (`checkForUpdates` setting, default: `true`)
+- **Save Performance** — content hash check skips redundant solc rebuilds when file is unchanged; `collect_import_pragmas` runs on blocking thread pool to avoid stalling the async runtime on large projects
+
+### LSP Methods
 
 **General**
 
