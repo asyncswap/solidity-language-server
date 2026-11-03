@@ -1,0 +1,115 @@
+# forge lsp --stdio vs solidity-language-server — side-by-side comparison
+#
+# Runs the same requests against both servers on example/Shop.sol and
+# compares latency + response correctness.
+#
+# Uses the installed release binary (mmsaki@release), not the local build.
+#
+#   lsp-bench -c benchmarks/forge-vs-sls.yaml
+#   lsp-bench -c benchmarks/forge-vs-sls.yaml --verify   # fail on expect mismatch
+
+project: example
+file: Shop.sol
+line: 130
+col: 26
+
+iterations: 10
+warmup: 2
+timeout: 10
+index_timeout: 30
+output: benchmarks/forge-vs-sls
+report: README.md
+
+initializeSettings:
+  projectIndex:
+    fullProjectScan: true
+
+servers:
+  - mmsaki@release
+  - forge
+
+benchmarks:
+  - initialize
+  - textDocument/diagnostic
+  - textDocument/definition
+  - textDocument/declaration
+  - textDocument/hover
+  - textDocument/references
+  - textDocument/completion
+  - textDocument/signatureHelp
+  - textDocument/documentHighlight
+  - textDocument/documentSymbol
+  - textDocument/documentLink
+  - textDocument/semanticTokens/full
+  - textDocument/formatting
+  - textDocument/prepareRename
+  - textDocument/rename
+  - workspace/symbol
+
+methods:
+  textDocument/definition:
+    line: 136
+    col: 40
+    expect:
+      file: Shop.sol
+      line: 41
+
+  textDocument/declaration:
+    line: 136
+    col: 40
+    expect:
+      file: Shop.sol
+      line: 41
+
+  textDocument/hover:
+    line: 136
+    col: 40
+
+  textDocument/references:
+    line: 136
+    col: 40
+    expect:
+      minCount: 2
+
+  textDocument/completion:
+    line: 136
+    col: 38
+    trigger: "."
+    expect:
+      containsItems:
+        - label: addTax
+        - label: getRefund
+
+  textDocument/signatureHelp:
+    line: 136
+    col: 45
+
+  textDocument/documentHighlight:
+    line: 136
+    col: 40
+    expect:
+      minCount: 2
+
+  textDocument/documentLink:
+    expect:
+      minCount: 1
+
+  workspace/symbol:
+    expect:
+      minCount: 1
+
+  textDocument/prepareRename:
+    line: 136
+    col: 40
+    expect:
+      line: 136
+
+  textDocument/rename:
+    line: 136
+    col: 40
+
+  textDocument/formatting:
+    didChange:
+      - file: Shop.unformatted.snapshot
+        line: 0
+        col: 0

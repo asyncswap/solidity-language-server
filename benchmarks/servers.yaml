@@ -27,6 +27,13 @@ mmsaki:
       cmd: ./target/release/solidity-language-server
     latest:
       cmd: /Users/meek/developer/asyncswap/solidity-language-server/target/release/solidity-language-server
+    release:
+      cmd: /Users/meek/.solidity-language-server/bin/solidity-language-server
+
+forge:
+  cmd: forge
+  args: ["lsp", "--stdio"]
+  link: https://github.com/foundry-rs/foundry
 
 solc:
   cmd: solc
