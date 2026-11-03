@@ -21,6 +21,7 @@ servers:
   # - qiuxiang
   # - juanfranblanco
   # - nomicfoundation
+  - forge
 
 methods:
   textDocument/definition:
