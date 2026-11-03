@@ -5,7 +5,7 @@
 The server exposes two symbol methods:
 
 - `textDocument/documentSymbol`: hierarchical symbols for one file
-- `workspace/symbol`: flat symbol list across files in `text_cache`
+- `workspace/symbol`: flat symbol list across all project source files
 
 Both are tree-sitter based and do not require a successful build.
 
@@ -15,7 +15,7 @@ This means symbols can work even when the file does not compile.
 
 - **Hierarchical symbols**: `DocumentSymbol[]` with parent/child nesting.
 - **Flat symbols**: `SymbolInformation[]` with `container_name`.
-- **`text_cache`**: in-memory map of open/known files used as the source text set for workspace symbol queries.
+- **`text_cache`**: in-memory map of open files; their buffer text takes precedence over disk for symbol queries.
 
 ## Runtime flow
 
@@ -23,7 +23,7 @@ This means symbols can work even when the file does not compile.
 flowchart TD
   A["Symbol request"] --> B{"Method"}
   B -->|documentSymbol| C["Read source (text_cache, then disk fallback)"]
-  B -->|workspace/symbol| D["Collect files from text_cache"]
+  B -->|workspace/symbol| D["Open buffers from text_cache + project files from disk"]
   C --> E["tree-sitter parse"]
   D --> F["tree-sitter parse each file"]
   E --> G["Build DocumentSymbol tree"]
@@ -31,7 +31,7 @@ flowchart TD
 ```
 
 `documentSymbol` reads current buffer text first (`text_cache`) and falls back to disk only when needed.  
-`workspace/symbol` uses files currently available in `text_cache` for fast, repeated lookups.
+`workspace/symbol` uses open buffers from `text_cache` and reads every other project source file from disk.
 
 ## Document symbols (`textDocument/documentSymbol`)
 
@@ -59,11 +59,11 @@ becomes detail:
 
 ## Workspace symbols (`workspace/symbol`)
 
-The server parses each cached file and emits a flat `SymbolInformation` list with `container_name`.
+The server parses every project source file and emits a flat `SymbolInformation` list with `container_name`.
 
-This is intentionally cache-scoped for responsiveness; it does not scan every file in the repo on each request.
+Files come from `discover_source_files` (the `src`, `test`, and `script` directories from `foundry.toml`). Open buffers are taken from `text_cache` so unsaved edits are reflected; all other files are read from disk on a blocking task. Duplicate paths (for example when `src = "."` overlaps `test`) are skipped.
 
-It is a speed/coverage tradeoff: better latency in the editor, but visibility depends on what files are present in cache.
+Because extraction is tree-sitter only, results do not depend on solc: symbols are returned even when the project fails to compile, and before the first build of an opened file has finished.
 
 ## Symbol kind mapping (current implementation)
 

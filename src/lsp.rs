@@ -5097,8 +5097,8 @@ impl LanguageServer for ForgeLsp {
             .log_message(MessageType::INFO, "got workspace/symbol request")
             .await;
 
-        // Collect sources from open files in text_cache
-        let files: Vec<(Url, String)> = {
+        // Open buffers take precedence over disk so unsaved edits are reflected.
+        let mut files: Vec<(Url, String)> = {
             let cache = self.text_cache.read().await;
             cache
                 .iter()
@@ -5108,6 +5108,29 @@ impl LanguageServer for ForgeLsp {
                 })
                 .collect()
         };
+
+        // Add every project source file from disk.  Symbols come from
+        // tree-sitter, so this works even when solc can't compile the project.
+        let config = self.foundry_config.read().await.clone();
+        let open: HashSet<Url> = files.iter().map(|(uri, _)| uri.clone()).collect();
+        let disk_files = tokio::task::spawn_blocking(move || {
+            let mut seen = HashSet::new();
+            crate::solc::discover_source_files(&config)
+                .into_iter()
+                .filter(|path| seen.insert(path.clone()))
+                .filter_map(|path| {
+                    let uri = Url::from_file_path(&path).ok()?;
+                    if open.contains(&uri) {
+                        return None;
+                    }
+                    let content = std::fs::read_to_string(&path).ok()?;
+                    Some((uri, content))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        files.extend(disk_files);
 
         let mut all_symbols = symbols::extract_workspace_symbols(&files);
         if !params.query.is_empty() {

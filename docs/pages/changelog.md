@@ -5,6 +5,7 @@
 ### Fixes
 
 - Requests sent right after opening a file (definition, declaration, hover, completion, signature help, document links) could return nothing: they read the file's build without triggering one, and answered before the `didOpen` compile had finished. They now wait for an in-flight build of that file (up to 30s). Found by comparing against `forge lsp --stdio` with lsp-bench (`benchmarks/forge-vs-sls.yaml`).
+- `workspace/symbol` only searched open files, and returned nothing until the first build of an opened file finished. It now searches every project source file (open buffers first, otherwise from disk) using tree-sitter, so it also works when solc can't compile the project.
 
 ## v0.1.37
 
