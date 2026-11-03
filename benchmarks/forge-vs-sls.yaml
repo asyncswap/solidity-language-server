@@ -3,9 +3,10 @@
 # Runs the same requests against both servers on example/Shop.sol and
 # compares latency + response correctness.
 #
-# Uses the installed release binary (mmsaki@release), not the local build.
+# Uses the local build (mmsaki@latest → target/release). Switch to
+# mmsaki@release to compare the installed release binary instead.
 #
-#   lsp-bench -c benchmarks/forge-vs-sls.yaml
+#   cargo build --release && lsp-bench -c benchmarks/forge-vs-sls.yaml
 #   lsp-bench -c benchmarks/forge-vs-sls.yaml --verify   # fail on expect mismatch
 
 project: example
@@ -16,7 +17,9 @@ col: 26
 iterations: 10
 warmup: 2
 timeout: 10
-index_timeout: 30
+# forge sends no $/progress, so lsp-bench waits the full index_timeout before
+# each index-dependent method. Keep it short.
+index_timeout: 3
 output: benchmarks/forge-vs-sls
 report: README.md
 
@@ -25,7 +28,7 @@ initializeSettings:
     fullProjectScan: true
 
 servers:
-  - mmsaki@release
+  - mmsaki@latest
   - forge
 
 benchmarks:
