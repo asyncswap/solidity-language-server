@@ -386,3 +386,43 @@ fn test_roundtrip_utf16_byte_to_pos_to_byte() {
         );
     }
 }
+
+#[test]
+fn test_position_past_end_of_line_stops_before_the_line_ending() {
+    let pos = Position::new(0, 99);
+    assert_eq!(position_to_byte_offset("ab\ncd", pos), 2);
+    assert_eq!(position_to_byte_offset("ab\r\ncd", pos), 2);
+    assert_eq!(position_to_byte_offset("ab\rcd", pos), 2);
+}
+
+#[test]
+fn test_bare_carriage_return_ends_a_line() {
+    assert_eq!(byte_offset_to_position("a\rb", 2), Position::new(1, 0));
+    assert_eq!(byte_offset_to_position("a\rb", 3), Position::new(1, 1));
+    assert_eq!(position_to_byte_offset("a\rb", Position::new(1, 0)), 2);
+}
+
+#[test]
+fn test_unicode_line_separators_do_not_end_a_line() {
+    for separator in ['\u{2028}', '\u{2029}'] {
+        let source = format!("a{separator}b");
+        let end = source.len();
+        assert_eq!(byte_offset_to_position(&source, end), Position::new(0, 3));
+        assert_eq!(position_to_byte_offset(&source, Position::new(0, 2)), 4);
+    }
+}
+
+#[test]
+fn test_offset_inside_crlf_reports_the_end_of_the_line() {
+    assert_eq!(byte_offset_to_position("ab\r\ncd", 3), Position::new(0, 2));
+}
+
+#[test]
+fn test_offset_inside_a_character_clamps_to_its_start() {
+    assert_eq!(byte_offset_to_position("a😀b", 3), Position::new(0, 1));
+}
+
+#[test]
+fn test_column_inside_surrogate_pair_rounds_up() {
+    assert_eq!(position_to_byte_offset("😀b", Position::new(0, 1)), 4);
+}

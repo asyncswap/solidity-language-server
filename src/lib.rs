@@ -9,6 +9,7 @@ pub mod goto;
 pub mod highlight;
 pub mod hover;
 pub mod inlay_hints;
+pub mod invariants;
 pub mod links;
 pub mod lint;
 pub mod lsp;

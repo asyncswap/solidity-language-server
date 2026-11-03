@@ -4,6 +4,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use clap::Parser;
 use eyre::Result;
+use solidity_language_server::invariants::InvariantService;
 use solidity_language_server::lsp::ForgeLsp;
 use tower_lsp::{LspService, Server};
 
@@ -32,6 +33,10 @@ pub struct LspArgs {
     /// This flag is a no-op and will be removed in a future release.
     #[arg(long, value_enum, hide = true)]
     pub completion_mode: Option<CompletionMode>,
+    /// Validate every response against the LSP specification and the open
+    /// document. Violations are printed to stderr and returned as errors.
+    #[arg(long)]
+    pub check_invariants: bool,
 }
 
 impl LspArgs {
@@ -41,7 +46,12 @@ impl LspArgs {
         let use_solc = !self.use_forge;
         let (service, socket) =
             LspService::new(|client| ForgeLsp::new(client, self.use_solar, use_solc));
-        Server::new(stdin, stdout, socket).serve(service).await;
+        let server = Server::new(stdin, stdout, socket);
+        if self.check_invariants {
+            server.serve(InvariantService::new(service)).await;
+        } else {
+            server.serve(service).await;
+        }
 
         Ok(())
     }

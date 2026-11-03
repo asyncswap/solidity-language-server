@@ -659,9 +659,9 @@ library SafeMath { function add(uint256 a, uint256 b) internal pure returns (uin
         assert_eq!(var.selection_range.start.character, utf16_col);
     }
 
-    /// Rows stay in tree-sitter's line model. `TextIndex` treats U+2028 as a
-    /// line terminator and tree-sitter does not, so deriving the row from an
-    /// absolute byte offset would report the symbol on the following line.
+    /// Rows stay in tree-sitter's line model, which breaks on `\n` only. U+2028 is
+    /// not an LSP line ending either, so it must not push the symbol onto the
+    /// following line.
     #[test]
     fn test_symbol_line_uses_tree_sitter_line_model() {
         let line = "    string a = unicode\"x\u{2028}y\"; uint256 counter;";

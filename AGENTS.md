@@ -271,6 +271,10 @@ Then use `waitForProgressToken` to wait for the index to complete:
 Phase 1 (`solidity/projectIndex`) covers src-only files. Phase 2 (`solidity/projectIndexFull`)
 covers src + test + script. Cross-file incoming callers require phase 2.
 
+### Invariant checks
+
+Run the server with `--check-invariants` to validate every response; `benchmarks/servers.ci.yaml` already does. Add new response rules to `check_response` in `src/invariants.rs` and new always-true properties to `tests/invariants.rs`. See `docs/pages/reference/invariants.md`.
+
 ## Building
 
 Always build with `--release` flag

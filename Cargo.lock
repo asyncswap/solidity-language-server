@@ -3152,6 +3152,7 @@ dependencies = [
  "hex",
  "lintspec-core",
  "pathdiff",
+ "proptest",
  "reqwest",
  "semver 1.0.27",
  "serde",
@@ -3164,6 +3165,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower-lsp",
+ "tower-service",
  "tree-sitter",
  "tree-sitter-solidity",
 ]

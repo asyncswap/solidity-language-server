@@ -89,6 +89,10 @@
 - [x] `workspace/willDeleteFiles` - File deletion preview (removes imports to deleted files)
 - [x] `workspace/didDeleteFiles` - Post-delete cache cleanup + background re-index
 
+**Testing**
+
+- [x] `--check-invariants` - Validate every response against the LSP specification and the open document
+
 **Window Features**
 
 - [ ] `window/showMessage` - Show message to user
