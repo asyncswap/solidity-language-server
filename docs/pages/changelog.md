@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- `--check-invariants` validates every response against the LSP specification and the open document. A violation is printed to stderr and returned as a JSON-RPC error. CI runs `lsp-bench` with it.
+
+### Fixes
+
+- Semantic tokens reported columns and lengths in bytes even for UTF-16 clients, so highlighting drifted on lines with non-ASCII text. They now use the negotiated encoding.
+- A column past the end of a CRLF line resolved to after the `\r`. It now clamps to before the line ending, as the LSP specification requires.
+- A bare `\r` now ends a line and U+2028/U+2029 no longer do, matching the LSP specification. Features built on tree-sitter rows still treat only `\n` as a line break.
+- `apply_text_edits` dropped a replacement that shared its start with an insert. LSP allows that combination.
+- `type Price is uint256;` now gets a semantic token for its name.
+
 ## v0.1.37
 
 ### Fixes

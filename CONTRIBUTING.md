@@ -77,6 +77,15 @@ cargo install --path .
 
 Test against a real Foundry project — the LSP needs `foundry.toml` in the project root.
 
+## Invariant Testing
+
+```sh
+cargo test --release --test invariants   # randomized property tests
+solidity-language-server --stdio --check-invariants   # validate every response at runtime
+```
+
+When a feature adds a response shape or a rule, add it to `check_response` in `src/invariants.rs`. See [Invariant Checks](docs/pages/reference/invariants.md).
+
 ## Adding a New LSP Feature
 
 1. **Create the module** — e.g. `src/feature.rs`

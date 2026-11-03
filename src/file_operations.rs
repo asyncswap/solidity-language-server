@@ -698,7 +698,12 @@ pub fn apply_text_edits(source: &str, edits: &[TextEdit]) -> String {
 
     // Keep non-overlapping edits in forward order. For overlapping spans,
     // prefer the earliest-starting edit (wider edit when starts are equal).
-    resolved.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    // Inserts sort before a replacement at the same start, which LSP allows.
+    resolved.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then((a.1 > a.0).cmp(&(b.1 > b.0)))
+            .then(b.1.cmp(&a.1))
+    });
     let mut filtered: Vec<(usize, usize, &str)> = Vec::with_capacity(resolved.len());
     for (start, end, new_text) in resolved {
         if let Some((_, last_end, _)) = filtered.last()

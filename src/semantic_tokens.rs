@@ -1,3 +1,4 @@
+use crate::utils::{self, PositionEncoding};
 use tower_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensEdit,
     SemanticTokensLegend,
@@ -75,7 +76,12 @@ pub fn legend() -> SemanticTokensLegend {
 
 /// Parse `source` with tree-sitter and return semantic tokens for the entire file.
 pub fn semantic_tokens_full(source: &str) -> SemanticTokens {
-    semantic_tokens_impl(source, None)
+    semantic_tokens_full_with(source, utils::encoding())
+}
+
+/// [`semantic_tokens_full`] with an explicit position encoding.
+pub fn semantic_tokens_full_with(source: &str, encoding: PositionEncoding) -> SemanticTokens {
+    semantic_tokens_impl(source, None, encoding)
 }
 
 /// Parse `source` with tree-sitter and return semantic tokens only for
@@ -89,10 +95,15 @@ pub fn semantic_tokens_range(source: &str, start_line: u32, end_line: u32) -> Se
             start: start_line,
             end: end_line,
         }),
+        utils::encoding(),
     )
 }
 
-fn semantic_tokens_impl(source: &str, range: Option<LineRange>) -> SemanticTokens {
+fn semantic_tokens_impl(
+    source: &str,
+    range: Option<LineRange>,
+    encoding: PositionEncoding,
+) -> SemanticTokens {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_solidity::LANGUAGE.into())
@@ -110,7 +121,7 @@ fn semantic_tokens_impl(source: &str, range: Option<LineRange>) -> SemanticToken
 
     let mut tokens: Vec<RawToken> = Vec::new();
     collect(tree.root_node(), source, range, &mut tokens);
-    tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.col.cmp(&b.col)));
+    tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.byte_col.cmp(&b.byte_col)));
 
     // Delta-encode
     let mut prev_line = 0u32;
@@ -118,14 +129,19 @@ fn semantic_tokens_impl(source: &str, range: Option<LineRange>) -> SemanticToken
     let data = tokens
         .iter()
         .map(|t| {
+            // Tree-sitter measures in bytes; clients measure in their encoding.
+            let line_start = t.start_byte - t.byte_col;
+            let col = utils::encoded_len(&source[line_start..t.start_byte], encoding);
+            let length =
+                utils::encoded_len(&source[t.start_byte..t.start_byte + t.byte_len], encoding);
             let dl = t.line - prev_line;
-            let dc = if dl == 0 { t.col - prev_col } else { t.col };
+            let dc = if dl == 0 { col - prev_col } else { col };
             prev_line = t.line;
-            prev_col = t.col;
+            prev_col = col;
             SemanticToken {
                 delta_line: dl,
                 delta_start: dc,
-                length: t.length,
+                length,
                 token_type: t.token_type,
                 token_modifiers_bitset: 0,
             }
@@ -198,8 +214,9 @@ fn tok_eq(a: &SemanticToken, b: &SemanticToken) -> bool {
 #[derive(Debug)]
 struct RawToken {
     line: u32,
-    col: u32,
-    length: u32,
+    byte_col: usize,
+    start_byte: usize,
+    byte_len: usize,
     token_type: u32,
 }
 
@@ -223,7 +240,7 @@ fn collect(node: Node, source: &str, range: Option<LineRange>, tokens: &mut Vec<
 
     if !node.is_named() {
         if let Some(tt) = classify_anon(node, source) {
-            push(node, tt, tokens);
+            push(node, source, tt, tokens);
         }
         return;
     }
@@ -231,79 +248,79 @@ fn collect(node: Node, source: &str, range: Option<LineRange>, tokens: &mut Vec<
     match node.kind() {
         // Literals
         "comment" => push_multiline(node, source, ty::COMMENT, tokens),
-        "number_literal" => push(node, ty::NUMBER, tokens),
+        "number_literal" => push(node, source, ty::NUMBER, tokens),
         "string" | "string_literal" | "hex_string_literal" | "unicode_string_literal" => {
             push_multiline(node, source, ty::STRING, tokens)
         }
-        "boolean_literal" => push(node, ty::KEYWORD, tokens),
+        "boolean_literal" => push(node, source, ty::KEYWORD, tokens),
 
         // Declarations — tag the identifier, walk body
         "contract_declaration" => {
-            push_child_id(node, ty::CLASS, tokens);
+            push_child_id(node, source, ty::CLASS, tokens);
             walk(node, source, range, tokens);
         }
         "interface_declaration" => {
-            push_child_id(node, ty::INTERFACE, tokens);
+            push_child_id(node, source, ty::INTERFACE, tokens);
             walk(node, source, range, tokens);
         }
         "library_declaration" => {
-            push_child_id(node, ty::NAMESPACE, tokens);
+            push_child_id(node, source, ty::NAMESPACE, tokens);
             walk(node, source, range, tokens);
         }
         "struct_definition" | "struct_declaration" => {
-            push_child_id(node, ty::STRUCT, tokens);
+            push_child_id(node, source, ty::STRUCT, tokens);
             walk(node, source, range, tokens);
         }
         "enum_definition" | "enum_declaration" => {
-            push_child_id(node, ty::ENUM, tokens);
+            push_child_id(node, source, ty::ENUM, tokens);
             walk(node, source, range, tokens);
         }
-        "enum_value" => push(node, ty::ENUM_MEMBER, tokens),
-        "type_alias" => {
-            push_child_id(node, ty::TYPE, tokens);
+        "enum_value" => push(node, source, ty::ENUM_MEMBER, tokens),
+        "type_alias" | "user_defined_type_definition" => {
+            push_child_id(node, source, ty::TYPE, tokens);
             walk(node, source, range, tokens);
         }
         "event_definition" => {
-            push_child_id(node, ty::EVENT, tokens);
+            push_child_id(node, source, ty::EVENT, tokens);
             walk(node, source, range, tokens);
         }
         "error_declaration" => {
-            push_child_id(node, ty::TYPE, tokens);
+            push_child_id(node, source, ty::TYPE, tokens);
             walk(node, source, range, tokens);
         }
         "function_definition" => {
-            push_child_id(node, ty::FUNCTION, tokens);
+            push_child_id(node, source, ty::FUNCTION, tokens);
             walk(node, source, range, tokens);
         }
         "state_variable_declaration" => {
-            push_child_id(node, ty::PROPERTY, tokens);
+            push_child_id(node, source, ty::PROPERTY, tokens);
             walk(node, source, range, tokens);
         }
 
         // Parameters
         "parameter" | "event_parameter" | "error_parameter" => {
-            push_child_id(node, ty::PARAMETER, tokens);
+            push_child_id(node, source, ty::PARAMETER, tokens);
             walk(node, source, range, tokens);
         }
 
         // Inheritance
         "inheritance_specifier" => {
-            push_child_id(node, ty::INTERFACE, tokens);
+            push_child_id(node, source, ty::INTERFACE, tokens);
             walk(node, source, range, tokens);
         }
 
         // Type references
-        "user_defined_type" => push(node, ty::TYPE, tokens),
+        "user_defined_type" => push(node, source, ty::TYPE, tokens),
 
         // Identifiers — only emit where LSP adds value over tree-sitter
         "identifier" => {
             if let Some(tt) = classify_id(node) {
-                push(node, tt, tokens);
+                push(node, source, tt, tokens);
             }
         }
 
         // Visibility / state mutability
-        "visibility" | "state_mutability" => push(node, ty::KEYWORD, tokens),
+        "visibility" | "state_mutability" => push(node, source, ty::KEYWORD, tokens),
 
         // Let tree-sitter handle: pragmas, builtins, modifiers, members, variables
         "pragma_directive" | "solidity_pragma_token" | "solidity_version" => {}
@@ -387,14 +404,19 @@ fn walk(node: Node, source: &str, range: Option<LineRange>, tokens: &mut Vec<Raw
     }
 }
 
-fn push(node: Node, token_type: u32, tokens: &mut Vec<RawToken>) {
-    let start = node.start_position();
+fn push(node: Node, source: &str, token_type: u32, tokens: &mut Vec<RawToken>) {
+    // A token may not span lines; error recovery can produce nodes that do.
+    if node.start_position().row != node.end_position().row {
+        push_multiline(node, source, token_type, tokens);
+        return;
+    }
     let len = node.end_byte() - node.start_byte();
     if len > 0 {
         tokens.push(RawToken {
-            line: start.row as u32,
-            col: start.column as u32,
-            length: len as u32,
+            line: node.start_position().row as u32,
+            byte_col: node.start_position().column,
+            start_byte: node.start_byte(),
+            byte_len: len,
             token_type,
         });
     }
@@ -403,7 +425,8 @@ fn push(node: Node, token_type: u32, tokens: &mut Vec<RawToken>) {
 fn push_multiline(node: Node, source: &str, token_type: u32, tokens: &mut Vec<RawToken>) {
     let text = &source[node.byte_range()];
     let start_line = node.start_position().row as u32;
-    let start_col = node.start_position().column as u32;
+    let start_col = node.start_position().column;
+    let mut line_byte = node.start_byte();
 
     for (i, line) in text.split('\n').enumerate() {
         let col = if i == 0 { start_col } else { 0 };
@@ -416,19 +439,21 @@ fn push_multiline(node: Node, source: &str, token_type: u32, tokens: &mut Vec<Ra
         if len > 0 {
             tokens.push(RawToken {
                 line: start_line + i as u32,
-                col: col + ws as u32,
-                length: len as u32,
+                byte_col: col + ws,
+                start_byte: line_byte + ws,
+                byte_len: len,
                 token_type,
             });
         }
+        line_byte += line.len() + 1;
     }
 }
 
-fn push_child_id(node: Node, token_type: u32, tokens: &mut Vec<RawToken>) {
+fn push_child_id(node: Node, source: &str, token_type: u32, tokens: &mut Vec<RawToken>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "identifier" && child.is_named() {
-            push(child, token_type, tokens);
+            push(child, source, token_type, tokens);
             return;
         }
     }
@@ -439,6 +464,153 @@ fn push_child_id(node: Node, token_type: u32, tokens: &mut Vec<RawToken>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decode to `(line, column, text, type)` for readable assertions.
+    fn decoded(source: &str) -> Vec<(u32, u32, String, u32)> {
+        let lines: Vec<&str> = source.split('\n').collect();
+        let (mut line, mut col) = (0, 0);
+        semantic_tokens_full_with(source, PositionEncoding::Utf8)
+            .data
+            .iter()
+            .map(|t| {
+                if t.delta_line > 0 {
+                    line += t.delta_line;
+                    col = t.delta_start;
+                } else {
+                    col += t.delta_start;
+                }
+                let end = (col + t.length) as usize;
+                let text = lines[line as usize][col as usize..end].to_string();
+                (line, col, text, t.token_type)
+            })
+            .collect()
+    }
+
+    fn has_token(source: &str, text: &str, token_type: u32) -> bool {
+        decoded(source)
+            .iter()
+            .any(|(_, _, t, k)| t == text && *k == token_type)
+    }
+
+    #[test]
+    fn test_legend_matches_token_type_indices() {
+        let legend = legend();
+        let name = |index: u32| legend.token_types[index as usize].as_str();
+        assert_eq!(name(ty::NAMESPACE), "namespace");
+        assert_eq!(name(ty::CLASS), "class");
+        assert_eq!(name(ty::INTERFACE), "interface");
+        assert_eq!(name(ty::STRUCT), "struct");
+        assert_eq!(name(ty::ENUM), "enum");
+        assert_eq!(name(ty::ENUM_MEMBER), "enumMember");
+        assert_eq!(name(ty::TYPE), "type");
+        assert_eq!(name(ty::EVENT), "event");
+        assert_eq!(name(ty::FUNCTION), "function");
+        assert_eq!(name(ty::PROPERTY), "property");
+        assert_eq!(name(ty::PARAMETER), "parameter");
+        assert_eq!(name(ty::KEYWORD), "keyword");
+        assert_eq!(name(ty::COMMENT), "comment");
+        assert_eq!(name(ty::STRING), "string");
+        assert_eq!(name(ty::NUMBER), "number");
+    }
+
+    #[test]
+    fn test_every_construct_gets_its_token_type() {
+        let source = r#"// note
+interface IThing { function act() external; }
+library Lib { function help() internal {} }
+struct Point { uint256 x; }
+enum Color { Red }
+type Price is uint256;
+contract Base {}
+contract Child is Base {
+    event Moved(uint256 amount);
+    uint256 public total;
+    string label = "hi";
+    Point spot;
+    function run(uint256 amount) public view returns (bool) {
+        return true && amount > 7;
+    }
+}
+"#;
+        let cases = [
+            ("// note", ty::COMMENT),
+            ("IThing", ty::INTERFACE),
+            ("Lib", ty::NAMESPACE),
+            ("Point", ty::STRUCT),
+            ("Color", ty::ENUM),
+            ("Red", ty::ENUM_MEMBER),
+            ("Price", ty::TYPE),
+            ("Child", ty::CLASS),
+            ("Moved", ty::EVENT),
+            ("total", ty::PROPERTY),
+            ("run", ty::FUNCTION),
+            ("amount", ty::PARAMETER),
+            ("\"hi\"", ty::STRING),
+            ("7", ty::NUMBER),
+            ("true", ty::KEYWORD),
+            ("public", ty::KEYWORD),
+            ("view", ty::KEYWORD),
+            (">", ty::OPERATOR),
+        ];
+        for (text, token_type) in cases {
+            assert!(
+                has_token(source, text, token_type),
+                "expected {text:?} as type {token_type}: {:?}",
+                decoded(source)
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiline_comment_splits_per_line_without_indentation() {
+        let tokens = decoded("/* one\n   two\n\n   */ contract C {}");
+        let comments: Vec<_> = tokens.iter().filter(|t| t.3 == ty::COMMENT).collect();
+        assert_eq!(comments[0].0, 0);
+        assert_eq!(comments[0].2, "/* one");
+        assert_eq!((comments[1].0, comments[1].1), (1, 3));
+        assert_eq!(comments[1].2, "two");
+        assert_eq!((comments[2].0, comments[2].1), (3, 3));
+        assert_eq!(comments[2].2, "*/");
+        assert_eq!(comments.len(), 3);
+    }
+
+    #[test]
+    fn test_lengths_and_columns_use_the_encoding() {
+        let source = "/* é😀 */ contract C {}";
+        let tokens = |encoding| semantic_tokens_full_with(source, encoding).data;
+        let (utf16, utf8) = (
+            tokens(PositionEncoding::Utf16),
+            tokens(PositionEncoding::Utf8),
+        );
+        // `/* é😀 */` is 9 UTF-16 units and 12 bytes.
+        assert_eq!(utf16[0].length, 9);
+        assert_eq!(utf8[0].length, 12);
+        // The `contract` keyword starts one past the comment in either unit.
+        assert_eq!(utf16[1].delta_start, 10);
+        assert_eq!(utf8[1].delta_start, 13);
+    }
+
+    #[test]
+    fn test_range_keeps_only_overlapping_lines() {
+        let source = "contract A {}\ncontract B {}\ncontract C {}\n";
+        let tokens = semantic_tokens_range(source, 1, 1).data;
+        assert_eq!(tokens[0].delta_line, 1);
+        assert!(tokens.iter().skip(1).all(|t| t.delta_line == 0));
+    }
+
+    #[test]
+    fn test_delta_of_change_at_both_ends_keeps_nothing_shared() {
+        let token = |n| SemanticToken {
+            delta_line: n,
+            delta_start: 0,
+            length: 1,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        };
+        let edits = compute_delta(&[token(1), token(2)], &[token(3), token(4), token(5)]);
+        assert_eq!((edits[0].start, edits[0].delete_count), (0, 10));
+        assert_eq!(edits[0].data.as_ref().unwrap().len(), 3);
+    }
 
     #[test]
     fn test_empty_source() {

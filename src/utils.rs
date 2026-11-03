@@ -1,4 +1,3 @@
-use lintspec_core::textindex::{TextIndex, compute_indices};
 use serde_json::Value;
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::{Position, PositionEncodingKind};
@@ -64,6 +63,14 @@ impl From<PositionEncoding> for PositionEncodingKind {
 // Byte-offset to LSP Position conversion
 // ---------------------------------------------------------------------------
 
+/// Length of `text` in the column unit of `encoding`.
+pub fn encoded_len(text: &str, encoding: PositionEncoding) -> u32 {
+    match encoding {
+        PositionEncoding::Utf8 => text.len() as u32,
+        PositionEncoding::Utf16 => text.encode_utf16().count() as u32,
+    }
+}
+
 /// Convert a tree-sitter node boundary into a [`Position`], without rescanning
 /// the file.
 ///
@@ -73,10 +80,8 @@ impl From<PositionEncoding> for PositionEncodingKind {
 /// start of that row, so the line begins at `byte_offset - byte_column` and only
 /// that prefix has to be measured.
 ///
-/// Taking `row` from tree-sitter also keeps the result in the same line model as
-/// the tree being walked; `TextIndex` treats U+2028/U+2029 as line terminators
-/// and tree-sitter does not, so deriving the row here instead would put symbols
-/// on a different line than the node they came from.
+/// `row` stays in tree-sitter's line model, which only breaks on `\n`. That
+/// matches [`byte_offset_to_position`] except in files with a bare `\r`.
 pub fn byte_column_to_position(
     source: &str,
     row: usize,
@@ -97,100 +102,100 @@ pub fn byte_column_to_position(
     Position::new(row as u32, column)
 }
 
+/// Whether the byte at `index` ends a line. A `\r` followed by `\n` does not:
+/// the pair ends at the `\n`. LSP line endings are `\n`, `\r\n` and `\r` only,
+/// so U+2028 and U+2029 are ordinary characters here.
+fn ends_line(bytes: &[u8], index: usize) -> bool {
+    match bytes[index] {
+        b'\n' => true,
+        b'\r' => bytes.get(index + 1) != Some(&b'\n'),
+        _ => false,
+    }
+}
+
 /// Convert a byte offset in `source` to a [`Position`] whose column unit depends
 /// on the negotiated [`PositionEncoding`].
 pub fn byte_offset_to_position(source: &str, byte_offset: usize) -> Position {
-    if source.is_empty() {
-        return Position::new(0, 0);
+    byte_offset_to_position_with(source, byte_offset, encoding())
+}
+
+/// [`byte_offset_to_position`] with an explicit encoding.
+///
+/// Offsets past the end clamp to the end, and offsets inside a character clamp
+/// to its start. An offset between `\r` and `\n` reports the end of that line.
+pub fn byte_offset_to_position_with(
+    source: &str,
+    byte_offset: usize,
+    encoding: PositionEncoding,
+) -> Position {
+    let mut offset = byte_offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
     }
 
-    let idx = if byte_offset >= source.len() {
-        // Offset is at or past the end of source — walk the entire string.
-        // `compute_indices` only handles offsets that fall within the source.
-        let mut ti = TextIndex::ZERO;
-        let mut chars = source.chars().peekable();
-        while let Some(c) = chars.next() {
-            ti.advance(c, chars.peek());
-        }
-        ti
+    let bytes = source.as_bytes();
+    let prefix = &bytes[..offset];
+
+    // Counting `\n` first keeps the common case (no `\r`) a single fast pass.
+    let mut line = prefix.iter().filter(|&&b| b == b'\n').count();
+    if prefix.contains(&b'\r') {
+        line += (0..offset)
+            .filter(|&i| bytes[i] == b'\r' && ends_line(bytes, i))
+            .count();
+    }
+    let line_start = (0..offset)
+        .rev()
+        .find(|&i| ends_line(bytes, i))
+        .map_or(0, |i| i + 1);
+
+    let text = &source[line_start..offset];
+    let text = if bytes.get(offset) == Some(&b'\n') {
+        text.strip_suffix('\r').unwrap_or(text)
     } else {
-        // SIMD-accelerated lookup for offsets within the source.
-        let indices = compute_indices(source, &[byte_offset]);
-        match indices.first() {
-            Some(ti) => *ti,
-            None => return Position::new(0, 0),
-        }
+        text
     };
 
-    Position {
-        line: idx.line,
-        character: match encoding() {
-            PositionEncoding::Utf8 => idx.col_utf8,
-            PositionEncoding::Utf16 => idx.col_utf16,
-        },
-    }
+    Position::new(line as u32, encoded_len(text, encoding))
 }
 
 /// Convert an LSP [`Position`] position back to a byte offset, where
 /// `character` is interpreted according to the negotiated [`PositionEncoding`].
-///
-/// Uses a single SIMD-accelerated pass with [`compute_indices`] to build a
-/// coarse index of the file at 128-byte intervals, then does a short linear
-/// walk (at most 128 bytes) with [`TextIndex::advance`] to find the exact
-/// byte offset.
 pub fn position_to_byte_offset(source: &str, pos: Position) -> usize {
-    if source.is_empty() {
-        return 0;
+    position_to_byte_offset_with(source, pos, encoding())
+}
+
+/// [`position_to_byte_offset`] with an explicit encoding.
+///
+/// Per the LSP spec, a column past the end of the line clamps to the end of the
+/// line, before its line ending. A line past the end clamps to the end of the
+/// source. A column inside a UTF-8 or UTF-16 sequence rounds up to the next
+/// character, so the result is always a character boundary.
+pub fn position_to_byte_offset_with(
+    source: &str,
+    pos: Position,
+    encoding: PositionEncoding,
+) -> usize {
+    let bytes = source.as_bytes();
+
+    let mut line_start = 0;
+    for _ in 0..pos.line {
+        match (line_start..bytes.len()).find(|&i| ends_line(bytes, i)) {
+            Some(end) => line_start = end + 1,
+            None => return source.len(),
+        }
     }
 
-    let enc = encoding();
-
-    // 1. Build chunk offsets at 128-byte intervals across the source.
-    let chunk_offsets: Vec<usize> = (0..source.len()).step_by(128).collect();
-
-    // 2. Single SIMD-accelerated pass — compute TextIndex for every chunk.
-    let chunk_indices = compute_indices(source, &chunk_offsets);
-
-    // 3. Find the last chunk that is still at or before the target position.
-    //    Multiple chunks can fall on the same line, so we must also check
-    //    the column to avoid starting past the target.
-    let start = chunk_indices
-        .iter()
-        .take_while(|ti| {
-            if ti.line < pos.line {
-                return true;
-            }
-            if ti.line == pos.line {
-                let col = match enc {
-                    PositionEncoding::Utf8 => ti.col_utf8,
-                    PositionEncoding::Utf16 => ti.col_utf16,
-                };
-                return col <= pos.character;
-            }
-            false
-        })
-        .last()
-        .copied()
-        .unwrap_or(TextIndex::ZERO);
-
-    // 4. Linear walk from `start` (at most ~128 bytes) to the exact position.
-    let mut idx = start;
-    let mut chars = source[idx.utf8..].chars().peekable();
-
-    while let Some(c) = chars.next() {
-        let col = match enc {
-            PositionEncoding::Utf8 => idx.col_utf8,
-            PositionEncoding::Utf16 => idx.col_utf16,
+    let mut column = 0;
+    for (index, c) in source[line_start..].char_indices() {
+        if column >= pos.character || matches!(c, '\n' | '\r') {
+            return line_start + index;
+        }
+        column += match encoding {
+            PositionEncoding::Utf8 => c.len_utf8() as u32,
+            PositionEncoding::Utf16 => c.len_utf16() as u32,
         };
-        if idx.line >= pos.line && col >= pos.character {
-            return idx.utf8;
-        }
-        if idx.line == pos.line && c == '\n' {
-            return idx.utf8; // clamp to end of line
-        }
-        idx.advance(c, chars.peek());
     }
-    source.len() // position past end of source
+    source.len()
 }
 
 // ---------------------------------------------------------------------------

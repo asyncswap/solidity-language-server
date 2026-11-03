@@ -1,5 +1,6 @@
 mmsaki:
   cmd: ./target/release/solidity-language-server
+  args: ["--stdio", "--check-invariants"]
   link: https://github.com/asyncswap/solidity-language-server
   versions:
     latest:
