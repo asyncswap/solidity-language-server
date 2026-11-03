@@ -21,19 +21,44 @@ benchmarks:
   - workspace/willCreateFiles
   - workspace/willDeleteFiles
   - workspace/willRenameFiles
+  - textDocument/documentSymbol
 
 methods:
+  # Scaffolding is delivered as an outbound workspace/applyEdit, so the
+  # willCreateFiles response itself is null — nothing to assert here beyond
+  # the request completing.
   workspace/willCreateFiles:
     createFiles:
       - file: CIFileOpsCreate.sol
 
+  # Nothing in example/ imports B.sol, so a correct server returns no edits.
   workspace/willDeleteFiles:
     deleteFiles:
       - file: B.sol
 
+  # A.sol is imported by Alias.sol, B.sol, Shop.sol and StringCompletions.sol,
+  # and the round-trip exercises the re-index between the two renames.
+  #
+  # No `expect:` here on purpose. lsp-bench 0.3.3 ignores per-step `expect`
+  # blocks inside `renameFiles`, and a method-level `minCount` counts array
+  # items, which a WorkspaceEdit response is not — it fails with
+  # "expected >= 4 but got 0". So these three steps drive the lifecycle; the
+  # documentSymbol expectation below is the part --verify evaluates.
+  #
+  # What none of it catches: a server that fails to start. lsp-bench reports
+  # "verify 0/0 expectations passed" and exits 0 when nothing answered, so
+  # liveness is checked in the workflow instead, before these steps run.
   workspace/willRenameFiles:
     renameFiles:
       - file: A.sol
         newName: AA.sol
       - file: AA.sol
         newName: A.sol
+
+  # The one assertion --verify actually evaluates here. documentSymbol returns
+  # an array, so `minCount` applies; A.sol holds a contract plus its members.
+  # This runs after the rename round-trip has restored A.sol, so it also
+  # catches a lifecycle that corrupted the file it was supposed to put back.
+  textDocument/documentSymbol:
+    expect:
+      minCount: 2

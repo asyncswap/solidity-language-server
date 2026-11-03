@@ -1,5 +1,12 @@
 # PoolManager.t.sol — diagnostics-only benchmark
 #   lsp-bench -c benchmarks/poolmanager-t-diag.yaml
+#
+# WARNING: under lsp-bench 0.3.3 the captured `response` for
+# textDocument/diagnostic is the first inbound notification — typically
+# `{"message": "lsp server initialized.", "type": 3}` — rather than the
+# publishDiagnostics payload that 0.2.7 recorded. Timings are still valid;
+# the recorded response is not, so do not publish a diagnostics report from
+# this config until lsp-bench waits for textDocument/publishDiagnostics.
 
 project: v4-core
 file: test/PoolManager.t.sol
