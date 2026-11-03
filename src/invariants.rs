@@ -16,6 +16,7 @@ use crate::utils::{self, PositionEncoding};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -540,7 +541,10 @@ where
                 .map(|v| format!("{}: {}", v.rule, v.detail))
                 .collect::<Vec<_>>()
                 .join("; ");
-            eprintln!("[invariant] {method} {uri:?}: {message}");
+            // One write, so editors that log stderr by chunk keep it on one line.
+            let target = uri.as_deref().unwrap_or("no document");
+            let report = format!("[invariant] {method} {target}: {message}\n");
+            let _ = std::io::stderr().write_all(report.as_bytes());
             Ok(Some(Response::from_error(
                 response.id().clone(),
                 Error {
