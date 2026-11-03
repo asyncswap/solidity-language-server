@@ -85,6 +85,47 @@ async fn check_for_updates(client: Client) {
 /// A per-file completion cache and the buffer text it was compiled from.
 type CompletionSourceText = (Arc<completion::CompletionCache>, Arc<str>);
 
+/// URIs whose `on_change` build is still running.  Waiters hold a receiver
+/// whose `changed()` resolves (with `Err`) once the sender is dropped.
+type InFlightBuilds = Arc<std::sync::Mutex<HashMap<DocumentUri, tokio::sync::watch::Receiver<()>>>>;
+
+/// How long a request waits for an in-flight file build before giving up.
+const IN_FLIGHT_BUILD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Marks a URI as having a build in flight.  Dropping the guard wakes every
+/// waiter and removes the entry (unless a newer build has replaced it).
+struct InFlightBuildGuard {
+    map: InFlightBuilds,
+    uri: DocumentUri,
+    rx: tokio::sync::watch::Receiver<()>,
+    _tx: tokio::sync::watch::Sender<()>,
+}
+
+impl InFlightBuildGuard {
+    fn begin(map: &InFlightBuilds, uri: DocumentUri) -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(());
+        if let Ok(mut m) = map.lock() {
+            m.insert(uri.clone(), rx.clone());
+        }
+        Self {
+            map: map.clone(),
+            uri,
+            rx,
+            _tx: tx,
+        }
+    }
+}
+
+impl Drop for InFlightBuildGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.map.lock()
+            && m.get(&self.uri).is_some_and(|rx| rx.same_channel(&self.rx))
+        {
+            m.remove(&self.uri);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ForgeLsp {
     client: Client,
@@ -154,6 +195,10 @@ pub struct ForgeLsp {
     did_save_workers: Arc<
         RwLock<HashMap<DocumentUri, tokio::sync::watch::Sender<Option<DidSaveTextDocumentParams>>>>,
     >,
+    /// File builds started by `on_change` that haven't populated `ast_cache`
+    /// yet.  Requests arriving mid-build wait on these instead of returning
+    /// an empty result.
+    in_flight_builds: InFlightBuilds,
     /// JSON-driven code-action database loaded once at startup.
     code_action_db: Arc<HashMap<ErrorCode, crate::code_actions::CodeActionDef>>,
     /// Cached builds loaded from sub-project (lib) caches.
@@ -439,6 +484,7 @@ impl ForgeLsp {
             pending_create_scaffold: Arc::new(RwLock::new(HashSet::new())),
             settings_from_init: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             did_save_workers: Arc::new(RwLock::new(HashMap::new())),
+            in_flight_builds: Arc::new(std::sync::Mutex::new(HashMap::new())),
             code_action_db: Arc::new(crate::code_actions::load()),
             sub_caches: Arc::new(RwLock::new(Vec::new())),
             sub_caches_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -778,6 +824,8 @@ impl ForgeLsp {
             }
         };
 
+        let build_guard = InFlightBuildGuard::begin(&self.in_flight_builds, uri.to_string().into());
+
         // Clear stale diagnostics immediately so the user sees instant feedback
         // while solc is compiling.  Fresh diagnostics (if any) are published
         // below once the build finishes.
@@ -1002,6 +1050,9 @@ impl ForgeLsp {
             };
             self.client.log_message(MessageType::INFO, reason).await;
         }
+
+        // ast_cache is settled for this build — release waiting requests.
+        drop(build_guard);
 
         // cache text — only if no newer version exists (e.g. from formatting/did_change)
         {
@@ -1379,6 +1430,31 @@ impl ForgeLsp {
         // Return cached entry if it exists (stale or not — stale entries are
         // still usable, positions may be slightly off like goto-definition).
         {
+            let cache = self.ast_cache.read().await;
+            if let Some(cached) = cache.get(&uri_str) {
+                return Some(cached.clone());
+            }
+        }
+
+        // Cache miss while didOpen/didChange is still compiling this file —
+        // wait for that build rather than answering with nothing.
+        let in_flight = self
+            .in_flight_builds
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&uri_str).cloned());
+        if let Some(mut rx) = in_flight {
+            if tokio::time::timeout(IN_FLIGHT_BUILD_WAIT, rx.changed())
+                .await
+                .is_err()
+            {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("timed out waiting for in-flight build of {uri_str}"),
+                    )
+                    .await;
+            }
             let cache = self.ast_cache.read().await;
             if let Some(cached) = cache.get(&uri_str) {
                 return Some(cached.clone());
@@ -3832,10 +3908,19 @@ impl LanguageServer for ForgeLsp {
         };
 
         // Clone URI-specific cache (pointer copy, instant) and drop the lock immediately.
-        let local_cached: Option<Arc<completion::CompletionCache>> = {
+        let mut local_cached: Option<Arc<completion::CompletionCache>> = {
             let comp_cache = self.completion_cache.read().await;
             comp_cache.get(&uri.to_string()).cloned()
         };
+
+        // No per-file cache yet — if didOpen is still compiling this file,
+        // wait for it (get_or_fetch_build blocks on in-flight builds).
+        if local_cached.is_none()
+            && let Ok(path) = uri.to_file_path()
+            && let Some(build) = self.get_or_fetch_build(&uri, &path, false).await
+        {
+            local_cached = Some(build.completion_cache.clone());
+        }
 
         // Project-wide cache for global top-level symbol tail candidates.
         let root_cached: Option<Arc<completion::CompletionCache>> = {
