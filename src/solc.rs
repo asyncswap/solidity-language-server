@@ -643,16 +643,32 @@ pub fn build_standard_json_input(
 }
 
 /// Run `solc --standard-json` and return the parsed output.
+///
+/// solc only reads files under the project root unless told otherwise, and it
+/// checks the symlink-resolved path. Like `forge build`, also allow `libs` and
+/// `allow_paths`, so imports that live outside the root (pnpm's hoisted
+/// `node_modules`, a monorepo's shared `lib/`) still resolve.
 pub async fn run_solc(
     solc_binary: &Path,
     input: &Value,
-    project_root: &Path,
+    config: &FoundryConfig,
 ) -> Result<Value, RunnerError> {
+    let project_root = config.root.as_path();
     let _ = crate::project_cache::save_last_solc_input(project_root, input);
     let input_str = serde_json::to_string(input)?;
 
-    let mut child = Command::new(solc_binary)
-        .arg("--standard-json")
+    let allow_paths: Vec<&str> = config
+        .libs
+        .iter()
+        .chain(&config.allow_paths)
+        .map(String::as_str)
+        .collect();
+    let mut cmd = Command::new(solc_binary);
+    cmd.arg("--standard-json");
+    if !allow_paths.is_empty() {
+        cmd.arg("--allow-paths").arg(allow_paths.join(","));
+    }
+    let mut child = cmd
         .current_dir(project_root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -925,7 +941,7 @@ pub async fn solc_ast(
         .unwrap_or_else(|_| file_path.to_string());
 
     let input = build_standard_json_input(&rel_path, &remappings, config, source_content);
-    let raw_output = run_solc(&solc_binary, &input, &config.root).await?;
+    let raw_output = run_solc(&solc_binary, &input, config).await?;
 
     Ok(normalize_solc_output(raw_output, Some(&config.root)))
 }
@@ -1437,7 +1453,7 @@ async fn solc_project_index_from_files_ast_only(
     } else {
         let input =
             build_batch_standard_json_input_ast_only(&compatible_files, &remappings, &config.root);
-        let raw = run_solc(&solc_binary, &input, &config.root).await?;
+        let raw = run_solc(&solc_binary, &input, config).await?;
         normalize_solc_output(raw, Some(&config.root))
     };
 
@@ -1456,7 +1472,7 @@ async fn solc_project_index_from_files_ast_only(
             &remappings,
             &config.root,
         );
-        if let Ok(raw) = run_solc(&file_binary, &input, &config.root).await {
+        if let Ok(raw) = run_solc(&file_binary, &input, config).await {
             let normalized = normalize_solc_output(raw, Some(&config.root));
             merge_normalized_outputs(&mut result, normalized);
         }
@@ -1745,7 +1761,7 @@ async fn solc_project_index_from_files(
             config,
             text_cache,
         );
-        let raw = run_solc(&solc_binary, &input, &config.root).await?;
+        let raw = run_solc(&solc_binary, &input, config).await?;
         normalize_solc_output(raw, Some(&config.root))
     };
 
@@ -1816,7 +1832,7 @@ async fn solc_project_index_from_files(
             config,
             text_cache,
         );
-        match run_solc(&file_binary, &input, &config.root).await {
+        match run_solc(&file_binary, &input, config).await {
             Ok(raw) => {
                 let normalized = normalize_solc_output(raw, Some(&config.root));
                 merge_normalized_outputs(&mut result, normalized);
@@ -2077,6 +2093,65 @@ mod tests {
         assert_eq!(
             settings.get("evmVersion").unwrap().as_str().unwrap(),
             "osaka"
+        );
+    }
+
+    /// pnpm links a package's `node_modules/<dep>` to the workspace root's
+    /// `node_modules/.pnpm`, outside the project root. solc rejects that import
+    /// unless the target directory is passed through `--allow-paths`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_solc_ast_allow_paths_reach_symlinked_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("node_modules/.pnpm/dep/lib");
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::create_dir_all(pkg.join("node_modules/@dep")).unwrap();
+        std::os::unix::fs::symlink(&store, pkg.join("node_modules/@dep/lib")).unwrap();
+        std::fs::write(
+            store.join("Lib.sol"),
+            "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\nlibrary Lib {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("src/A.sol"),
+            "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\nimport {Lib} from \"@dep/lib/Lib.sol\";\ncontract A {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("foundry.toml"),
+            "[profile.default]\nremappings = [\"@dep/=node_modules/@dep/\"]\nallow_paths = [\"../node_modules\"]\n",
+        )
+        .unwrap();
+
+        let file = pkg.join("src/A.sol");
+        let errors = |output: &Value| -> Vec<String> {
+            output["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| e["severity"] == "error")
+                .map(|e| e["message"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+
+        let mut config = crate::config::load_foundry_config_from_toml(&pkg.join("foundry.toml"));
+        let output = solc_ast(file.to_str().unwrap(), &config, None, None)
+            .await
+            .unwrap();
+        assert!(errors(&output).is_empty(), "{:?}", errors(&output));
+
+        config.allow_paths.clear();
+        let output = solc_ast(file.to_str().unwrap(), &config, None, None)
+            .await
+            .unwrap();
+        assert!(
+            errors(&output)
+                .iter()
+                .any(|m| m.contains("outside of allowed directories")),
+            "{:?}",
+            errors(&output)
         );
     }
 

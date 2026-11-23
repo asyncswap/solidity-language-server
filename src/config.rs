@@ -243,6 +243,9 @@ pub struct FoundryConfig {
     /// Library directories to exclude from project-wide indexing.
     /// Parsed from `libs = ["lib"]` in foundry.toml (default: `["lib"]`).
     pub libs: Vec<String>,
+    /// Extra directories solc may read imports from, parsed from
+    /// `allow_paths = ["../node_modules"]` in foundry.toml (default: empty).
+    pub allow_paths: Vec<String>,
 }
 
 impl Default for FoundryConfig {
@@ -260,6 +263,7 @@ impl Default for FoundryConfig {
             test_dir: "test".to_string(),
             script_dir: "script".to_string(),
             libs: vec!["lib".to_string()],
+            allow_paths: Vec::new(),
         }
     }
 }
@@ -396,6 +400,17 @@ fn load_foundry_config_from_toml_with_profile_name(
         })
         .unwrap_or_else(|| vec!["lib".to_string()]);
 
+    // Parse allow_paths: `allow_paths = ["../node_modules"]` (default: [])
+    let allow_paths = get_profile_value(active_profile, default_profile, "allow_paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Parse ignored_error_codes: `ignored_error_codes = [2394, 6321, 3860, 5574]`
     let ignored_error_codes =
         get_profile_value(active_profile, default_profile, "ignored_error_codes")
@@ -421,6 +436,7 @@ fn load_foundry_config_from_toml_with_profile_name(
         test_dir,
         script_dir,
         libs,
+        allow_paths,
     }
 }
 
@@ -932,6 +948,26 @@ libs = ["lib", "node_modules", "dependencies"]
                 "node_modules".to_string(),
                 "dependencies".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_load_foundry_config_allow_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("foundry.toml");
+        fs::write(
+            &toml_path,
+            r#"
+[profile.default]
+allow_paths = ["../../node_modules", "../sdk"]
+"#,
+        )
+        .unwrap();
+
+        let config = load_foundry_config_from_toml(&toml_path);
+        assert_eq!(
+            config.allow_paths,
+            vec!["../../node_modules".to_string(), "../sdk".to_string()]
         );
     }
 

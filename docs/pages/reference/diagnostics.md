@@ -59,6 +59,22 @@ drifts.
   solc reads them from disk itself and `build::cross_file_error_diagnostics()`
   correctly resolves their offsets against disk.
 
+#### Which directories solc may read
+
+solc runs from the project root and only reads files under it, checking the
+symlink-resolved path. `run_solc()` passes `--allow-paths` with the
+`foundry.toml` `libs` and `allow_paths` entries, the same directories
+`forge build` allows. Without that, imports that resolve outside the root fail
+with `File outside of allowed directories`: a `libs` entry like `../../lib` in
+a monorepo, or a pnpm workspace package whose `node_modules/<dep>` links into
+the workspace root's `node_modules/.pnpm`. For pnpm, add the root's
+`node_modules` to `allow_paths`:
+
+```toml
+[profile.default]
+allow_paths = ["../../node_modules"]
+```
+
 ### Source 2: forge lint
 
 Lint diagnostics come from `forge lint --json`.
